@@ -26,8 +26,8 @@ python3 --version
 # 📥 1️⃣ Clonar el repositorio
 
 ```
-git clone https://github.com/TU_USUARIO/TU_REPO.git
-cd TU_REPO
+git clone https://github.com/Eldur4023/Localify.git
+cd Localify
 ```
 
 ---
