@@ -1,0 +1,19 @@
+# ─── Credenciales ─────────────────────────────
+spotify_keys.txt
+cookies.txt
+
+# ─── Entorno virtual ──────────────────────────
+venv/
+.env/
+__pycache__/
+
+# ─── Descargas generadas ──────────────────────
+descargas/
+*.zip
+
+# ─── Sistema ──────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── IDE ─────────────────────────────────────
+.vscode/

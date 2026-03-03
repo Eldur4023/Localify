@@ -12,9 +12,6 @@ python -m pip install --upgrade pip
 echo Instalando dependencias...
 pip install -r requirements.txt
 
-echo.
-echo Listo. Para arrancar:
-echo venv\Scripts\activate
-echo uvicorn back:app --reload --port 8000
+uvicorn back:app --reload --port 8000
 
 pause

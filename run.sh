@@ -14,6 +14,4 @@ pip install --upgrade pip
 echo "Instalando dependencias..."
 pip install -r requirements.txt
 
-echo "Listo. Para arrancar:"
-echo "source venv/bin/activate"
-echo "uvicorn back:app --reload --port 8000"
+uvicorn back:app --reload --port 8000
