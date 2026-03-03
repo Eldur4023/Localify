@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pepe Downloader</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --surface: #111;
+    --border: #222;
+    --accent: #c8f135;
+    --accent2: #ff4d6d;
+    --text: #f0f0f0;
+    --muted: #555;
+    --radius: 4px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Syne', sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2rem 1rem 4rem;
+  }
+
+  /* noise overlay */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .container {
+    width: 100%;
+    max-width: 680px;
+    position: relative;
+    z-index: 1;
+  }
+
+  header {
+    margin-bottom: 3rem;
+    padding-top: 1rem;
+  }
+
+  .logo {
+    font-family: 'Space Mono', monospace;
+    font-size: clamp(1.8rem, 5vw, 2.8rem);
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    line-height: 1;
+  }
+
+  .logo span { color: var(--accent); }
+
+  .tagline {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.7rem;
+    color: var(--muted);
+    margin-top: 0.4rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  /* tabs */
+  .tabs {
+    display: flex;
+    gap: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    margin-bottom: 1.5rem;
+  }
+
+  .tab {
+    flex: 1;
+    padding: 0.75rem 1rem;
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    font-family: 'Space Mono', monospace;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    transition: all 0.15s;
+    border-right: 1px solid var(--border);
+  }
+  .tab:last-child { border-right: none; }
+  .tab.active {
+    background: var(--accent);
+    color: #000;
+    font-weight: 700;
+  }
+  .tab:not(.active):hover { background: var(--surface); color: var(--text); }
+
+  /* panels */
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  /* card */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+  }
+
+  label {
+    display: block;
+    font-family: 'Space Mono', monospace;
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--muted);
+    margin-bottom: 0.5rem;
+  }
+
+  input[type="text"], select {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-family: 'Space Mono', monospace;
+    font-size: 0.85rem;
+    padding: 0.75rem 1rem;
+    outline: none;
+    transition: border-color 0.15s;
+    appearance: none;
+  }
+  input[type="text"]:focus, select:focus { border-color: var(--accent); }
+  input[type="text"]::placeholder { color: var(--muted); }
+
+  .row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-top: 1rem;
+  }
+
+  .field { display: flex; flex-direction: column; }
+
+  .btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.9rem 1.5rem;
+    background: var(--accent);
+    color: #000;
+    border: none;
+    border-radius: var(--radius);
+    font-family: 'Space Mono', monospace;
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    margin-top: 1.25rem;
+    transition: all 0.15s;
+  }
+  .btn:hover { background: #d4ff3d; transform: translateY(-1px); }
+  .btn:active { transform: translateY(0); }
+  .btn:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; transform: none; }
+
+  /* progress */
+  .progress-wrap {
+    margin-top: 1.5rem;
+    display: none;
+  }
+  .progress-wrap.visible { display: block; }
+
+  .progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 0.5rem;
+  }
+
+  .progress-title {
+    font-size: 0.9rem;
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 70%;
+  }
+
+  .progress-count {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--accent);
+  }
+
+  .progress-bar-bg {
+    height: 6px;
+    background: var(--border);
+    border-radius: 99px;
+    overflow: hidden;
+    margin-bottom: 1rem;
+  }
+
+  .progress-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 99px;
+    width: 0%;
+    transition: width 0.3s;
+  }
+
+  /* log */
+  .log {
+    max-height: 220px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.75rem;
+    background: var(--bg);
+  }
+
+  .log-entry {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.7rem;
+    padding: 0.3rem 0;
+    border-bottom: 1px solid #1a1a1a;
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-start;
+  }
+  .log-entry:last-child { border-bottom: none; }
+  .log-entry.ok .icon { color: var(--accent); }
+  .log-entry.fail .icon { color: var(--accent2); }
+  .log-entry .text { color: #aaa; line-height: 1.4; }
+
+  /* download button */
+  .btn-download {
+    background: transparent;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    margin-top: 1rem;
+  }
+  .btn-download:hover { background: var(--accent); color: #000; }
+
+  /* single track result */
+  .track-result {
+    display: none;
+    margin-top: 1rem;
+    padding: 1rem;
+    background: var(--bg);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    font-family: 'Space Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--accent);
+    text-align: center;
+  }
+  .track-result.visible { display: block; }
+  .track-result.error { border-color: var(--accent2); color: var(--accent2); }
+
+  .spinner {
+    display: inline-block;
+    width: 14px; height: 14px;
+    border: 2px solid transparent;
+    border-top-color: currentColor;
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+    vertical-align: middle;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  select option { background: #111; }
+
+  /* scrollbar */
+  .log::-webkit-scrollbar { width: 4px; }
+  .log::-webkit-scrollbar-track { background: transparent; }
+  .log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="logo">Localify</div>
+    <div class="tagline">Spotify → YouTube → tus archivos</div>
+  </header>
+
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('playlist', this)">Playlist</button>
+    <button class="tab" onclick="switchTab('cancion', this)">Canción</button>
+  </div>
+
+  <!-- ── PLAYLIST ── -->
+  <div id="panel-playlist" class="panel active">
+    <div class="card">
+      <div class="field">
+        <label>URL de Spotify</label>
+        <input type="text" id="playlist-url" placeholder="https://open.spotify.com/playlist/..." />
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>Formato</label>
+          <select id="playlist-fmt">
+            <option value="m4a" selected>M4A (recomendado)</option>
+            <option value="mp3">MP3</option>
+            <option value="flac">FLAC</option>
+            <option value="wav">WAV</option>
+            <option value="ogg">OGG</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Descargas paralelas</label>
+          <select id="playlist-workers">
+            <option value="1">1 — seguro</option>
+            <option value="3" selected>3 — recomendado</option>
+            <option value="5">5 — rápido</option>
+          </select>
+        </div>
+      </div>
+      <button class="btn" id="btn-playlist" onclick="iniciarPlaylist()">
+        ↓ Descargar playlist
+      </button>
+    </div>
+
+    <div class="progress-wrap" id="playlist-progress">
+      <div class="progress-header">
+        <div class="progress-title" id="progress-nombre">—</div>
+        <div class="progress-count" id="progress-count">0 / 0</div>
+      </div>
+      <div class="progress-bar-bg">
+        <div class="progress-bar-fill" id="progress-bar"></div>
+      </div>
+      <div class="log" id="progress-log"></div>
+      <button class="btn btn-download" id="btn-zip" style="display:none" onclick="descargarZip()">
+        ↓ Descargar ZIP
+      </button>
+    </div>
+  </div>
+
+  <!-- ── CANCIÓN ── -->
+  <div id="panel-cancion" class="panel">
+    <div class="card">
+      <div class="field">
+        <label>URL de canción de Spotify</label>
+        <input type="text" id="cancion-query" placeholder="https://open.spotify.com/track/..." />
+      </div>
+      <div class="field" style="margin-top:1rem">
+        <label>Formato</label>
+        <select id="cancion-fmt">
+          <option value="m4a" selected>M4A (recomendado)</option>
+          <option value="mp3">MP3</option>
+          <option value="flac">FLAC</option>
+          <option value="wav">WAV</option>
+          <option value="ogg">OGG</option>
+        </select>
+      </div>
+      <button class="btn" id="btn-cancion" onclick="descargarCancion()">
+        ↓ Descargar canción
+      </button>
+    </div>
+    <div class="track-result" id="track-result"></div>
+  </div>
+</div>
+
+<script>
+// ── TAB SWITCH ────────────────────────────────────────────────────────────────
+function switchTab(name, el) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('panel-' + name).classList.add('active');
+}
+
+// ── PLAYLIST ──────────────────────────────────────────────────────────────────
+let currentJobId = null;
+let pollInterval = null;
+
+async function iniciarPlaylist() {
+  const url     = document.getElementById('playlist-url').value.trim();
+  const formato = document.getElementById('playlist-fmt').value;
+  const workers = parseInt(document.getElementById('playlist-workers').value);
+  const btn     = document.getElementById('btn-playlist');
+
+  if (!url) { alert('Pega una URL de Spotify'); return; }
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Obteniendo playlist...';
+  document.getElementById('btn-zip').style.display = 'none';
+  document.getElementById('progress-log').innerHTML = '';
+  document.getElementById('progress-bar').style.width = '0%';
+
+  try {
+    const res = await fetch('/api/playlist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, formato, workers }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || 'Error desconocido');
+    }
+    const data = await res.json();
+    currentJobId = data.job_id;
+
+    document.getElementById('progress-nombre').textContent = data.nombre;
+    document.getElementById('progress-count').textContent = `0 / ${data.total}`;
+    document.getElementById('playlist-progress').classList.add('visible');
+    btn.innerHTML = '<span class="spinner"></span> Descargando...';
+
+    pollInterval = setInterval(actualizarProgreso, 1200);
+  } catch (e) {
+    alert('Error: ' + e.message);
+    btn.disabled = false;
+    btn.innerHTML = '↓ Descargar playlist';
+  }
+}
+
+let logRendered = 0;
+
+async function actualizarProgreso() {
+  if (!currentJobId) return;
+  try {
+    const res  = await fetch(`/api/progreso/${currentJobId}`);
+    const data = await res.json();
+    const pct  = data.total > 0 ? Math.round(((data.done + data.failed) / data.total) * 100) : 0;
+
+    document.getElementById('progress-bar').style.width = pct + '%';
+    document.getElementById('progress-count').textContent =
+      `${data.done + data.failed} / ${data.total}`;
+
+    // añadir nuevas entradas al log
+    const logEl = document.getElementById('progress-log');
+    for (let i = logRendered; i < data.log.length; i++) {
+      const entry = data.log[i];
+      const div = document.createElement('div');
+      div.className = 'log-entry ' + (entry.ok ? 'ok' : 'fail');
+      div.innerHTML = `<span class="icon">${entry.ok ? '✓' : '✗'}</span><span class="text">${entry.label}</span>`;
+      logEl.appendChild(div);
+      logRendered++;
+    }
+    logEl.scrollTop = logEl.scrollHeight;
+
+    if (data.status === 'done') {
+      clearInterval(pollInterval);
+      document.getElementById('btn-playlist').innerHTML = '✓ Completado';
+      document.getElementById('btn-zip').style.display = 'flex';
+    }
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function descargarZip() {
+  if (!currentJobId) return;
+  window.location.href = `/api/descargar/${currentJobId}`;
+  // limpiar job después de un momento
+  setTimeout(() => {
+    fetch(`/api/job/${currentJobId}`, { method: 'DELETE' });
+    document.getElementById('btn-playlist').disabled = false;
+    document.getElementById('btn-playlist').innerHTML = '↓ Descargar playlist';
+    logRendered = 0;
+    currentJobId = null;
+  }, 3000);
+}
+
+// ── CANCIÓN INDIVIDUAL ────────────────────────────────────────────────────────
+async function descargarCancion() {
+  const query   = document.getElementById('cancion-query').value.trim();
+  const formato = document.getElementById('cancion-fmt').value;
+  const btn     = document.getElementById('btn-cancion');
+  const result  = document.getElementById('track-result');
+
+  if (!query) { alert('Escribe el nombre de la canción'); return; }
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Buscando y descargando...';
+  result.className = 'track-result visible';
+  result.textContent = 'Buscando en YouTube...';
+
+  try {
+    const res = await fetch('/api/cancion', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: query, formato }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || 'Error al descargar');
+    }
+
+    // obtener nombre del archivo desde Content-Disposition
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="(.+?)"/);
+    const filename = match ? match[1] : `cancion.${formato}`;
+
+    result.textContent = `✓ Descargando: ${filename}`;
+
+    // forzar descarga
+    const blob = await res.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    result.textContent = `✓ ${filename} — descargado`;
+  } catch (e) {
+    result.className = 'track-result visible error';
+    result.textContent = '✗ Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '↓ Descargar canción';
+  }
+}
+
+// enter key support
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('playlist-url').addEventListener('keydown', e => {
+    if (e.key === 'Enter') iniciarPlaylist();
+  });
+  document.getElementById('cancion-query').addEventListener('keydown', e => {
+    if (e.key === 'Enter') descargarCancion();
+  });
+});
+</script>
+</body>
+</html>
