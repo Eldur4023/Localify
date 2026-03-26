@@ -176,32 +176,6 @@
   .btn:active { transform: translateY(0); }
   .btn:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; transform: none; }
 
-  .spotify-bar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.6rem 1rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    margin-bottom: 1rem;
-    font-family: 'Space Mono', monospace;
-    font-size: 0.7rem;
-    color: var(--muted);
-  }
-  .spotify-bar.ok { border-color: var(--accent); color: var(--accent); }
-  .spotify-bar button {
-    background: none;
-    border: 1px solid currentColor;
-    color: inherit;
-    border-radius: var(--radius);
-    padding: 0.3rem 0.7rem;
-    font-family: 'Space Mono', monospace;
-    font-size: 0.65rem;
-    cursor: pointer;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-
   /* progress */
   .progress-wrap {
     margin-top: 1.5rem;
@@ -363,10 +337,6 @@
 
   <!-- ── PLAYLIST ── -->
   <div id="panel-playlist" class="panel active">
-    <div id="spotify-bar" class="spotify-bar">
-      <span id="spotify-status">Spotify no conectado</span>
-      <button onclick="conectarSpotify()">Conectar</button>
-    </div>
     <div class="card">
       <div class="field">
         <label>URL de Spotify</label>
@@ -442,29 +412,6 @@
 </div>
 
 <script>
-// ── SPOTIFY CONNECT ───────────────────────────────────────────────────────────
-async function checkSpotify() {
-  try {
-    const r = await fetch('/api/spotify/status');
-    const d = await r.json();
-    const bar = document.getElementById('spotify-bar');
-    const st  = document.getElementById('spotify-status');
-    if (d.connected) {
-      bar.classList.add('ok');
-      st.textContent = '✓ Spotify conectado';
-      bar.querySelector('button').textContent = 'Reconectar';
-    } else {
-      bar.classList.remove('ok');
-      st.textContent = 'Spotify no conectado';
-    }
-  } catch(e) {}
-}
-
-function conectarSpotify() {
-  window.open('/api/spotify/login', '_blank', 'width=500,height=700');
-  setTimeout(checkSpotify, 3000);
-}
-
 // ── TAB SWITCH ────────────────────────────────────────────────────────────────
 function switchTab(name, el) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -646,7 +593,6 @@ async function descargarCancion() {
 
 // enter key support
 document.addEventListener('DOMContentLoaded', () => {
-  checkSpotify();
   document.getElementById('playlist-url').addEventListener('keydown', e => {
     if (e.key === 'Enter') iniciarPlaylist();
   });

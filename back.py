@@ -11,19 +11,16 @@ import sys
 import json
 import uuid
 import base64
-import hashlib
-import secrets
 import shutil
 import asyncio
 import threading
-import urllib.parse
 import requests as http_requests
 from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse, RedirectResponse, HTMLResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -42,53 +39,6 @@ app.add_middleware(
 
 # jobs: { job_id: { status, total, done, failed, log, zip_path } }
 jobs: dict = {}
-
-# ─── OAUTH SPOTIFY ────────────────────────────────────────────────────────────
-# access_token, refresh_token, expiry (epoch), pkce_verifier
-_spotify_oauth: dict = {}
-
-SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "http://localhost:8000/api/spotify/callback")
-SPOTIFY_SCOPES       = "playlist-read-private playlist-read-collaborative"
-
-
-def _spotify_client_id() -> Optional[str]:
-    try:
-        with open("spotify_keys.txt", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if "=" in line and not line.startswith("#"):
-                    k, v = line.split("=", 1)
-                    if k.strip() == "CLIENT_ID":
-                        return v.strip()
-    except FileNotFoundError:
-        pass
-    return None
-
-
-def _spotify_token_valido() -> Optional[str]:
-    """Devuelve el access token si existe y no ha expirado; lo renueva si es necesario."""
-    import time
-    if not _spotify_oauth.get("access_token"):
-        return None
-    if time.time() < _spotify_oauth.get("expiry", 0) - 60:
-        return _spotify_oauth["access_token"]
-    # Renovar con refresh_token
-    refresh = _spotify_oauth.get("refresh_token")
-    cid     = _spotify_client_id()
-    if not refresh or not cid:
-        return None
-    r = http_requests.post(
-        "https://accounts.spotify.com/api/token",
-        data={"grant_type": "refresh_token", "refresh_token": refresh, "client_id": cid},
-    )
-    if r.ok:
-        d = r.json()
-        _spotify_oauth["access_token"]  = d["access_token"]
-        _spotify_oauth["expiry"]        = time.time() + d.get("expires_in", 3600)
-        if "refresh_token" in d:
-            _spotify_oauth["refresh_token"] = d["refresh_token"]
-        return _spotify_oauth["access_token"]
-    return None
 
 
 # ─── MODELOS ──────────────────────────────────────────────────────────────────
@@ -797,80 +747,6 @@ async def limpiar_job(job_id: str):
     if job and job.get("zip_path"):
         Path(job["zip_path"]).unlink(missing_ok=True)
     return {"ok": True}
-
-
-# ─── OAUTH SPOTIFY ────────────────────────────────────────────────────────────
-
-@app.get("/api/spotify/status")
-async def spotify_status():
-    return {"connected": _spotify_token_valido() is not None}
-
-
-@app.get("/api/spotify/login")
-async def spotify_login():
-    """Inicia el flujo OAuth PKCE — redirige al navegador a la página de Spotify."""
-    cid = _spotify_client_id()
-    if not cid:
-        raise HTTPException(400, "Falta CLIENT_ID en spotify_keys.txt")
-
-    verifier   = secrets.token_urlsafe(64)
-    challenge  = base64.urlsafe_b64encode(
-        hashlib.sha256(verifier.encode()).digest()
-    ).rstrip(b"=").decode()
-
-    _spotify_oauth["pkce_verifier"] = verifier
-
-    params = {
-        "client_id":             cid,
-        "response_type":         "code",
-        "redirect_uri":          SPOTIFY_REDIRECT_URI,
-        "code_challenge_method": "S256",
-        "code_challenge":        challenge,
-        "scope":                 SPOTIFY_SCOPES,
-    }
-    return RedirectResponse(
-        "https://accounts.spotify.com/authorize?" + urllib.parse.urlencode(params)
-    )
-
-
-@app.get("/api/spotify/callback")
-async def spotify_callback(code: Optional[str] = None, error: Optional[str] = None):
-    """Recibe el código OAuth de Spotify, lo intercambia por tokens y los guarda."""
-    import time
-    if error:
-        return HTMLResponse(f"<p>Error de Spotify: {error}</p>")
-    if not code:
-        raise HTTPException(400, "No se recibió code")
-
-    cid      = _spotify_client_id()
-    verifier = _spotify_oauth.get("pkce_verifier")
-    if not cid or not verifier:
-        raise HTTPException(400, "Estado OAuth inválido — reinicia el flujo")
-
-    r = http_requests.post(
-        "https://accounts.spotify.com/api/token",
-        data={
-            "grant_type":    "authorization_code",
-            "code":          code,
-            "redirect_uri":  SPOTIFY_REDIRECT_URI,
-            "client_id":     cid,
-            "code_verifier": verifier,
-        },
-    )
-    r.raise_for_status()
-    d = r.json()
-
-    _spotify_oauth["access_token"]  = d["access_token"]
-    _spotify_oauth["refresh_token"] = d.get("refresh_token", "")
-    _spotify_oauth["expiry"]        = time.time() + d.get("expires_in", 3600)
-    _spotify_oauth.pop("pkce_verifier", None)
-
-    return HTMLResponse("""
-        <p style="font-family:sans-serif;padding:2rem">
-          ✓ Spotify conectado. Puedes cerrar esta pestaña.
-        </p>
-        <script>window.close();</script>
-    """)
 
 
 # Servir el frontend estático
