@@ -2,3 +2,7 @@ fastapi
 uvicorn[standard]
 requests
 pydantic
+yt-dlp
+mutagen
+python-multipart
+playwright

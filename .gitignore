@@ -3,7 +3,7 @@ spotify_keys.txt
 cookies.txt
 
 # ─── Entorno virtual ──────────────────────────
-venv/
+.venv
 .env/
 __pycache__/
 
