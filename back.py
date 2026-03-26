@@ -498,7 +498,7 @@ def descargar_yt(query: str, carpeta: Path, formato: str,
     if re.match(r"https?://(www\.)?(youtube\.com|youtu\.be)/", query):
         search = query
     else:
-        search = f"ytsearch1:{query}"
+        search = f"ytsearch1:{query} topic"
 
     archivo_descargado: Optional[Path] = None
     try:
@@ -546,13 +546,42 @@ def descargar_yt(query: str, carpeta: Path, formato: str,
 
 # ─── JOBS (descargas en background) ───────────────────────────────────────────
 
+def _parsear_error_ytdlp(error: str) -> str:
+    """Convierte mensajes de error de yt-dlp en texto legible."""
+    lower = error.lower()
+    checks = [
+        (r'age.?restrict|explicit content',        "Restringido: contenido explícito o para adultos"),
+        (r'not available in your country|geo',     "No disponible en este país"),
+        (r'has blocked it|blocked.*copyright|copyright.*block', "Bloqueado por derechos de autor"),
+        (r'private video',                         "Vídeo privado"),
+        (r'video unavailable|is not available',    "Vídeo no disponible en YouTube"),
+        (r'requires payment|purchase',             "Requiere pago"),
+        (r'members.only|membership required',      "Solo para miembros de canal"),
+        (r'confirm your age|sign in to confirm',   "Requiere verificación de edad"),
+        (r'copyright',                             "Bloqueado por derechos de autor"),
+    ]
+    for pattern, msg in checks:
+        if re.search(pattern, lower):
+            return msg
+    # Fallback: última línea del error, limpiando el prefijo de yt-dlp
+    lines = [l.strip() for l in error.strip().splitlines() if l.strip()]
+    last = lines[-1] if lines else error
+    last = re.sub(r'^(ERROR|WARNING):\s*\[.*?\]\s*[\w-]+:\s*', '', last)
+    return last[:120] if last else "Error desconocido"
+
+
 def run_playlist_job(job_id: str, canciones: list, carpeta: Path, formato: str, workers: int):
     import concurrent.futures
     job = jobs[job_id]
     job["total"] = len(canciones)
+    job["active"] = {}   # tid -> label de lo que se está descargando ahora
     lock = threading.Lock()
 
     def tarea(cancion):
+        tid = uuid.uuid4().hex[:8]
+        with lock:
+            job["active"][tid] = cancion.get("nombre") or cancion.get("spotify_url", "…")
+
         # Usar obtener_info_cancion para rellenar nombre, artista, álbum y portada.
         # Necesario cuando la playlist se obtuvo via OG meta tags (nombre vacío).
         if cancion.get("spotify_url") and (not cancion.get("cover_url") or not cancion.get("nombre")):
@@ -569,11 +598,14 @@ def run_playlist_job(job_id: str, canciones: list, carpeta: Path, formato: str, 
                 pass
 
         if not cancion.get("nombre"):
-            # Si aún no hay nombre (info_cancion falló), usar la URL como fallback
             cancion["nombre"] = cancion.get("spotify_url", "unknown")
 
         query = f"{cancion['nombre']} {cancion['artistas']}"
         label = f"{cancion['nombre']} — {cancion['artistas']}"
+
+        with lock:
+            job["active"][tid] = label
+
         meta  = {
             "nombre":    cancion["nombre"],
             "artistas":  cancion["artistas"],
@@ -583,7 +615,7 @@ def run_playlist_job(job_id: str, canciones: list, carpeta: Path, formato: str, 
         # Subdirectorio propio para evitar colisiones entre workers concurrentes
         sub = carpeta / str(uuid.uuid4())
         sub.mkdir(exist_ok=True)
-        ok, info = descargar_yt(query, sub, formato, meta=meta)
+        ok, err = descargar_yt(query, sub, formato, meta=meta)
         if ok:
             prefix = f"{cancion['index']} - " if cancion.get("index") else ""
             safe = re.sub(r'[\\/:*?"<>|]', '', cancion["nombre"]).strip()
@@ -593,17 +625,19 @@ def run_playlist_job(job_id: str, canciones: list, carpeta: Path, formato: str, 
                     shutil.move(str(f), str(dest))
         shutil.rmtree(sub, ignore_errors=True)
         with lock:
+            job["active"].pop(tid, None)
             if ok:
                 job["done"] += 1
-                job["log"].append({"ok": True,  "label": label})
+                job["log"].append({"ok": True, "label": label})
             else:
                 job["failed"] += 1
-                job["log"].append({"ok": False, "label": label, "error": info})
+                job["log"].append({"ok": False, "label": label, "error": _parsear_error_ytdlp(err)})
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         list(ex.map(tarea, canciones))
 
     # empaquetar zip
+    job["status"] = "packaging"
     zip_path = Path("descargas") / f"{job_id}.zip"
     shutil.make_archive(str(zip_path.with_suffix("")), "zip", str(carpeta))
     shutil.rmtree(carpeta, ignore_errors=True)
@@ -664,6 +698,7 @@ async def progreso(job_id: str):
         "total":   job["total"],
         "done":    job["done"],
         "failed":  job["failed"],
+        "active":  list(job.get("active", {}).values()),
         "log":     job["log"],
     }
 

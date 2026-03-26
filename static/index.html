@@ -270,6 +270,40 @@
   .log-entry.ok .icon { color: var(--accent); }
   .log-entry.fail .icon { color: var(--accent2); }
   .log-entry .text { color: #aaa; line-height: 1.4; }
+  .log-entry .error-detail {
+    color: var(--accent2);
+    opacity: 0.75;
+    display: block;
+    margin-top: 0.15rem;
+  }
+
+  /* active downloads */
+  .active-tasks {
+    margin-bottom: 0.5rem;
+  }
+  .active-entry {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.7rem;
+    padding: 0.3rem 0;
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    color: var(--muted);
+  }
+
+  /* packaging banner */
+  .packaging-banner {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--accent);
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    margin-bottom: 0.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
 
   /* download button */
   .btn-download {
@@ -371,6 +405,10 @@
       <div class="progress-bar-bg">
         <div class="progress-bar-fill" id="progress-bar"></div>
       </div>
+      <div id="packaging-banner" style="display:none" class="packaging-banner">
+        <span class="spinner"></span> Empaquetando ZIP…
+      </div>
+      <div class="active-tasks" id="active-tasks"></div>
       <div class="log" id="progress-log"></div>
       <button class="btn btn-download" id="btn-zip" style="display:none" onclick="descargarZip()">
         ↓ Descargar ZIP
@@ -486,19 +524,43 @@ async function actualizarProgreso() {
   try {
     const res  = await fetch(`/api/progreso/${currentJobId}`);
     const data = await res.json();
-    const pct  = data.total > 0 ? Math.round(((data.done + data.failed) / data.total) * 100) : 0;
+    const processed = data.done + data.failed;
+    const pct = data.total > 0 ? Math.round((processed / data.total) * 100) : 0;
 
     document.getElementById('progress-bar').style.width = pct + '%';
-    document.getElementById('progress-count').textContent =
-      `${data.done + data.failed} / ${data.total}`;
+    const countParts = [`${processed} / ${data.total}`];
+    if (data.failed > 0) countParts.push(`${data.failed} fallida${data.failed > 1 ? 's' : ''}`);
+    document.getElementById('progress-count').textContent = countParts.join(' · ');
 
-    // añadir nuevas entradas al log
+    // Canciones activas (re-render en cada poll)
+    const activeEl = document.getElementById('active-tasks');
+    activeEl.innerHTML = '';
+    if (data.status === 'running' && data.active && data.active.length > 0) {
+      for (const label of data.active) {
+        const div = document.createElement('div');
+        div.className = 'active-entry';
+        div.innerHTML = `<span class="spinner"></span><span>${label}</span>`;
+        activeEl.appendChild(div);
+      }
+    }
+
+    // Banner de empaquetado
+    document.getElementById('packaging-banner').style.display =
+      data.status === 'packaging' ? 'flex' : 'none';
+
+    // Añadir nuevas entradas completadas al log
     const logEl = document.getElementById('progress-log');
     for (let i = logRendered; i < data.log.length; i++) {
       const entry = data.log[i];
       const div = document.createElement('div');
       div.className = 'log-entry ' + (entry.ok ? 'ok' : 'fail');
-      div.innerHTML = `<span class="icon">${entry.ok ? '✓' : '✗'}</span><span class="text">${entry.label}</span>`;
+      let inner = `<span class="icon">${entry.ok ? '✓' : '✗'}</span>`;
+      inner += `<span class="text">${entry.label}`;
+      if (!entry.ok && entry.error) {
+        inner += `<span class="error-detail">↳ ${entry.error}</span>`;
+      }
+      inner += `</span>`;
+      div.innerHTML = inner;
       logEl.appendChild(div);
       logRendered++;
     }
@@ -506,6 +568,8 @@ async function actualizarProgreso() {
 
     if (data.status === 'done') {
       clearInterval(pollInterval);
+      activeEl.innerHTML = '';
+      document.getElementById('packaging-banner').style.display = 'none';
       document.getElementById('btn-playlist').innerHTML = '✓ Completado';
       document.getElementById('btn-zip').style.display = 'flex';
     }
