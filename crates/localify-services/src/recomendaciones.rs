@@ -176,7 +176,9 @@ async fn candidatos(deps: &Arc<Dependencias>) -> CoreResult<usize> {
         por_semilla.push(del_genero(deps, &genero).await);
     }
 
-    let escogidas = intercalar(por_semilla, POR_SECCION as usize * 3);
+    let escogidas = intercalar(por_semilla, POR_SECCION as usize * 3, |t: &Track| {
+        t.id.clone()
+    });
 
     // Se quedan fuera las que ya has puesto alguna vez: es lo que separa esta
     // fila de las de historial, que están tres secciones más abajo.
@@ -261,12 +263,46 @@ async fn del_genero(deps: &Arc<Dependencias>, genero: &str) -> Vec<Track> {
     }
 }
 
-/// Toma una de cada montón por vuelta, hasta agotarlos o llegar a `tope`.
+/// Extrae las canciones **sugeridas** de los tríos `(semilla, sugerida, peso)`.
 ///
-/// Es lo que impide que el artista con más canciones se coma la fila entera:
+/// El campo que interesa es el del medio. Tomar el primero devuelve la semilla
+/// —la canción que ya escuchaste— repetida una vez por cada sugerencia que
+/// generó, y eso es exactamente lo que hacía: la sección enseñaba catorce copias
+/// de la misma canción. Compila igual, porque los tres elementos del trío son
+/// del mismo tipo salvo el peso.
+///
+/// Se intercalan por semilla en lugar de concatenarlas: sin eso, las doce
+/// sugerencias de la primera semilla llenan la fila y las otras cuatro no
+/// aparecen. Y se quitan los repetidos, que los hay —dos semillas del mismo
+/// grupo sugieren lo mismo—.
+fn sugeridas(trios: Vec<(TrackId, TrackId, f32)>) -> Vec<TrackId> {
+    let mut por_semilla: Vec<(TrackId, Vec<TrackId>)> = Vec::new();
+    for (semilla, sugerida, _) in trios {
+        match por_semilla.iter_mut().find(|(s, _)| *s == semilla) {
+            Some((_, lista)) => lista.push(sugerida),
+            None => por_semilla.push((semilla, vec![sugerida])),
+        }
+    }
+
+    let montones = por_semilla.into_iter().map(|(_, v)| v).collect();
+    intercalar(montones, POR_SECCION as usize, Clone::clone)
+}
+
+/// Toma uno de cada montón por vuelta, hasta agotarlos o llegar a `tope`.
+///
+/// Es lo que impide que el montón más grande se coma la fila entera:
 /// intercalando, los cinco aparecen aunque uno traiga veinte y otro traiga dos.
-/// Los repetidos se descartan, que los hay —un artista sale en su propio género—.
-fn intercalar(mut montones: Vec<Vec<Track>>, tope: usize) -> Vec<Track> {
+/// Los repetidos se descartan, que los hay —un artista sale en su propio género,
+/// dos semillas del mismo grupo sugieren lo mismo—.
+///
+/// `clave` dice qué hace único a un elemento. Va como parámetro porque esto se
+/// usa con pistas completas y con identificadores sueltos, y duplicar el bucle
+/// para cada uno es la forma de que uno de los dos acabe arreglado y el otro no.
+fn intercalar<T, K>(mut montones: Vec<Vec<T>>, tope: usize, clave: impl Fn(&T) -> K) -> Vec<T>
+where
+    T: Clone,
+    K: std::hash::Hash + Eq,
+{
     let mut salida = Vec::new();
     let mut vistos = std::collections::HashSet::new();
     let mut vuelta = 0;
@@ -274,12 +310,12 @@ fn intercalar(mut montones: Vec<Vec<Track>>, tope: usize) -> Vec<Track> {
     while salida.len() < tope {
         let mut quedaba = false;
         for monton in &mut montones {
-            let Some(pista) = monton.get(vuelta) else {
+            let Some(elemento) = monton.get(vuelta) else {
                 continue;
             };
             quedaba = true;
-            if vistos.insert(pista.id.clone()) {
-                salida.push(pista.clone());
+            if vistos.insert(clave(elemento)) {
+                salida.push(elemento.clone());
                 if salida.len() >= tope {
                     return salida;
                 }
@@ -378,11 +414,10 @@ impl RecommendationServiceImpl {
             .similitud
             .because_you_listened(POR_SECCION)
             .await?;
-        let ids: Vec<TrackId> = porque.into_iter().map(|(t, _, _)| t).collect();
         empujar(
             secciones,
             "home.because_you_listened",
-            HomeItems::Tracks(self.en_orden(&ids).await?),
+            HomeItems::Tracks(self.en_orden(&sugeridas(porque)).await?),
         );
 
         // "Redescubre": favoritos que llevan meses sin sonar. Va aquí por el
@@ -616,5 +651,96 @@ mod tests {
         empujar(&mut s, "home.recent", HomeItems::Tracks(Vec::new()));
         empujar(&mut s, "home.playlists", HomeItems::Playlists(Vec::new()));
         assert!(s.is_empty());
+    }
+
+    fn id(n: &str) -> TrackId {
+        TrackId::from_trusted(n.to_owned())
+    }
+
+    fn pista(n: &str) -> Track {
+        Track {
+            id: id(n),
+            title: n.to_owned(),
+            album: None,
+            artists: Vec::new(),
+            duration: localify_core::domain::audio::DurationMs::from_secs(180),
+            track_number: None,
+            disc_number: None,
+            explicit: false,
+            isrc: None,
+            release_date: None,
+            popularity: None,
+            added_at: chrono::Utc::now(),
+        }
+    }
+
+    fn textos(ids: &[TrackId]) -> Vec<&str> {
+        ids.iter().map(TrackId::as_str).collect()
+    }
+
+    #[test]
+    fn porque_escuchaste_ensena_las_sugerencias_y_no_las_semillas() {
+        // El trío es (semilla, sugerida, peso) y el código tomaba el primero.
+        // Como los dos primeros campos son del mismo tipo, compilaba: la sección
+        // enseñaba la canción que ya habías escuchado, repetida una vez por cada
+        // sugerencia que había generado. Catorce copias de la misma en pantalla.
+        let trios = vec![
+            (id("semilla"), id("sug-1"), 0.9),
+            (id("semilla"), id("sug-2"), 0.8),
+            (id("semilla"), id("sug-3"), 0.7),
+        ];
+        assert_eq!(textos(&sugeridas(trios)), ["sug-1", "sug-2", "sug-3"]);
+    }
+
+    #[test]
+    fn las_semillas_se_intercalan_y_no_se_concatenan() {
+        // Con cinco semillas dando doce sugerencias cada una, concatenar deja la
+        // fila llena con las de la primera y las otras cuatro no aparecen.
+        let trios = vec![
+            (id("a"), id("a1"), 0.9),
+            (id("a"), id("a2"), 0.8),
+            (id("b"), id("b1"), 0.7),
+            (id("c"), id("c1"), 0.6),
+            (id("c"), id("c2"), 0.5),
+        ];
+        assert_eq!(
+            textos(&sugeridas(trios)),
+            ["a1", "b1", "c1", "a2", "c2"],
+            "una de cada semilla por vuelta"
+        );
+    }
+
+    #[test]
+    fn una_sugerencia_que_dan_dos_semillas_sale_una_vez() {
+        // Pasa siempre que dos canciones escuchadas son del mismo grupo.
+        let trios = vec![
+            (id("a"), id("comun"), 0.9),
+            (id("b"), id("comun"), 0.8),
+            (id("b"), id("otra"), 0.7),
+        ];
+        assert_eq!(textos(&sugeridas(trios)), ["comun", "otra"]);
+    }
+
+    #[test]
+    fn el_monton_mas_grande_no_se_come_la_fila() {
+        let uno = vec![pista("a1"), pista("a2"), pista("a3"), pista("a4")];
+        let dos = vec![pista("b1")];
+        let tres = vec![pista("c1"), pista("c2")];
+
+        let mezcla = intercalar(vec![uno, dos, tres], 6, |t: &Track| t.id.clone());
+        let vistos: Vec<&str> = mezcla.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(vistos, ["a1", "b1", "c1", "a2", "c2", "a3"]);
+    }
+
+    #[test]
+    fn un_monton_vacio_no_bloquea_la_mezcla() {
+        // Un artista del que el catálogo no dio nada deja su montón vacío. El
+        // bucle tiene que seguir con los demás, no pararse en el hueco.
+        let mezcla = intercalar(
+            vec![Vec::new(), vec![pista("a")], Vec::new()],
+            5,
+            |t: &Track| t.id.clone(),
+        );
+        assert_eq!(mezcla.len(), 1);
     }
 }
