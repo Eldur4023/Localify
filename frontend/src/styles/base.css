@@ -1,0 +1,152 @@
+/* Reajuste de estilos y bases tipográficas. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden; /* el scroll lo gestiona cada panel, nunca el documento */
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  color: var(--text-base);
+  background: var(--bg-base);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Seleccionar texto en una app de escritorio suele ser un accidente al
+   arrastrar. Se habilita solo donde tiene sentido. */
+body {
+  user-select: none;
+  cursor: default;
+}
+
+input,
+textarea,
+[data-selectable] {
+  user-select: text;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/*
+ * La lista desplegable de un `<select>`.
+ *
+ * `color-scheme: dark` en `:root` no bastó. En cuanto un `select` lleva
+ * `appearance: none` y fondo propio, Chromium lo da por "estilado por el autor"
+ * y pinta el desplegable con el aspecto claro de la plataforma. El resultado
+ * era el peor de los dos mundos: fondo blanco del sistema y texto blanco
+ * heredado del nuestro. Ilegible salvo la fila bajo el ratón, que sí llevaba su
+ * propio resaltado.
+ *
+ * Lo que sí respeta es el color de las `option`, así que se fijan los dos
+ * explícitamente. Va aquí y no junto a cada `.select` porque afecta a todos los
+ * desplegables, incluidos los que aún no existen.
+ */
+select {
+  color-scheme: dark;
+}
+
+option {
+  background-color: var(--bg-elevated-hover);
+  color: var(--text-base);
+}
+
+option:checked {
+  background-color: var(--bg-tinted);
+}
+
+ul,
+ol {
+  list-style: none;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+}
+
+/*
+ * `hidden` gana siempre.
+ *
+ * El navegador implementa el atributo con `display: none` en su hoja de
+ * usuario, que es la de menor prioridad: cualquier regla nuestra que fije
+ * `display` —y las hay en cada componente— lo anula y el elemento sigue
+ * visible. Sin esta línea, `el.hidden = true` funciona en unos sitios y en
+ * otros no, que es la peor de las dos opciones.
+ */
+[hidden] {
+  display: none !important;
+}
+
+/* Foco visible solo con teclado: el anillo no debe aparecer al hacer clic. */
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--text-base);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Barras de scroll discretas, al estilo de la aplicación de referencia. */
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--bg-tinted);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+  background-clip: content-box;
+}
+
+/* Utilidad: accesible para lectores de pantalla, invisible en pantalla. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

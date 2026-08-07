@@ -1,0 +1,170 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/localify-core",
+    "crates/localify-db",
+    "crates/localify-spotify",
+    "crates/localify-ytdlp",
+    "crates/localify-audio",
+    "crates/localify-platform",
+    "crates/localify-integrations",
+    "crates/localify-ytmusic",
+    "crates/localify-musicbrainz",
+    "crates/localify-services",
+    "crates/localify-app",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-only"
+repository = "https://github.com/Eldur4023/Localify"
+authors = ["Localify contributors"]
+
+# ── Versiones centralizadas ──────────────────────────────────────────────────
+# Un solo sitio donde cambiar una versión. Los crates referencian con
+# `dep.workspace = true`.
+[workspace.dependencies]
+localify-core = { path = "crates/localify-core" }
+localify-db = { path = "crates/localify-db" }
+localify-spotify = { path = "crates/localify-spotify" }
+localify-ytdlp = { path = "crates/localify-ytdlp" }
+localify-audio = { path = "crates/localify-audio" }
+localify-platform = { path = "crates/localify-platform" }
+localify-integrations = { path = "crates/localify-integrations" }
+localify-ytmusic = { path = "crates/localify-ytmusic" }
+localify-musicbrainz = { path = "crates/localify-musicbrainz" }
+localify-services = { path = "crates/localify-services" }
+
+# Núcleo
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+unicode-normalization = "0.1"
+
+# Asincronía
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "fs",
+    "io-util",
+    "process",
+    "macros",
+    # Named pipes de Windows: es como habla Discord con los clientes que
+    # publican su Rich Presence. No hay HTTP por medio.
+    "net",
+] }
+
+# Observabilidad
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
+
+# Persistencia (Fase 3)
+# `bundled-full` compila SQLite con FTS5, que es lo que sostiene la búsqueda
+# instantánea. La versión de refinery debe admitir esta misma rusqlite: ambas
+# enlazan la biblioteca nativa `sqlite3` y solo puede haber una copia.
+rusqlite = { version = "0.37", features = ["bundled-full", "chrono", "uuid"] }
+refinery = { version = "0.9", default-features = false, features = ["rusqlite"] }
+
+# Red (Fase 5)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+
+# Audio (Fase 7)
+cpal = "0.15"
+symphonia = { version = "0.5", features = ["all-codecs", "all-formats"] }
+rtrb = "0.3"
+
+# Metadatos de ficheros (Fase 6)
+lofty = "0.22"
+
+# Tauri
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-build = { version = "2", features = [] }
+ts-rs = "12"
+
+# Plataforma
+directories = "6"
+sha2 = "0.10"
+# La API de Last.fm firma cada petición con MD5. No es una decisión nuestra ni
+# tiene nada que ver con seguridad: es el formato que el servicio exige.
+md-5 = "0.11"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[workspace.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_Security_Cryptography",   # DPAPI para los secretos
+    "Win32_Storage_FileSystem",      # espacio libre en disco
+    "Win32_Globalization",           # locale del usuario
+    # Panel multimedia del sistema (SMTC). En una aplicación de escritorio hay
+    # que obtenerlo por HWND con el interop de WinRT: la API de UWP
+    # (`GetForCurrentView`) no existe fuera de una vista de aplicación.
+    "Media",
+    "Media_Playback",
+    "Storage_Streams",               # portada como flujo para el panel
+    "Foundation",
+    "Win32_System_WinRT",            # ISystemMediaTransportControlsInterop
+    "Win32_System_Com",              # inicialización de COM en el hilo
+]
+
+# ── Lints comunes a todo el workspace ────────────────────────────────────────
+[workspace.lints.rust]
+unsafe_code = "deny"          # se levanta explícitamente en localify-platform y localify-audio
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+# Grupos
+pedantic = { level = "warn", priority = -1 }
+# Ruido de `pedantic` que no aporta en este proyecto
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# La documentación está en español y llena de nombres propios (Localify,
+# SQLite, Spotify…). `doc_markdown` los marcaría todos como identificadores sin
+# backticks: sería un aviso por párrafo y cero señal.
+doc_markdown = "allow"
+# Agrupar por significado y no por cuerpo idéntico se lee mejor: en las tablas
+# de mapeo, fusionar ramas iguales oculta la intención.
+match_same_arms = "allow"
+# Prohibiciones duras: nada de estas formas en código de producción
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "deny"
+todo = "warn"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+
+# ── Perfiles ─────────────────────────────────────────────────────────────────
+[profile.dev]
+opt-level = 0
+debug = true
+# Las dependencias se compilan optimizadas incluso en dev: el motor de audio y
+# la decodificación son inusables sin optimizar, y solo se compilan una vez.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+incremental = false
+
+# Perfil para medir rendimiento con símbolos (Fase 12).
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false

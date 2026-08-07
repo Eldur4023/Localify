@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Localify</title>
+    <link rel="stylesheet" href="./src/styles/tokens.css" />
+    <link rel="stylesheet" href="./src/styles/base.css" />
+    <link rel="stylesheet" href="./src/styles/layout.css" />
+    <link rel="stylesheet" href="./src/styles/vlist.css" />
+    <link rel="stylesheet" href="./src/styles/shell.css" />
+    <link rel="stylesheet" href="./src/styles/tracks.css" />
+    <link rel="stylesheet" href="./src/styles/views.css" />
+  </head>
+  <body>
+    <!--
+      Estructura de tres zonas, como Spotify: barra lateral, contenido y
+      reproductor inferior. Las vistas se montan dentro de #view; la barra
+      lateral y el reproductor persisten entre navegaciones.
+
+      Los módulos se cargan como ESM nativo: no hay bundler (ADR-019).
+    -->
+    <div class="app">
+      <nav class="sidebar" id="sidebar" aria-label="Navegación principal"></nav>
+      <main class="content" id="content">
+        <header class="topbar" id="topbar"></header>
+        <div class="view" id="view"></div>
+      </main>
+      <footer class="player" id="player" aria-label="Reproductor"></footer>
+    </div>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

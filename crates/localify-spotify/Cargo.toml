@@ -1,0 +1,28 @@
+﻿[package]
+name = "localify-spotify"
+description = "Cliente de la Web API de Spotify: autenticacion, rate limiting y mapeo a dominio."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+localify-core = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# `test-util` habilita el reloj virtual: los tests del limitador y del backoff
+# comprueban esperas de decenas de segundos sin tardar ni un milisegundo.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+
+[lints]
+workspace = true

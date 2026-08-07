@@ -1,0 +1,139 @@
+/**
+ * Canciones: todo el catálogo conocido.
+ *
+ * ## No hay filtro de "solo lo descargado"
+ *
+ * Lo hubo, y era un error de encuadre. Que una canción esté en disco o haya que
+ * traerla es asunto de la aplicación, no del usuario: pulsar reproduce en los
+ * dos casos y la diferencia son unos segundos. Ofrecerlo como filtro obligaba a
+ * entender la mecánica de las descargas para usar la pantalla, y convertía "tus
+ * canciones" en "las que resulta que hay en el disco duro" — dos cosas que no
+ * tienen por qué parecerse.
+ *
+ * La paginación es por cursor. No se usa `offset`: en la página 500 obligaría a
+ * SQLite a recorrer y descartar 25 000 filas antes de devolver 50. Con cursor,
+ * la última página cuesta lo mismo que la primera.
+ */
+
+import type {
+  PageRequestDto,
+  TrackFilterDto,
+  TrackRowDto,
+  TrackSort,
+} from "../ipc/types.gen.js";
+import { library, page } from "../ipc/client.js";
+import { alCambiarIdioma, t } from "../i18n/index.js";
+import { mountTrackList } from "../ui/track-list.js";
+import type { Pagina } from "../ui/virtual-list.js";
+import type { Vista } from "../router.js";
+
+const POR_PAGINA = 100;
+
+/** Ordenaciones ofrecidas, con su clave de traducción. */
+const ORDENES: ReadonlyArray<{ valor: TrackSort; clave: string }> = [
+  { valor: "titleAsc", clave: "library.sort.title" },
+  { valor: "artistAsc", clave: "library.sort.artist" },
+  { valor: "albumAsc", clave: "library.sort.album" },
+  { valor: "addedDesc", clave: "library.sort.added" },
+  { valor: "durationAsc", clave: "library.sort.duration" },
+];
+
+export function mountLibraryView(contenedor: HTMLElement): Vista {
+  const el = document.createElement("section");
+  el.className = "vista vista--lista";
+
+  const cabecera = document.createElement("header");
+  cabecera.className = "vista__header";
+
+  const titulo = document.createElement("h2");
+  const cuenta = document.createElement("span");
+  cuenta.className = "vista__count";
+
+  const controles = document.createElement("div");
+  controles.className = "vista__controls";
+
+  const orden = document.createElement("select");
+  orden.className = "select";
+  for (const o of ORDENES) {
+    const opt = document.createElement("option");
+    opt.value = o.valor;
+    orden.append(opt);
+  }
+
+  controles.append(orden);
+  cabecera.append(titulo, cuenta, controles);
+
+  const cuerpo = document.createElement("div");
+  cuerpo.className = "vista__body";
+
+  el.append(cabecera, cuerpo);
+  contenedor.replaceChildren(el);
+
+  // ── Estado de la consulta ───────────────────────────────────────────────
+  let cursor: string | null = null;
+  let total: bigint | null = null;
+
+  /** Sin acotar: el catálogo entero, esté o no en disco. */
+  const FILTRO: TrackFilterDto = {
+    favoritesOnly: false,
+    localOnly: false,
+    albumId: null,
+    artistId: null,
+    genreId: null,
+    text: null,
+  };
+
+  const trackList = mountTrackList(cuerpo, {
+    contexto: () => ({ kind: "library" }),
+    conAlbum: true,
+    conFecha: true,
+
+    reiniciarOrigen(): void {
+      cursor = null;
+      total = null;
+    },
+
+    async cargar(): Promise<Pagina<TrackRowDto>> {
+      const req: PageRequestDto = page({ limit: POR_PAGINA, cursor });
+      const respuesta = await library.tracks(FILTRO, orden.value as TrackSort, req);
+
+      cursor = respuesta.nextCursor;
+      total ??= respuesta.total;
+      pintarCuenta();
+
+      // Los elementos van siempre, incluida la última página: descartarlos
+      // perdería las últimas cien canciones de la biblioteca.
+      return { items: respuesta.items, hasMore: cursor !== null };
+    },
+  });
+
+  function pintarCuenta(): void {
+    const cuantas = total === null ? trackList.lista.items.length : Number(total);
+    cuenta.textContent = t("library.count", { count: cuantas });
+  }
+
+  function etiquetas(): void {
+    titulo.textContent = t("library.title");
+    for (const [i, o] of ORDENES.entries()) {
+      const opt = orden.options.item(i);
+      if (opt) opt.textContent = t(o.clave);
+    }
+    pintarCuenta();
+    trackList.lista.refresh();
+  }
+
+  const recargar = (): void => trackList.refrescar();
+  orden.addEventListener("change", recargar);
+
+  etiquetas();
+  const dejarIdioma = alCambiarIdioma(etiquetas);
+
+  return {
+    destroy(): void {
+      dejarIdioma();
+      orden.removeEventListener("change", recargar);
+      trackList.destroy();
+      el.remove();
+    },
+  };
+}

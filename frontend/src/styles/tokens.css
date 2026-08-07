@@ -1,0 +1,119 @@
+/*
+ * Tokens de diseño.
+ *
+ * Ningún color, espaciado o tamaño se escribe literal en otro archivo: todo
+ * sale de aquí. Es lo que permite ajustar la identidad visual en un sitio y
+ * que el resultado siga siendo coherente.
+ *
+ * Tema oscuro únicamente, por requisito del proyecto.
+ */
+
+:root {
+  /*
+   * Le dice al navegador que los controles nativos van en oscuro.
+   *
+   * Sin esto, el desplegable de un `<select>` lo pinta el sistema en claro:
+   * fondo gris y texto gris sobre una interfaz negra, ilegible. Y no hay CSS
+   * que lo arregle, porque esa lista no está en el documento —la dibuja el
+   * sistema operativo— y las `option` no se pueden estilar de verdad.
+   *
+   * De paso arregla las barras de desplazamiento, el cursor de texto y los
+   * cuadros de fecha, que salían igual de claros por el mismo motivo.
+   */
+  color-scheme: dark;
+
+  /* ── Superficies ───────────────────────────────────────────────────────── */
+  --bg-base: #000000;
+  --bg-elevated: #121212;
+  --bg-elevated-hover: #1a1a1a;
+  --bg-card: #181818;
+  --bg-card-hover: #282828;
+  --bg-tinted: rgba(255, 255, 255, 0.07);
+  --bg-tinted-hover: rgba(255, 255, 255, 0.1);
+  --bg-overlay: rgba(0, 0, 0, 0.7);
+
+  /* ── Texto ─────────────────────────────────────────────────────────────── */
+  --text-base: #ffffff;
+  --text-subdued: #a7a7a7;
+  --text-muted: #6a6a6a;
+  --text-on-accent: #000000;
+
+  /* ── Acento ────────────────────────────────────────────────────────────── */
+  --accent: #1db954;
+  --accent-hover: #1ed760;
+  --accent-active: #169c46;
+  --danger: #e22134;
+  --warning: #ffa42b;
+
+  /* ── Bordes y separadores ──────────────────────────────────────────────── */
+  --border-subtle: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.2);
+
+  /* ── Espaciado (escala de 4) ───────────────────────────────────────────── */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 48px;
+  --sp-8: 64px;
+
+  /* ── Radios ────────────────────────────────────────────────────────────── */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 9999px;
+
+  /* ── Tipografía ────────────────────────────────────────────────────────── */
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
+    sans-serif;
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 24px;
+  --fs-2xl: 32px;
+  --fs-3xl: 48px;
+  --fw-normal: 400;
+  --fw-medium: 500;
+  --fw-bold: 700;
+
+  /* ── Dimensiones del layout ────────────────────────────────────────────── */
+  --sidebar-width: 240px;
+  --player-height: 90px;
+  --topbar-height: 64px;
+  /* Alto fijo de fila: es lo que permite virtualizar la lista con una simple
+     multiplicación, sin medir nodos. */
+  --row-height: 56px;
+  --row-height-compact: 44px;
+
+  /* ── Movimiento ────────────────────────────────────────────────────────── */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  /* Respuesta al dedo: hundir un botón tiene que ir por delante de la vista,
+     no acompañarla. Por encima de ~80 ms deja de sentirse como una pulsación y
+     empieza a sentirse como una animación. */
+  --dur-instant: 60ms;
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --dur-slow: 320ms;
+
+  /* ── Elevación ─────────────────────────────────────────────────────────── */
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.6);
+
+  --z-dropdown: 100;
+  --z-modal: 200;
+  --z-toast: 300;
+}
+
+/* Respeta a quien haya pedido menos movimiento en su sistema. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-instant: 0ms;
+    --dur-fast: 0ms;
+    --dur-base: 0ms;
+    --dur-slow: 0ms;
+  }
+}

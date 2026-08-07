@@ -1,0 +1,28 @@
+﻿[package]
+name = "localify-ytdlp"
+description = "Sidecar yt-dlp/FFmpeg: busqueda, puntuacion de candidatos y descarga progresiva."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+localify-core = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+lofty = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+# El ejemplo `emparejar` enseña las trazas: son la mitad del diagnóstico.
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

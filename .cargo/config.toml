@@ -1,0 +1,7 @@
+# Destino de los tipos que `ts-rs` genera desde los DTOs de Rust (ADR-014).
+#
+# `relative = true` lo resuelve contra la raíz del workspace, no contra el crate
+# que ejecuta los tests: así el destino es el mismo se lance `cargo test` desde
+# donde se lance.
+[env]
+TS_RS_EXPORT_DIR = { value = "frontend/src/ipc", relative = true }

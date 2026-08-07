@@ -1,0 +1,32 @@
+﻿[package]
+name = "localify-services"
+description = "Servicios de negocio. Solo depende de localify-core."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+localify-core = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+# Los tests de integración necesitan repositorios reales sobre una base de
+# datos temporal y un proveedor con respuestas preparadas. Son dependencias de
+# desarrollo: la regla de capas sigue intacta, `localify-services` no las
+# conoce en producción.
+[dev-dependencies]
+localify-db = { workspace = true }
+localify-platform = { workspace = true }
+localify-spotify = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+
+[lints]
+workspace = true

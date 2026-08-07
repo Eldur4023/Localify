@@ -1,0 +1,35 @@
+{
+  // Este archivo NO participa en la compilación: el frontend lo transpila
+  // `localify-app/build.rs` con oxc, sin Node (ADR-019).
+  //
+  // Sirve para dos cosas: dar tipos e IntelliSense en el editor, y permitir
+  // `npx tsc --noEmit` como verificación opcional a quien tenga Node instalado.
+  // Es un linter, no una puerta del build.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+
+    // Los imports llevan `.js` porque el navegador carga el fichero ya
+    // transpilado. Sin esto, tsc no reconocería la extensión.
+    "allowImportingTsExtensions": false,
+    "verbatimModuleSyntax": true,
+
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist"]
+}

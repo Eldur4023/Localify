@@ -1,0 +1,60 @@
+[package]
+name = "localify-app"
+description = "Binario Tauri de Localify: comandos, DTOs, inyección de dependencias y ciclo de vida."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "localify_app"
+# Solo `rlib`: `staticlib` y `cdylib` son la convención de Tauri para móvil, y
+# aquí solo alargarían el enlazado y añadirían avisos del linker.
+crate-type = ["rlib"]
+
+[[bin]]
+name = "localify"
+path = "src/main.rs"
+
+# Este es el ÚNICO crate que conoce implementaciones concretas. Aquí se cablea
+# el AppContext; en ningún otro sitio se nombra un tipo de infraestructura.
+[dependencies]
+localify-core = { workspace = true }
+localify-db = { workspace = true }
+localify-spotify = { workspace = true }
+localify-ytdlp = { workspace = true }
+localify-audio = { workspace = true }
+localify-platform = { workspace = true }
+localify-integrations = { workspace = true }
+localify-ytmusic = { workspace = true }
+localify-musicbrainz = { workspace = true }
+localify-services = { workspace = true }
+
+async-trait = { workspace = true }
+tauri = { workspace = true }
+tauri-plugin-dialog = { workspace = true }
+tokio = { workspace = true }
+ts-rs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+[build-dependencies]
+tauri-build = { workspace = true }
+# Transpilación de TypeScript sin Node ni bundler (ADR-019).
+oxc_allocator = "0.143"
+oxc_codegen = "0.143"
+oxc_parser = "0.143"
+oxc_span = "0.143"
+oxc_transformer = "0.143"
+oxc_semantic = "0.143"
+
+[lints]
+workspace = true

@@ -1,0 +1,7 @@
+# El callback de audio y las rutas calientes de listas no deben asignar de más.
+# Un umbral bajo obliga a poner en el heap lo que crezca demasiado.
+too-many-arguments-threshold = 8
+type-complexity-threshold = 350
+
+# Nombres del dominio que no son "similares" por casualidad.
+allowed-idents-below-min-chars = ["id", "ms", "db", "eq", "fs", "ok", "rx", "tx"]

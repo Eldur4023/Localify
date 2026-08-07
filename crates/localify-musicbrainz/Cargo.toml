@@ -1,0 +1,27 @@
+[package]
+name = "localify-musicbrainz"
+description = "Adaptador de metadatos sobre la API pública de MusicBrainz."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+localify-core = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# `test-util` da el reloj pausado: la espera de un segundo entre peticiones se
+# comprueba en tiempo virtual, sin que la suite tarde tres segundos de verdad.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+
+[lints]
+workspace = true

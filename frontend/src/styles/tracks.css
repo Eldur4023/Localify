@@ -1,0 +1,245 @@
+/*
+ * Lista de pistas.
+ *
+ * La altura de `.track` tiene que coincidir exactamente con `ALTO_FILA` en
+ * `views/tracks.ts`: la virtualización calcula posiciones con ese número, y
+ * cualquier diferencia acumula un desfase que crece con el scroll.
+ */
+
+.tracks {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.tracks__header {
+  flex: 0 0 auto;
+  padding: var(--sp-4) var(--sp-5);
+  color: var(--text-subdued);
+  font-size: var(--fs-sm);
+}
+
+.tracks__body {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/*
+ * Lista con cabecera de columnas.
+ *
+ * La cabecera está **fuera** de la zona con scroll: es una hermana de `.vlist`,
+ * no una fila más. Meterla dentro obligaría a la lista virtual a tratar una
+ * fila distinta a las demás, que es justo lo que su modelo de índice por altura
+ * fija no admite.
+ */
+.lista {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.lista__cuerpo {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.lista__cabecera {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  height: 36px;
+  padding-inline: var(--sp-5);
+
+  /* El hueco del botón de opciones, que en las filas ocupa aunque no se vea.
+     Sin esto el reloj de la cabecera queda a la derecha de las duraciones. */
+  padding-inline-end: calc(var(--sp-5) + 28px + var(--sp-4));
+
+  color: var(--text-subdued);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+/* Reserva lo que ocupan el botón de reproducir y la carátula, para que
+   "Título" caiga justo encima de los títulos. */
+.lista__cabecera .track__hueco {
+  flex: 0 0 calc(28px + 40px + var(--sp-4));
+}
+
+.lista__cabecera .track__time {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.track {
+  gap: var(--sp-4);
+  padding-inline: var(--sp-5);
+  color: var(--text-subdued);
+  font-size: var(--fs-sm);
+  border-radius: var(--radius-md);
+}
+
+.track:hover {
+  background: var(--bg-tinted-hover);
+}
+
+.track__index {
+  flex: 0 0 3ch;
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Título y artista apilados. El bloque es quien reparte el ancho; los dos
+   textos de dentro solo recortan. */
+.track__main {
+  flex: 1 1 45%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+}
+
+.track__title {
+  min-width: 0;
+  color: var(--text-base);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.track__artist {
+  min-width: 0;
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.track__album,
+.track__added {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* La fecha nunca necesita tanto sitio como el título de un disco. */
+.track__added {
+  flex-grow: 0.6;
+}
+
+.track__time {
+  flex: 0 0 5ch;
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Las columnas estrechas desaparecen antes que el título: en una ventana
+   pequeña, saber qué canción es importa más que cuándo se añadió. */
+@media (width < 900px) {
+  .track__added,
+  .lista__cabecera .track__added {
+    display: none;
+  }
+}
+
+@media (width < 700px) {
+  .track__album,
+  .lista__cabecera .track__album {
+    display: none;
+  }
+}
+
+/* ── Vistas de lista ─────────────────────────────────────────────────────── */
+
+.vista {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.vista__header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-5);
+}
+
+.vista__header--destacada {
+  padding-block: var(--sp-6) var(--sp-4);
+}
+
+.vista__header h2 {
+  margin: 0;
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  color: var(--text-base);
+}
+
+.vista__count {
+  color: var(--text-subdued);
+  font-size: var(--fs-sm);
+}
+
+.vista__controls {
+  margin-inline-start: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.vista__body {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.vista__empty {
+  padding: var(--sp-5);
+  color: var(--text-subdued);
+  font-size: var(--fs-md);
+}
+
+/* Fila activa y arrastre. */
+.track.is-active {
+  background: var(--bg-tinted);
+}
+
+.track.is-dragging {
+  opacity: 0.4;
+}
+
+/* La línea marca dónde va a caer la fila antes de soltar: sin ella, arrastrar
+   es apuntar a ciegas. */
+.track.is-drop-before {
+  box-shadow: inset 0 2px 0 0 var(--accent);
+}
+
+.track.is-drop-after {
+  box-shadow: inset 0 -2px 0 0 var(--accent);
+}
+
+.vista__body.is-drop-target {
+  box-shadow: inset 0 0 0 2px var(--accent);
+  border-radius: var(--radius-md);
+}
+
+/* El botón de más opciones solo aparece al pasar por encima o con foco: en
+   reposo la fila es texto limpio. */
+.track__more {
+  width: 28px;
+  height: 28px;
+  opacity: 0;
+}
+
+.track:hover .track__more,
+.track__more:focus-visible,
+.track.is-active .track__more {
+  opacity: 1;
+}

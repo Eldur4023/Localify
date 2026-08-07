@@ -1,0 +1,27 @@
+[package]
+name = "localify-core"
+description = "Dominio, puertos y contratos de Localify. No depende de ningún otro crate del workspace."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# INVARIANTE ARQUITECTÓNICA: este crate no puede depender de tokio, tauri,
+# rusqlite, reqwest ni de ningún otro crate de Localify. Si una dependencia
+# nueva no es un tipo de datos o una utilidad pura, no pertenece aquí.
+# La CI lo verifica con `cargo tree`.
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+unicode-normalization = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

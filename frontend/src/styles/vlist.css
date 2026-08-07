@@ -1,0 +1,49 @@
+/*
+ * Lista virtualizada.
+ *
+ * El contenedor tiene el scroll; el espaciador le da la altura total y las
+ * filas se posicionan en absoluto sobre él. Es lo que permite que el navegador
+ * muestre una barra de scroll real de 50 000 filas teniendo unas 40 en el DOM.
+ */
+
+.vlist {
+  position: relative;
+  overflow-y: auto;
+  overflow-x: hidden;
+  height: 100%;
+
+  /* Aísla el diseño y el pintado del resto de la página: un cambio dentro de
+     la lista no obliga al navegador a recalcular nada de fuera. */
+  contain: strict;
+}
+
+/* Vacío a propósito: solo aporta altura para la barra de scroll. */
+.vlist__spacer {
+  width: 1px;
+  pointer-events: none;
+}
+
+.vlist__viewport {
+  position: absolute;
+  inset: 0 0 auto 0;
+}
+
+.vlist__row {
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+
+  /* La fila se mueve con `transform`, así que se promociona a su propia capa.
+     Sin esto, cada desplazamiento repintaría la lista entera. */
+  will-change: transform;
+
+  /* Contiene su diseño: el contenido de una fila no puede afectar a las demás. */
+  contain: layout style;
+}
+
+.vlist__row[hidden] {
+  display: none;
+}

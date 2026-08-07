@@ -1,0 +1,578 @@
+/*
+ * Armazón: barra lateral, barra superior, reproductor, menús.
+ *
+ * Todo lo que persiste entre vistas. Las vistas concretas traen su propio
+ * fichero.
+ */
+
+/* ── Iconos y botones ────────────────────────────────────────────────────── */
+
+.icono {
+  display: block;
+  flex: 0 0 auto;
+}
+
+.bicono {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--text-subdued);
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease, transform 120ms ease;
+}
+
+.bicono:hover:not(:disabled) {
+  color: var(--text-base);
+  background: var(--bg-tinted);
+}
+
+.bicono:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.bicono:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.bicono.is-active {
+  color: var(--accent);
+}
+
+/* El foco solo se dibuja cuando llega por teclado: un anillo tras cada clic
+   de ratón es ruido visual que nadie pidió. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ── Barra lateral ───────────────────────────────────────────────────────── */
+
+.sidebar__nav,
+.sidebar__playlists {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sidebar__nav {
+  padding: var(--sp-2);
+  background: var(--bg-elevated);
+  border-radius: var(--radius-md);
+}
+
+.sidebar__block {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: var(--sp-2);
+  background: var(--bg-elevated);
+  border-radius: var(--radius-md);
+}
+
+.sidebar__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--text-subdued);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-bold);
+}
+
+.sidebar__playlists {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.sidebar__item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-sm);
+  color: var(--text-subdued);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.sidebar__item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar__item:hover,
+.sidebar__item.is-active {
+  color: var(--text-base);
+}
+
+.sidebar__item.is-active {
+  background: var(--bg-tinted);
+}
+
+.sidebar__item--liked .icono {
+  color: var(--accent);
+}
+
+/* La zona de soltado se marca con el color de acento: es la única pista de
+   que soltar ahí va a hacer algo. */
+.sidebar__item.is-drop-target {
+  background: var(--bg-tinted-hover);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  color: var(--text-base);
+}
+
+/* ── Barra superior ──────────────────────────────────────────────────────── */
+
+.topbar__nav {
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.topbar__nav .bicono {
+  background: var(--bg-overlay);
+}
+
+.topbar__title {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-bold);
+  color: var(--text-base);
+  /* Cede espacio al campo de búsqueda en vez de empujarlo fuera: un título
+     largo se recorta, que es preferible a perder la caja de buscar. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Reproductor ─────────────────────────────────────────────────────────── */
+
+.player {
+  gap: var(--sp-4);
+  color: var(--text-subdued);
+}
+
+.pb__info {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.pb__cover {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-muted);
+}
+
+/*
+ * Un suelo, no un `min-width: 0`.
+ *
+ * Los hijos son `nowrap` con `overflow: hidden`, así que al encogerse no se
+ * recortan con puntos suspensivos: desaparecen. Con `min-width: 0` el bloque
+ * llega a cero en una ventana estrecha y el título se esfuma sin dejar rastro.
+ *
+ * El suelo lo impide. Y no se usa `flex: 1` para conseguir lo mismo porque
+ * entonces el bloque se queda con todo el hueco sobrante y empuja el corazón
+ * al otro extremo de la barra, lejos de la canción a la que se refiere.
+ */
+.pb__texts {
+  flex: 0 1 auto;
+  min-width: 72px;
+}
+
+.pb__title {
+  color: var(--text-base);
+  font-size: var(--fs-md);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pb__artist {
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pb__center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.pb__controls {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+/* El botón de reproducir es el único blanco y el único redondo relleno: es
+   la acción principal y tiene que encontrarse sin mirar. */
+.pb__play {
+  width: 36px;
+  height: 36px;
+  background: var(--text-base);
+  color: var(--bg-base);
+}
+
+.pb__play:hover:not(:disabled) {
+  background: var(--text-base);
+  color: var(--bg-base);
+  transform: scale(1.06);
+}
+
+.pb__progress {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  max-width: 640px;
+}
+
+.pb__time {
+  flex: 0 0 auto;
+  min-width: 5ch;
+  text-align: center;
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.pb__right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+}
+
+/* ── Barras de rango ─────────────────────────────────────────────────────── */
+/*
+ * Se dibujan con un degradado sobre la propia pista, alimentado por la
+ * variable `--avance`. Superponer dos elementos daría el mismo resultado con
+ * el doble de nodos y un desajuste de un píxel en cada redimensionado.
+ */
+
+.pb__seek,
+.pb__volume {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 12px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.pb__seek {
+  flex: 1;
+  min-width: 0;
+}
+
+.pb__volume {
+  width: 96px;
+}
+
+.pb__seek::-webkit-slider-runnable-track,
+.pb__volume::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: linear-gradient(
+    to right,
+    var(--text-base) var(--avance, 0%),
+    var(--bg-card-hover) var(--avance, 0%)
+  );
+}
+
+/*
+ * El relleno del volumen lo fija JavaScript, igual que el de la barra de
+ * progreso.
+ *
+ * Antes estaba clavado aquí en `100%`, así que el pulgar se movía pero la parte
+ * coloreada se quedaba siempre llena: la barra decía que el volumen estaba al
+ * máximo mientras el usuario lo bajaba.
+ */
+
+.pb__seek::-webkit-slider-thumb,
+.pb__volume::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: var(--text-base);
+  /* El pulgar solo aparece al pasar por encima, como en Spotify: en reposo la
+     barra es una línea limpia. */
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.pb__seek:hover::-webkit-slider-thumb,
+.pb__volume:hover::-webkit-slider-thumb,
+.pb__seek:focus-visible::-webkit-slider-thumb,
+.pb__volume:focus-visible::-webkit-slider-thumb {
+  opacity: 1;
+}
+
+.pb__seek:hover::-webkit-slider-runnable-track,
+.pb__volume:hover::-webkit-slider-runnable-track {
+  background: linear-gradient(
+    to right,
+    var(--accent) var(--avance, 0%),
+    var(--bg-card-hover) var(--avance, 0%)
+  );
+}
+
+/* ── Menú contextual ─────────────────────────────────────────────────────── */
+
+.menu {
+  position: fixed;
+  z-index: 100;
+  min-width: 220px;
+  padding: var(--sp-1);
+  background: var(--bg-card-hover);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 16px 40px rgb(0 0 0 / 0.5);
+}
+
+.menu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-base);
+  font-size: var(--fs-sm);
+  text-align: start;
+  cursor: pointer;
+}
+
+.menu__item:hover,
+.menu__item:focus-visible {
+  background: var(--bg-tinted);
+}
+
+.menu__item.is-danger {
+  color: var(--danger);
+}
+
+.menu__sep {
+  height: 1px;
+  margin: var(--sp-1) var(--sp-2);
+  background: var(--border-subtle);
+}
+
+/* ── Controles de formulario ─────────────────────────────────────────────── */
+
+.select,
+.chk {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tinted);
+  color: var(--text-base);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.select {
+  appearance: none;
+  padding-inline-end: var(--sp-4);
+}
+
+/* ── Errores visibles ────────────────────────────────────────────────────── */
+
+.errores {
+  position: fixed;
+  inset-block-end: var(--sp-2);
+  inset-inline: var(--sp-2);
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  pointer-events: none;
+}
+
+.errores__linea {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-sm);
+  background: var(--danger);
+  color: #fff;
+  font-size: var(--fs-xs);
+  pointer-events: auto;
+}
+
+.errores__linea span {
+  opacity: 0.85;
+}
+
+.errores__cerrar {
+  margin-inline-start: auto;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: var(--fs-md);
+  cursor: pointer;
+}
+
+/* ── Ventanas estrechas ──────────────────────────────────────────────────── */
+
+/*
+ * En la barra de reproducción cae la portada, no el texto.
+ *
+ * Los tres bloques compiten por 600 px lógicos y algo tiene que ceder. La
+ * carátula son 56 px que no dicen nada que el título no diga mejor, así que se
+ * va ella y el texto conserva un mínimo con el que recortar en vez de
+ * desaparecer.
+ *
+ * Estas reglas viven aquí y no en `layout.css` con el resto del diseño
+ * adaptable: una media query no añade especificidad, así que puesta allí la
+ * ganaría `.pb__cover { display: grid }` de este mismo archivo, que se carga
+ * después. El síntoma es engañoso —el resto de la media query sí se aplica— y
+ * lleva a buscar el fallo donde no está.
+ */
+@media (max-width: 1000px) {
+  .pb__cover {
+    display: none;
+  }
+}
+
+/* ── Submenú ─────────────────────────────────────────────────────────────── */
+
+/* El chevron se va al extremo derecho: sin esto queda pegado al texto y no se
+   lee como "aquí hay más", que es lo único que tiene que comunicar. */
+.menu__item--padre .menu__texto {
+  flex: 1 1 auto;
+}
+
+.menu__item[aria-expanded="true"] {
+  background: var(--bg-tinted);
+}
+
+/* Se pinta por encima del panel padre: los dos están en la misma capa y el
+   submenú siempre llega después. */
+.menu--submenu {
+  z-index: 101;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+/* ── Búsqueda rápida de la barra superior ────────────────────────────────── */
+
+.rapida {
+  position: relative;
+  margin-inline-start: auto;
+  width: min(340px, 32vw);
+}
+
+.rapida__input {
+  width: 100%;
+  height: 36px;
+  padding-inline: var(--sp-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius-full);
+  background: var(--bg-tinted);
+  color: var(--text-base);
+  font: inherit;
+  font-size: var(--fs-sm);
+}
+
+.rapida__input::placeholder {
+  color: var(--text-muted);
+}
+
+.rapida__input:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+/*
+ * El desplegable cuelga del campo y flota sobre el contenido.
+ *
+ * `position: absolute` respecto a `.rapida` y no `fixed`: así acompaña al campo
+ * si la ventana cambia de tamaño, sin recalcular nada.
+ */
+.rapida__panel {
+  position: absolute;
+  z-index: var(--z-dropdown);
+  inset-inline: 0;
+  top: calc(100% + var(--sp-2));
+  padding: var(--sp-1);
+  background: var(--bg-card-hover);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+}
+
+.rapida__fila {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+/* Una sola regla para el ratón y el teclado: la fila activa se marca igual la
+   señale quien la señale, que es lo que hace que los dos caminos se sientan el
+   mismo. */
+.rapida__fila.is-active {
+  background: var(--bg-tinted);
+}
+
+.rapida__textos {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.rapida__titulo,
+.rapida__artista {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rapida__titulo {
+  font-size: var(--fs-sm);
+  color: var(--text-base);
+}
+
+.rapida__artista {
+  font-size: var(--fs-xs);
+  color: var(--text-subdued);
+}
+
+.rapida__tiempo {
+  flex: 0 0 auto;
+  color: var(--text-subdued);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}

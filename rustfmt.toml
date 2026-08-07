@@ -1,0 +1,6 @@
+edition = "2024"
+max_width = 100
+use_small_heuristics = "Default"
+
+# `imports_granularity` y `group_imports` son opciones de rustfmt nightly.
+# Se omiten a propósito para que `cargo fmt --check` no emita avisos en stable.

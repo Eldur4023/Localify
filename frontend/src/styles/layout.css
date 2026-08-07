@@ -1,0 +1,275 @@
+/*
+ * Estructura de tres zonas.
+ *
+ * Grid de dos columnas y dos filas: la barra lateral y el contenido comparten
+ * la fila superior, y el reproductor ocupa todo el ancho abajo. Es la
+ * distribución de Spotify y la que hace que la barra de reproducción nunca se
+ * mueva al navegar.
+ */
+
+.app {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) 1fr;
+  grid-template-rows: 1fr var(--player-height);
+  grid-template-areas:
+    "sidebar content"
+    "player  player";
+  height: 100vh;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  background: var(--bg-base);
+}
+
+.sidebar {
+  grid-area: sidebar;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-height: 0; /* imprescindible para que el hijo con scroll no desborde */
+}
+
+.content {
+  grid-area: content;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-md);
+}
+
+.topbar {
+  height: var(--topbar-height);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: 0 var(--sp-5);
+}
+
+/*
+ * El contenedor de vistas NO desplaza.
+ *
+ * Cada vista gestiona su propio scroll. Es un requisito de la virtualización:
+ * con un contenedor desplazable por fuera, la lista nunca recibe el evento de
+ * scroll —lo consume el de arriba— y se queda mostrando siempre las mismas
+ * filas mientras el navegador desplaza un `div` de 50 000 filas de alto.
+ *
+ * El relleno también se va: una lista a pantalla completa lo pone dentro de sus
+ * filas, para que el resaltado al pasar el ratón llegue hasta el borde.
+ */
+.view {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.player {
+  grid-area: player;
+  display: grid;
+  grid-template-columns: 1fr 2fr 1fr;
+  align-items: center;
+  padding: 0 var(--sp-4);
+}
+
+/* ── Estado de arranque ──────────────────────────────────────────────────── */
+/* Se muestra mientras el backend termina de inicializarse. Reserva el mismo
+   espacio que el contenido final para que no haya salto de layout. */
+
+.boot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-4);
+  height: 100%;
+  color: var(--text-subdued);
+}
+
+.boot__mark {
+  font-size: var(--fs-2xl);
+  font-weight: var(--fw-bold);
+  letter-spacing: -0.02em;
+  color: var(--text-base);
+}
+
+.boot__mark span {
+  color: var(--accent);
+}
+
+.boot__hint {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.boot__data {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 320px;
+  padding: var(--sp-4);
+  background: var(--bg-card);
+  border-radius: var(--radius-md);
+}
+
+.boot__row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-5);
+  font-size: var(--fs-md);
+}
+
+.boot__key {
+  color: var(--text-subdued);
+}
+
+.boot__value {
+  color: var(--text-base);
+  font-weight: var(--fw-medium);
+}
+
+.boot__error {
+  color: var(--danger);
+  font-size: var(--fs-sm);
+}
+
+.boot__log {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 96px;
+  font-size: var(--fs-xs);
+  color: var(--accent);
+}
+
+/* ── Ventanas estrechas ──────────────────────────────────────────────────── */
+
+/*
+ * Ventanas estrechas: la barra lateral se queda en iconos.
+ *
+ * No basta con estrecharla. El texto de los elementos y el encabezado de
+ * playlists siguen ocupando su ancho natural y se salen del carril, con el
+ * botón de "nueva playlist" cortado por el borde. Se ocultan las etiquetas y
+ * los iconos se centran: el `aria-label` de cada enlace sigue ahí, así que
+ * para un lector de pantalla no cambia nada.
+ */
+@media (max-width: 1000px) {
+  .app {
+    grid-template-columns: 72px 1fr;
+  }
+
+  .sidebar__item {
+    justify-content: center;
+    gap: 0;
+    padding-inline: 0;
+  }
+
+  .sidebar__item span {
+    display: none;
+  }
+
+  .sidebar__header {
+    justify-content: center;
+    padding-inline: 0;
+  }
+
+  .sidebar__header > :not(button) {
+    display: none;
+  }
+}
+
+/*
+ * Asa para ajustar el ancho de la barra lateral.
+ *
+ * Va en posición absoluta sobre el hueco entre la barra y el contenido, no como
+ * columna de la rejilla: una tercera columna obligaría a recalcular
+ * `grid-template-columns` en cada movimiento del ratón.
+ *
+ * Ancho real de seis píxeles pero visualmente invisible hasta que se apunta:
+ * una línea permanente entre dos paneles es ruido, pero un objetivo de un píxel
+ * es imposible de agarrar.
+ */
+.asa-lateral {
+  position: absolute;
+  top: var(--sp-2);
+  bottom: calc(var(--player-height) + var(--sp-2));
+  left: calc(var(--sp-2) + var(--sidebar-width));
+  width: 6px;
+  z-index: 2;
+  cursor: col-resize;
+  background: transparent;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.asa-lateral:hover,
+.asa-lateral:focus-visible,
+body.is-redimensionando .asa-lateral {
+  background: var(--accent);
+}
+
+/*
+ * Mientras se arrastra, el cursor y la falta de selección valen para todo el
+ * documento. Sin esto, al salirse del asa —seis píxeles— el cursor vuelve a la
+ * flecha en mitad del gesto y parece que se ha soltado.
+ */
+body.is-redimensionando {
+  cursor: col-resize;
+  user-select: none;
+}
+
+body.is-redimensionando * {
+  /* El puntero está capturado por el asa; que ningún otro elemento reaccione al
+     pasar por encima mientras se arrastra. */
+  pointer-events: none;
+}
+
+/* ── Barra lateral colapsada ─────────────────────────────────────────────── */
+
+/*
+ * Modo iconos.
+ *
+ * Una barra de 120 píxeles no sirve: los nombres se cortan por la mitad y no se
+ * distingue "Rock clásico" de "Rock de los 90". A partir de cierto punto es
+ * mejor renunciar al texto y quedarse con lo que sí se reconoce de un vistazo:
+ * las miniaturas.
+ *
+ * El texto se **oculta**, no se quita del DOM: los lectores de pantalla siguen
+ * leyendo el nombre de cada playlist, y el atributo `title` da el globo al pasar
+ * por encima. Colapsar es una decisión visual, no una amputación.
+ */
+/*
+ * `:not(.sidebar__arte)` no es un detalle: la miniatura de una playlist **es**
+ * un `span`, así que ocultarlos todos borraba precisamente lo único que el modo
+ * iconos tenía que enseñar. La barra colapsada se quedaba con los iconos de
+ * navegación y las playlists desaparecían.
+ */
+.is-lateral-colapsada .sidebar__item > span:not(.sidebar__arte),
+.is-lateral-colapsada .sidebar__header > span {
+  /* Fuera del flujo pero presente para la accesibilidad. */
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.is-lateral-colapsada .sidebar__item {
+  justify-content: center;
+  gap: 0;
+  padding-inline: 0;
+}
+
+/* La cabecera de playlists se queda solo con el botón de crear, centrado. */
+.is-lateral-colapsada .sidebar__header {
+  justify-content: center;
+}
+
+/* La miniatura crece un poco: es lo único que queda para distinguir una
+   playlist de otra, así que se le da todo el ancho disponible. */
+.is-lateral-colapsada .sidebar__arte {
+  width: 48px;
+  height: 48px;
+}

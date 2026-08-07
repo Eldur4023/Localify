@@ -1,0 +1,37 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Frontend generado por localify-app/build.rs (ADR-019)
+/frontend/dist/
+
+# `frontend/src/ipc/types.gen.ts` SÍ se versiona aunque sea generado: es lo que
+# permite a la CI regenerarlo y exigir un diff vacío (ADR-014), y lo que hace
+# que el frontend tenga tipos sin necesidad de ejecutar `cargo test` antes.
+/crates/localify-app/bindings/
+
+# Sidecars descargados en la primera ejecución
+/crates/localify-app/binaries/
+
+# Node es opcional (solo `tsc --noEmit`); si alguien lo instala, no se versiona
+/node_modules/
+/package-lock.json
+
+# Entorno local
+.env
+.env.local
+
+# Editores
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+
+# Sistema
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Documento de encargo original. Es material de trabajo personal, no
+# documentación del proyecto: la que se publica vive en docs/architecture/.
+/Prompt.txt
