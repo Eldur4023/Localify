@@ -17,10 +17,15 @@ Music catalogues — YouTube Music, MusicBrainz — tell it what songs exist and
 made them. yt-dlp gets the audio from YouTube. Neither one needs an account, a
 subscription, or anything about you.
 
-What makes it a *player* and not a downloader is that **you never see any of
-that**. There's no download button, no download manager, no queue to babysit.
-You press play and it plays — the first time too. Your library builds itself,
-into ordinary files on your own disk, while you listen.
+Underneath, it's a front end for yt-dlp: it decides *which* video is the song
+you asked for, and yt-dlp does the fetching. What makes it a *player* rather
+than a downloader is that **you never see any of that**. There's no download
+button, no download manager, no queue to babysit. You press play and it plays —
+the first time too. Your library builds itself, into ordinary files on your own
+disk, while you listen.
+
+It's a personal player: one person, one machine, nothing shared with anyone.
+[More on that below](#what-this-is-precisely).
 
 ```
   Search  ──▶  Press play  ──▶  It plays
@@ -130,13 +135,34 @@ cargo run --release -p localify-app
 
 ---
 
-## Legal notice
+## What this is, precisely
 
-Localify gets its audio from YouTube via yt-dlp. Depending on the content and
-your jurisdiction, that may go against YouTube's Terms of Service or against
-copyright law. It's a tool for personal use and the responsibility for using it
-is yours. The project distributes no content, brokers nothing between users, and
-circumvents no protection system.
+**Localify is a front end and library manager for [yt-dlp](https://github.com/yt-dlp/yt-dlp).**
+It doesn't fetch anything itself: it works out which video corresponds to the
+song you asked for, hands that to yt-dlp, and then organises, tags and plays the
+result. Take yt-dlp away and there is no audio.
+
+Everything it does, you could do by hand with yt-dlp and a text editor. What it
+adds is that you don't have to.
+
+Concretely, the project:
+
+- **hosts and distributes nothing.** No content ships with it, no server of ours
+  serves anything, and nothing you download is shared with anyone.
+- **is not a bridge between users.** There is no upload, no seeding, no
+  library sharing. Your files stay on your disk.
+- **breaks no protection.** It requests the same thing a browser requests. There
+  is no DRM stripping and no paywall in the picture — YouTube is free and needs
+  no account.
+- **is for one person, on their own machine.** It's a personal player, not a
+  service.
+
+### Legal notice
+
+That said, whether *your particular use* is lawful depends on the content and on
+where you live, exactly as it does with yt-dlp on its own. Downloading a video
+may also go against YouTube's Terms of Service, which is a matter between you
+and them. Use it for personal listening; the responsibility is yours.
 
 ## Contributing
 
