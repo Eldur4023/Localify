@@ -8,7 +8,7 @@ use localify_core::error::CoreResult;
 use localify_core::page::{Cursor, Page, PageRequest};
 use localify_core::ports::database::TrackRepository;
 use localify_core::text;
-use rusqlite::{Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{DbResult, ToCore};
@@ -363,6 +363,53 @@ fn refrescar_artist_display(tx: &Transaction<'_>, track_id: &str) -> DbResult<()
     Ok(())
 }
 
+/// Identificador con el que guardar un artista, reutilizando el que ya hubiera.
+///
+/// ## Por qué hace falta
+///
+/// Un artista no tiene un identificador universal: es un canal en YouTube
+/// Music, un UUID en MusicBrainz, y **nada** cuando llega desde la página de
+/// incrustación de Spotify, que solo publica los nombres. Para ese último caso
+/// se inventaba uno local, y como se inventaba por cada canción, importar una
+/// playlist de treinta temas de un grupo creaba treinta artistas idénticos.
+///
+/// El resultado era la vista de artistas con siete «coldrain», seis de ellos con
+/// una canción y sin foto.
+///
+/// ## Qué hace
+///
+/// Si el identificador ya es de un catálogo, se respeta: es una identidad de
+/// verdad y dos artistas del mismo nombre pueden ser dos personas distintas.
+/// Solo cuando es local —o sea, cuando no sabemos quién es— se busca por nombre
+/// normalizado y se reutiliza el que hubiera, **prefiriendo uno no local**: ese
+/// es el que trae foto y géneros, y engancharse a él es lo que hace que las
+/// canciones importadas aparezcan bajo el artista bueno.
+///
+/// El riesgo asumido es fundir dos homónimos reales que nos hayan llegado los
+/// dos sin identidad. Es preferible: pasa rara vez, y la alternativa está a la
+/// vista en la captura.
+fn id_canonico(tx: &Transaction<'_>, artista: &ArtistRef) -> DbResult<String> {
+    let propio = artista.id.as_str().to_owned();
+    if !artista.id.es_local() {
+        return Ok(propio);
+    }
+
+    // `ORDER BY` con un booleano: `false` ordena antes que `true`, así que los
+    // que no son locales salen primero.
+    let existente = tx
+        .query_row(
+            "SELECT id FROM artists
+             WHERE name_norm = ?1
+             ORDER BY (id LIKE 'local:%'), id
+             LIMIT 1",
+            [text::normalize(&artista.name)],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?;
+
+    Ok(existente.unwrap_or(propio))
+}
+
 /// Inserta una pista y sus relaciones dentro de una transacción ya abierta.
 fn upsert_track(tx: &Transaction<'_>, track: &Track) -> DbResult<()> {
     // Los álbumes y artistas referenciados deben existir antes que la pista:
@@ -381,15 +428,20 @@ fn upsert_track(tx: &Transaction<'_>, track: &Track) -> DbResult<()> {
         )?;
     }
 
-    for artista in &track.artists {
+    // Los identificadores se canonizan **antes** de escribir nada: uno local
+    // puede resolverse a un artista que ya existe, y entonces la fila que hay
+    // que crear no es la suya. Ver `id_canonico`.
+    let artistas: Vec<(String, &str)> = track
+        .artists
+        .iter()
+        .map(|a| Ok((id_canonico(tx, a)?, a.name.as_str())))
+        .collect::<DbResult<_>>()?;
+
+    for (id, nombre) in &artistas {
         tx.execute(
             "INSERT INTO artists (id, name, name_norm) VALUES (?1, ?2, ?3)
              ON CONFLICT (id) DO UPDATE SET name = ?2, name_norm = ?3",
-            params![
-                artista.id.as_str(),
-                artista.name,
-                text::normalize(&artista.name)
-            ],
+            params![id, nombre, text::normalize(nombre)],
         )?;
     }
 
@@ -443,15 +495,18 @@ fn upsert_track(tx: &Transaction<'_>, track: &Track) -> DbResult<()> {
     //
     // Se conserva la primera aparición, que es la que trae la posición buena: la
     // posición 0 es el artista principal y de ella depende `artist_display`.
+    // Se comparan los identificadores **ya canonizados**: dos locales distintos
+    // pueden resolverse al mismo artista, y comparando los de origen la pareja
+    // repetida se colaría igual.
     let mut vistos = std::collections::HashSet::new();
     let mut posicion = 0_i64;
-    for artista in &track.artists {
-        if !vistos.insert(artista.id.as_str()) {
+    for (id, _) in &artistas {
+        if !vistos.insert(id.clone()) {
             continue;
         }
         tx.execute(
             "INSERT INTO track_artists (track_id, artist_id, position) VALUES (?1, ?2, ?3)",
-            params![track.id.as_str(), artista.id.as_str(), posicion],
+            params![track.id.as_str(), id, posicion],
         )?;
         posicion += 1;
     }
@@ -751,6 +806,96 @@ mod tests {
             id: ArtistId::nuevo_local(),
             name: nombre.into(),
         }
+    }
+
+    /// Cuántos artistas hay guardados con ese nombre normalizado.
+    async fn cuantos_llamados(pool: &Pool, nombre: &str) -> i64 {
+        let n = text::normalize(nombre);
+        pool.leer(move |conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM artists WHERE name_norm = ?1",
+                [&n],
+                |r| r.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .expect("cuenta")
+    }
+
+    #[tokio::test]
+    async fn dos_pistas_del_mismo_artista_sin_identidad_no_lo_duplican() {
+        // La página de incrustación de Spotify solo da nombres, así que cada
+        // canción llegaba con un artista local recién inventado. Importar treinta
+        // temas de un grupo creaba treinta «coldrain», todos con una canción y
+        // sin foto.
+        let (repo, pool, _g) = repo().await;
+        repo.upsert(&[
+            pista("Una", vec![artista("coldrain")]),
+            pista("Otra", vec![artista("coldrain")]),
+        ])
+        .await
+        .expect("guarda");
+
+        assert_eq!(cuantos_llamados(&pool, "coldrain").await, 1);
+    }
+
+    #[tokio::test]
+    async fn un_artista_del_catalogo_absorbe_al_local_del_mismo_nombre() {
+        // Es lo que hace que las canciones importadas salgan bajo el artista
+        // bueno, con su foto y sus géneros, en vez de bajo un duplicado mudo.
+        let (repo, pool, _g) = repo().await;
+        let del_catalogo = ArtistRef {
+            id: ArtistId::from_trusted("UC1WV_zQ6vd52xitFX2cANYg"),
+            name: "coldrain".into(),
+        };
+        repo.upsert(&[pista("Del catálogo", vec![del_catalogo.clone()])])
+            .await
+            .expect("guarda");
+        repo.upsert(&[pista("Importada", vec![artista("coldrain")])])
+            .await
+            .expect("guarda");
+
+        assert_eq!(cuantos_llamados(&pool, "coldrain").await, 1);
+        let leida = repo
+            .get(
+                &repo
+                    .list_rows(
+                        &TrackFilter::default(),
+                        TrackSort::TitleAsc,
+                        &PageRequest::new(0, 10),
+                    )
+                    .await
+                    .expect("lista")
+                    .items[1]
+                    .id,
+            )
+            .await
+            .expect("lee")
+            .expect("existe");
+        assert_eq!(
+            leida.artists[0].id.as_str(),
+            "UC1WV_zQ6vd52xitFX2cANYg",
+            "la importada tiene que colgar del artista con identidad"
+        );
+    }
+
+    #[tokio::test]
+    async fn dos_artistas_con_identidad_y_el_mismo_nombre_no_se_funden() {
+        // Pueden ser dos personas distintas: unirlos sería inventarse un dato.
+        let (repo, pool, _g) = repo().await;
+        let uno = ArtistRef {
+            id: ArtistId::from_trusted("UCaaaaaaaaaaaaaaaaaaaaaa"),
+            name: "Nirvana".into(),
+        };
+        let otro = ArtistRef {
+            id: ArtistId::from_trusted("UCbbbbbbbbbbbbbbbbbbbbbb"),
+            name: "Nirvana".into(),
+        };
+        repo.upsert(&[pista("A", vec![uno]), pista("B", vec![otro])])
+            .await
+            .expect("guarda");
+
+        assert_eq!(cuantos_llamados(&pool, "Nirvana").await, 2);
     }
 
     fn pista(titulo: &str, artistas: Vec<ArtistRef>) -> Track {

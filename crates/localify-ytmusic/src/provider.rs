@@ -319,6 +319,12 @@ impl MetadataProvider for YtMusicProvider {
     }
 
     async fn artist(&self, id: &ArtistId) -> CoreResult<Artist> {
+        // Igual que en `artist_top_tracks`: un identificador que no es un canal
+        // no existe aquí, y preguntarlo son 400 y una petición gastada.
+        if !es_canal(id.as_str()) {
+            return Err(CoreError::not_found("artista", id.as_str()));
+        }
+
         let resp = self
             .cliente
             .navegar(id.as_str())
