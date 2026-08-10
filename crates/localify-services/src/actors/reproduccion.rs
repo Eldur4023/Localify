@@ -288,9 +288,27 @@ impl PlaybackActor {
         let Some(guardado) = self.deps.estado_repo.load().await? else {
             return Ok(false);
         };
-        let Some(pista) = guardado.track_id.clone() else {
-            return Ok(false);
-        };
+
+        // El volumen y los modos van **antes** de mirar si había una canción, y
+        // no dentro del camino que la restaura.
+        //
+        // No dependen de que la sesión anterior dejara algo puesto: son ajustes
+        // del reproductor, no parte de una sesión. Colgarlos de que hubiera
+        // pista es lo que hacía que cerrar la aplicación sin nada sonando
+        // devolviera el volumen al máximo y apagara el aleatorio.
+        //
+        // El volumen, además, no se aplicaba nunca: se leía de disco y se
+        // ignoraba, así que volvía al máximo en cada arranque.
+        self.pedir(|responder| Orden::Volumen {
+            valor: guardado.volume,
+            responder,
+        })
+        .await??;
+        // Y se anuncia: la interfaz pinta el deslizador con lo que le dio
+        // `player_get_state` al arrancar, que puede haber sido antes de esto.
+        self.deps.bus.publish(DomainEvent::VolumeChanged {
+            volume: guardado.volume.as_f32(),
+        });
 
         // La cola se restaura **antes** de la pista: así el índice y la
         // permutación ya están puestos cuando el reproductor pregunta qué viene
@@ -298,11 +316,17 @@ impl PlaybackActor {
         self.deps.cola.restaurar(
             guardado.context.clone(),
             guardado.context_queue.clone(),
-            Some(pista.clone()),
+            guardado.track_id.clone(),
             guardado.shuffle,
             guardado.shuffle_seed.unwrap_or_default(),
             guardado.repeat,
         );
+
+        let Some(pista) = guardado.track_id.clone() else {
+            // Sin canción no hay sesión que continuar, pero el volumen y los
+            // modos ya están puestos.
+            return Ok(false);
+        };
         if !guardado.user_queue.is_empty() {
             use localify_core::ports::services::QueueService;
             self.deps.cola.add_last(&guardado.user_queue).await?;

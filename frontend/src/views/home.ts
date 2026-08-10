@@ -47,7 +47,7 @@ export function mountHomeView(contenedor: HTMLElement): Vista {
               titulo: pista.title,
               subtitulo: pista.artistDisplay,
               destino: pista.albumId ? `#/album/${pista.albumId}` : "#/library",
-              albumId: pista.albumId,
+              trackId: pista.id,
             });
             // Una tarjeta de canción **reproduce**, no navega. Sigue siendo un
             // enlace al álbum para que el clic central y el teclado funcionen,

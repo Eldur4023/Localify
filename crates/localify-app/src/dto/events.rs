@@ -27,6 +27,7 @@ pub enum LocalifyEvent {
     #[serde(rename_all = "camelCase")]
     PlayStatusChanged { status: String },
     /// Alguien movió la aguja dentro de la misma canción. Ver `DomainEvent::Seeked`.
+    #[serde(rename_all = "camelCase")]
     Seeked { track_id: String, position_ms: u32 },
     #[serde(rename_all = "camelCase")]
     VolumeChanged { volume: f32 },

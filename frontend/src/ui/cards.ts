@@ -48,6 +48,18 @@ export interface DatosTarjeta {
    */
   readonly albumId?: string | null;
   /**
+   * Canción cuya portada mostrar, cuando la tarjeta es de una canción.
+   *
+   * Tiene preferencia sobre `albumId` y es lo que hay que pasar siempre que se
+   * sepa: el backend resuelve la imagen por la canción —disco si lo tiene,
+   * miniatura propia si no— y eso es lo único que garantiza que la tarjeta y la
+   * fila de la lista enseñen lo mismo.
+   *
+   * Sin esto, una canción sin álbum se quedaba con el icono gris, que es lo que
+   * llenaba Inicio de notas musicales.
+   */
+  readonly trackId?: string | null;
+  /**
    * Artista cuya foto mostrar. Igual que `albumId`: es un identificador, no
    * una URL.
    */
@@ -349,6 +361,7 @@ export function tarjeta(datos: DatosTarjeta): HTMLElement {
   arte.append(icono(datos.marcador ?? "music", 32));
   if (datos.playlist) ponerImagenDePlaylist(arte, datos.playlist);
   else if (datos.artistId) ponerFotoDeArtista(arte, datos.artistId);
+  else if (datos.trackId) ponerPortadaDePista(arte, datos.trackId);
   else ponerPortada(arte, datos.albumId);
 
   const t = document.createElement("div");

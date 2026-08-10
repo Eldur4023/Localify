@@ -923,3 +923,57 @@ async fn saltar_dentro_de_la_cancion_avisa_de_donde_quedo() {
         c.motor.ordenes()
     );
 }
+
+#[tokio::test]
+async fn cerrar_y_reabrir_conserva_el_volumen() {
+    // El volumen se guardaba en disco y **no se aplicaba nunca** al restaurar:
+    // se leía y se descartaba, así que cada arranque empezaba al máximo.
+    let c = ctx(20).await;
+    reproducir(&c, 0).await;
+    let bajo = Volume::new(0.25);
+    c.player.set_volume(bajo).await.expect("volumen");
+    c.player.persist_now().await.expect("persiste");
+
+    let (otro, _cola) = segunda_sesion(&c);
+    otro.restaurar().await.expect("restaura");
+
+    assert!(
+        (otro.state().await.volume.as_f32() - bajo.as_f32()).abs() < 1e-6,
+        "el volumen debe sobrevivir al cierre"
+    );
+}
+
+#[tokio::test]
+async fn los_modos_sobreviven_aunque_no_quedara_cancion_puesta() {
+    // Los modos y el volumen colgaban del camino que restaura la pista, así que
+    // cerrar sin nada sonando los perdía todos. No son parte de una sesión: son
+    // ajustes del reproductor.
+    let c = ctx(20).await;
+    reproducir(&c, 0).await;
+    c.player.set_repeat(RepeatMode::Queue).await.expect("modo");
+    c.player.set_shuffle(true).await.expect("aleatorio");
+    c.player
+        .set_volume(Volume::new(0.4))
+        .await
+        .expect("volumen");
+    c.player.persist_now().await.expect("persiste");
+
+    // Se borra la pista guardada, como tras vaciar la biblioteca.
+    let estado_repo: Arc<dyn localify_core::ports::database::PlayerStateRepository> = Arc::new(
+        localify_db::repositories::SqlitePlayerStateRepository::new(c.pool.clone()),
+    );
+    estado_repo.clear().await.expect("olvida la sesión");
+
+    let (otro, _cola) = segunda_sesion(&c);
+    // Devuelve `false` —no hay sesión que continuar— pero deja los ajustes.
+    assert!(!otro.restaurar().await.expect("restaura"));
+
+    let estado = otro.state().await;
+    assert!(
+        (estado.volume.as_f32() - 0.4).abs() < 1e-6,
+        "el volumen no depende de que hubiera canción: {}",
+        estado.volume.as_f32()
+    );
+    assert_eq!(estado.repeat, RepeatMode::Queue);
+    assert!(estado.shuffle);
+}

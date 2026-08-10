@@ -45,6 +45,7 @@ import {
   comienzoDePista,
   ponerFotoDeArtista,
   ponerPortada,
+  ponerPortadaDePista,
   tarjeta,
   vacio,
 } from "../ui/cards.js";
@@ -265,7 +266,7 @@ export function mountSearchView(contenedor: HTMLElement, ruta?: Ruta): Vista {
       case "track": {
         const pista = top.item;
         arte.append(icono("music", 48));
-        ponerPortada(arte, pista.albumId);
+        ponerPortadaDePista(arte, pista.id);
         titulo.textContent = pista.title;
         tipo.textContent = `${t("search.kind_track")} · ${pista.artistDisplay}`;
         caja.addEventListener("click", () => {

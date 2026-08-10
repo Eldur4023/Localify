@@ -25,6 +25,7 @@ pub mod ipc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use localify_core::domain::audio::DurationMs;
 use localify_core::domain::queue::PlayStatus;
 use localify_core::domain::track::TrackRow;
 use localify_core::events::DomainEvent;
@@ -156,14 +157,25 @@ impl std::fmt::Debug for Dependencias {
 ///
 /// `None` es "nada": ni pausado ni parado se anuncian. Un perfil que dice
 /// "escuchando" algo que lleva media hora en pausa es peor que uno vacío.
-async fn deseada(deps: &Dependencias) -> Option<Actividad> {
+async fn deseada(deps: &Dependencias, salto: Option<DurationMs>) -> Option<Actividad> {
     let estado = deps.playback.state().await;
     if estado.status != PlayStatus::Playing {
         return None;
     }
     let pista = estado.track?;
 
-    let (posicion, _) = deps.playback.position();
+    // Tras un salto se usa la posición **que traía el aviso**, no la del
+    // reproductor.
+    //
+    // `position()` lee un atómico que una tarea de fondo refresca cada 200 ms,
+    // así que justo después de rebobinar todavía devuelve el segundo anterior.
+    // Con ese valor, la actividad calculada sale idéntica a la ya publicada, el
+    // bucle decide que no hay nada que hacer y no manda nada **nunca**: el
+    // arreglo de emitir el evento no servía de nada por 200 milisegundos.
+    let posicion = match salto {
+        Some(p) => p,
+        None => deps.playback.position().0,
+    };
     let ahora = chrono::Utc::now().timestamp();
     let comienzo = ahora - i64::from(posicion.as_ms() / 1000);
 
@@ -250,19 +262,22 @@ pub async fn atender(deps: Dependencias, mut eventos: broadcast::Receiver<Domain
 
             tokio::select! {
                 recibido = eventos.recv() => match recibido {
+                    Ok(DomainEvent::Seeked { position_ms, .. }) => {
+                        let donde = Some(DurationMs::new(position_ms));
+                        deseado = if activo(&deps).await { deseada(&deps, donde).await } else { None };
+                    }
                     Ok(
                         DomainEvent::TrackChanged { .. }
-                        | DomainEvent::PlayStatusChanged { .. }
-                        | DomainEvent::Seeked { .. },
+                        | DomainEvent::PlayStatusChanged { .. },
                     ) => {
-                        deseado = if activo(&deps).await { deseada(&deps).await } else { None };
+                        deseado = if activo(&deps).await { deseada(&deps, None).await } else { None };
                     }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         debug!(perdidos = n, "Discord se retrasó");
                         // Perder eventos aquí importa poco, pero el estado
                         // publicado puede haberse quedado viejo: se recalcula.
-                        deseado = if activo(&deps).await { deseada(&deps).await } else { None };
+                        deseado = if activo(&deps).await { deseada(&deps, None).await } else { None };
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 },

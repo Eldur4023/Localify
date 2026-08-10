@@ -27,7 +27,7 @@ import { lyrics as api, player } from "../ipc/client.js";
 import { alRecibir } from "../ipc/events.js";
 import { alCambiarIdioma, t } from "../i18n/index.js";
 import { botonIcono, icono } from "../ui/icons.js";
-import { ponerPortada } from "../ui/cards.js";
+import { ponerPortadaDePista } from "../ui/cards.js";
 
 /** Cada cuánto se comprueba qué línea toca. El mismo ritmo que la barra. */
 const SONDEO_MS = 250;
@@ -51,8 +51,13 @@ export function mountNowPlaying(contenedor: HTMLElement): VistaAmpliada {
   const arte = document.createElement("div");
   arte.className = "ampliada__arte";
   arte.append(icono("music", 96));
-  // Álbum cuya portada grande está puesta.
-  let albumPintado: string | null = null;
+  // Canción cuya portada grande está puesta.
+  //
+  // Se guarda la canción y no su álbum. Con el álbum, todo lo que no tiene
+  // disco —una búsqueda, una playlist importada— compartía la clave `null` y
+  // esta vista no pintaba nada; y aunque la pintara, pediría una imagen
+  // distinta de la que sale en la lista y en la barra del reproductor.
+  let pistaPintada: string | null = null;
 
   const titulo = document.createElement("h1");
   titulo.className = "ampliada__titulo";
@@ -87,10 +92,10 @@ export function mountNowPlaying(contenedor: HTMLElement): VistaAmpliada {
 
   function pintarCabecera(estado: PlayerStateDto): void {
     titulo.textContent = estado.track?.title ?? t("player.nothing");
-    if (estado.track?.albumId !== albumPintado) {
-      albumPintado = estado.track?.albumId ?? null;
+    if (estado.track?.id !== pistaPintada) {
+      pistaPintada = estado.track?.id ?? null;
       arte.querySelector(".portada")?.remove();
-      ponerPortada(arte, albumPintado);
+      if (pistaPintada) ponerPortadaDePista(arte, pistaPintada);
     }
     artista.textContent = estado.track?.artistDisplay ?? "";
     album.textContent = estado.track?.albumTitle ?? "";

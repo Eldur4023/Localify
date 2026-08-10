@@ -76,6 +76,17 @@ fn deserializar_ids(json: Option<&str>) -> Vec<TrackId> {
 
 #[async_trait]
 impl PlayerStateRepository for SqlitePlayerStateRepository {
+    /// Lee la fila entera, **haya o no una canción guardada**.
+    ///
+    /// Filtraba por `track_id.is_some()`, y tenía sentido cuando lo único que
+    /// vivía aquí era la sesión. Pero en la misma fila están el volumen, la
+    /// repetición y el aleatorio, que no son la sesión sino ajustes del
+    /// reproductor: con el filtro, cerrar la aplicación sin nada sonando los
+    /// perdía todos, porque quien restaura ni siquiera llegaba a verlos.
+    ///
+    /// `None` significa ahora lo que dice: no hay fila. Decidir si además hay
+    /// sesión que continuar es cosa de quien llama, que para eso mira
+    /// `track_id`.
     async fn load(&self) -> CoreResult<Option<PersistedPlayerState>> {
         self.pool
             .leer(|conn| {
@@ -121,10 +132,6 @@ impl PlayerStateRepository for SqlitePlayerStateRepository {
             })
             .await
             .to_core()
-            // Sin pista guardada no hay sesión que restaurar. La fila existe
-            // siempre —la crea la migración—, así que el filtro tiene que ser
-            // por contenido y no por presencia.
-            .map(|estado| estado.filter(|e| e.track_id.is_some()))
     }
 
     async fn save(&self, state: &PersistedPlayerState) -> CoreResult<()> {
@@ -219,6 +226,41 @@ mod tests {
         let (pool, guard) = Pool::temporal().expect("abre");
         crate::migrations::ejecutar(&pool).await.expect("migra");
         (SqlitePlayerStateRepository::new(pool.clone()), pool, guard)
+    }
+
+    #[tokio::test]
+    async fn olvidar_la_sesion_conserva_los_ajustes() {
+        // `clear` borra la sesión —qué sonaba, dónde y con qué cola— pero no el
+        // volumen ni los modos: son ajustes del reproductor, no parte de la
+        // sesión, y vaciar la biblioteca no debería subir el volumen al máximo.
+        let (repo, pool, _g) = ctx().await;
+        let pista = nueva_pista(&pool, "X").await;
+
+        repo.save(&PersistedPlayerState {
+            track_id: Some(pista),
+            position: DurationMs::new(42_000),
+            volume: Volume::new(0.4),
+            repeat: RepeatMode::Queue,
+            shuffle: true,
+            shuffle_seed: Some(7),
+            context: None,
+            context_queue: Vec::new(),
+            user_queue: Vec::new(),
+            queue_index: 0,
+        })
+        .await
+        .expect("guarda");
+
+        repo.clear().await.expect("olvida");
+
+        let leido = repo.load().await.expect("lee").expect("la fila sigue ahí");
+        assert!(leido.track_id.is_none(), "la sesión se va");
+        assert!(
+            (leido.volume.as_f32() - 0.4).abs() < 1e-6,
+            "el volumen se queda"
+        );
+        assert_eq!(leido.repeat, RepeatMode::Queue, "los modos se quedan");
+        assert!(leido.shuffle);
     }
 
     async fn nueva_pista(pool: &Pool, titulo: &str) -> TrackId {
@@ -321,11 +363,13 @@ mod tests {
 
     #[tokio::test]
     async fn una_base_de_datos_recien_creada_no_tiene_sesion() {
-        // La migración crea la fila siempre, así que `load` tiene que
-        // distinguir "hay fila vacía" de "hay sesión".
+        // La migración crea la fila siempre. `load` devuelve esa fila —dentro
+        // van el volumen y los modos, que no son la sesión— y quien restaura
+        // decide mirando `track_id`.
         let (repo, _pool, _g) = ctx().await;
+        let leido = repo.load().await.expect("lee").expect("la fila existe");
         assert!(
-            repo.load().await.expect("lee").is_none(),
+            leido.track_id.is_none(),
             "sin pista guardada no hay nada que restaurar"
         );
     }
@@ -352,8 +396,9 @@ mod tests {
         .await
         .expect("borra");
 
+        let leido = repo.load().await.expect("lee").expect("la fila sigue ahí");
         assert!(
-            repo.load().await.expect("lee").is_none(),
+            leido.track_id.is_none(),
             "la referencia queda a NULL: no hay sesión, pero tampoco error"
         );
     }
