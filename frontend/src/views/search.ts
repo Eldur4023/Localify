@@ -42,18 +42,17 @@ import { alRecibir } from "../ipc/events.js";
 import { alCambiarIdioma, t } from "../i18n/index.js";
 import {
   carrusel,
-  comienzoDePista,
   ponerFotoDeArtista,
   ponerPortada,
   ponerPortadaDePista,
   tarjeta,
   vacio,
 } from "../ui/cards.js";
+import { filaSuelta } from "../ui/fila-suelta.js";
 import { icono } from "../ui/icons.js";
 import { arrastrable } from "../ui/dnd.js";
 import { abrirMenu } from "../ui/menu.js";
 import { opcionesDePista } from "../ui/opciones-pista.js";
-import { duracion } from "../shell/player.js";
 import type { Ruta, Vista } from "../router.js";
 
 /** Pistas que se muestran. Pasado ese punto nadie sigue mirando. */
@@ -105,49 +104,12 @@ export function mountSearchView(contenedor: HTMLElement, ruta?: Ruta): Vista {
 
   /** Fila compacta de pista, con su menú y su arrastre. */
   function filaDePista(pista: TrackRowDto, contexto: string[]): HTMLElement {
-    const fila = document.createElement("div");
-    fila.className = "track track--suelta";
-
-    const arte = comienzoDePista(pista.albumId, pista.id);
-
-    const titulo = document.createElement("span");
-    titulo.className = "track__title";
-    titulo.textContent = pista.title;
-
-    const artista = document.createElement("span");
-    artista.className = "track__artist";
-    artista.textContent = pista.artistDisplay;
-
-    const tiempo = document.createElement("span");
-    tiempo.className = "track__time";
-    tiempo.textContent = duracion(pista.durationMs);
-
-    fila.append(arte, titulo, artista, tiempo);
-
-    const reproducir = (): void => {
-      void player.playTrack(pista.id, {
-        kind: "search",
-        query: entrada.value,
-        trackIds: contexto,
-      });
-    };
-    fila.addEventListener("click", reproducir);
-    fila.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
-      // Las mismas opciones que en cualquier otra lista. Aquí tenía solo
-      // "reproducir", y era la pantalla donde uno encuentra la canción que
-      // quiere guardar en algún sitio.
-      abrirMenu(
-        e.clientX,
-        e.clientY,
-        opcionesDePista(pista, {
-          contexto: () => ({ kind: "search", query: entrada.value, trackIds: contexto }),
-        }),
-      );
+    const fila = filaSuelta(pista, {
+      secundario: pista.artistDisplay,
+      contexto: () => ({ kind: "search", query: entrada.value, trackIds: contexto }),
     });
-    desmontadores.push(arrastrable(fila, () => [pista.id]));
-
-    return fila;
+    desmontadores.push(() => fila.destroy());
+    return fila.el;
   }
 
   /**

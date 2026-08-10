@@ -14,18 +14,9 @@
 import type { ArtistDetailDto, TrackRowDto } from "../ipc/types.gen.js";
 import { library, player } from "../ipc/client.js";
 import { alCambiarIdioma, t } from "../i18n/index.js";
-import {
-  carrusel,
-  conEspera,
-  comienzoDePista,
-  ponerFotoDeArtista,
-  tarjeta,
-  vacio,
-} from "../ui/cards.js";
-import { arrastrable } from "../ui/dnd.js";
-import { abrirMenu } from "../ui/menu.js";
+import { carrusel, conEspera, ponerFotoDeArtista, tarjeta, vacio } from "../ui/cards.js";
+import { filaSuelta } from "../ui/fila-suelta.js";
 import { botonIcono, icono } from "../ui/icons.js";
-import { duracion } from "../shell/player.js";
 import type { Ruta, Vista } from "../router.js";
 
 export function mountArtistView(contenedor: HTMLElement, ruta: Ruta): Vista {
@@ -76,42 +67,15 @@ export function mountArtistView(contenedor: HTMLElement, ruta: Ruta): Vista {
   const desmontadores: Array<() => void> = [];
 
   function filaDePista(pista: TrackRowDto, indice: number): HTMLElement {
-    const fila = document.createElement("div");
-    fila.className = "track track--suelta";
-
-    const num = document.createElement("span");
-    num.className = "track__index";
-    num.textContent = String(indice + 1);
-
-    const arte = comienzoDePista(pista.albumId, pista.id);
-
-    const t1 = document.createElement("span");
-    t1.className = "track__title";
-    t1.textContent = pista.title;
-
-    const t2 = document.createElement("span");
-    t2.className = "track__artist";
-    t2.textContent = pista.albumTitle ?? "";
-
-    const t3 = document.createElement("span");
-    t3.className = "track__time";
-    t3.textContent = duracion(pista.durationMs);
-
-    fila.append(num, arte, t1, t2, t3);
-
-    const sonar = (): void => {
-      void player.playTrack(pista.id, { kind: "artist", id: artistId });
-    };
-    fila.addEventListener("click", sonar);
-    fila.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
-      abrirMenu(e.clientX, e.clientY, [
-        { clave: "play", etiqueta: t("menu.play"), icono: "play", ejecutar: sonar },
-      ]);
+    // El álbum en la segunda columna: en la ficha de un artista, repetir su
+    // nombre en cada fila no dice nada que la pantalla no diga ya.
+    const fila = filaSuelta(pista, {
+      indice,
+      secundario: pista.albumTitle ?? "",
+      contexto: () => ({ kind: "artist", id: artistId }),
     });
-    desmontadores.push(arrastrable(fila, () => [pista.id]));
-
-    return fila;
+    desmontadores.push(() => fila.destroy());
+    return fila.el;
   }
 
   function pintar(): void {
