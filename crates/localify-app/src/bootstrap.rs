@@ -330,9 +330,10 @@ fn hwnd_principal(app: &tauri::App) -> Option<isize> {
 /// Abre la persistencia y cablea el contexto.
 ///
 /// **Nunca falla el arranque.** Si la base de datos no se puede abrir o las
-/// migraciones fallan, se arranca en modo degradado con datos en memoria: la
-/// interfaz sigue siendo utilizable y el usuario puede ver qué pasó y exportar
-/// su base de datos. Cerrarse le dejaría sin forma de recuperar su biblioteca.
+/// migraciones fallan, se arranca sin biblioteca: la ventana se abre, Ajustes
+/// sigue accesible —es donde está la ruta de la carpeta— y cada operación dice
+/// por qué no puede hacerse. Cerrarse dejaría al usuario delante de una ventana
+/// que desaparece, sin saber dónde ha quedado su música.
 fn construir_contexto(
     paths: &LocalifyPaths,
     bus: &crate::bridge::EventBus,
@@ -366,8 +367,8 @@ fn construir_contexto(
     match resultado {
         Ok(ctx) => ctx,
         Err(e) => {
-            error!(error = %e, "arranque en modo degradado: sin persistencia");
-            crate::context::AppContext::en_memoria(bus.clone())
+            error!(error = %e, "arranque sin biblioteca: la base de datos no abre");
+            crate::context::AppContext::sin_biblioteca(bus.clone(), paths.library_dir().to_owned())
         }
     }
 }

@@ -85,8 +85,10 @@ Reflejamos eso exactamente:
 
 **Migraciones.** `refinery`, ficheros `V{n}__{nombre}.sql` embebidos en el
 binario. Se ejecutan al arrancar dentro de una transacción. Si una migración
-falla, la app arranca en **modo degradado**: la UI muestra el error y ofrece
-exportar la base de datos, en lugar de cerrarse.
+falla, la app arranca **sin biblioteca** en lugar de cerrarse: la ventana se
+abre, Ajustes sigue diciendo dónde debería estar la carpeta, y cada operación
+devuelve el error de almacenamiento. No se inventan datos para rellenar la
+pantalla; ver `localify-services::inerte`.
 
 **Invariantes.** Ninguna operación de SQLite ocurre en un hilo del runtime
 async. Ninguna transacción de escritura vive más de una operación lógica.

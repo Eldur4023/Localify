@@ -17,11 +17,7 @@ use localify_core::ports::services::{
     PlaybackService, PlaylistService, QueueService, RecommendationService, SearchService,
     SettingsService,
 };
-use localify_services::memory::{
-    Contexto, DownloadEnMemoria, LibraryEnMemoria, LyricsEnMemoria, MemoryStore, MetadataEnMemoria,
-    NotificationEnMemoria, PlaybackEnMemoria, PlaylistEnMemoria, QueueEnMemoria,
-    RecommendationEnMemoria, SearchEnMemoria, SettingsEnMemoria,
-};
+use localify_services::inerte::{AvisosPorBus, SinAudio, SinBiblioteca, SinLetras};
 
 use crate::bridge::EventBus;
 
@@ -107,10 +103,6 @@ impl std::fmt::Debug for Infraestructura {
 
 impl AppContext {
     /// Cablea la aplicación con la persistencia y el proveedor reales.
-    ///
-    /// Los servicios que aún no existen (reproducción, descargas, cola) siguen
-    /// siendo provisionales; se irán sustituyendo en sus fases sin que esto
-    /// afecte a los comandos ni al frontend.
     ///
     /// # Errors
     /// Si el transporte HTTP no se puede construir.
@@ -202,12 +194,6 @@ impl AppContext {
         let lyrics = letras(&infra, &tracks);
         let lastfm = scrobbler(&infra, &tracks, &settings);
 
-        // ── Servicios aún provisionales ─────────────────────────────────────
-        let provisional = Contexto {
-            store: MemoryStore::con_ejemplo(),
-            bus: Arc::clone(&publicador),
-        };
-
         Ok(Self {
             library,
             search,
@@ -219,7 +205,7 @@ impl AppContext {
             lyrics,
             settings,
             metadata,
-            notifications: Arc::new(NotificationEnMemoria(provisional)),
+            notifications: Arc::new(AvisosPorBus(Arc::clone(&publicador))),
             mantenimiento: Some(mantenimiento(&infra)),
             lastfm: Some(lastfm),
             para_discord: Some(PiezasDeDiscord {
@@ -231,30 +217,40 @@ impl AppContext {
         })
     }
 
-    /// Cablea la aplicación con los servicios provisionales en memoria.
+    /// Cablea la aplicación **sin biblioteca**, para cuando la base de datos no
+    /// abre o su esquema no es utilizable.
     ///
-    /// Se conserva para los tests y para el modo degradado: si la base de datos
-    /// no se puede abrir, arrancar así es preferible a no arrancar.
+    /// ## Por qué se arranca igual
+    ///
+    /// Cerrarse dejaría al usuario delante de una ventana que desaparece, sin
+    /// saber qué ha pasado ni dónde está su biblioteca. Abriendo, la pantalla de
+    /// Ajustes sigue accesible —es donde está la ruta— y cada operación dice por
+    /// qué no puede hacerse.
+    ///
+    /// ## Por qué ya no hay datos de ejemplo
+    ///
+    /// Aquí se cableaban trece servicios sobre un catálogo inventado, y el
+    /// resultado era que abrir la aplicación con la base de datos rota enseñaba
+    /// una biblioteca de Queen y Radiohead como si fuera la del usuario. Nada en
+    /// la pantalla decía que no lo era. Un error se entiende; una biblioteca
+    /// ajena, no.
     #[must_use]
-    pub fn en_memoria(bus: EventBus) -> Self {
+    pub fn sin_biblioteca(bus: EventBus, ruta: std::path::PathBuf) -> Self {
         let publicador: Arc<dyn EventPublisher> = Arc::new(bus.clone());
-        let ctx = Contexto {
-            store: MemoryStore::con_ejemplo(),
-            bus: Arc::clone(&publicador),
-        };
+        let inerte = Arc::new(SinBiblioteca::nuevo(ruta));
 
         Self {
-            library: Arc::new(LibraryEnMemoria(ctx.clone())),
-            search: Arc::new(SearchEnMemoria(ctx.clone())),
-            playback: Arc::new(PlaybackEnMemoria(ctx.clone())),
-            queue: Arc::new(QueueEnMemoria(ctx.clone())),
-            downloads: Arc::new(DownloadEnMemoria(ctx.clone())),
-            playlists: Arc::new(PlaylistEnMemoria(ctx.clone())),
-            recommendations: Arc::new(RecommendationEnMemoria(ctx.clone())),
-            lyrics: Arc::new(LyricsEnMemoria),
-            settings: Arc::new(SettingsEnMemoria(ctx.clone())),
-            metadata: Arc::new(MetadataEnMemoria),
-            notifications: Arc::new(NotificationEnMemoria(ctx)),
+            library: Arc::clone(&inerte) as _,
+            search: Arc::clone(&inerte) as _,
+            playback: Arc::new(SinAudio),
+            queue: Arc::clone(&inerte) as _,
+            downloads: Arc::clone(&inerte) as _,
+            playlists: Arc::clone(&inerte) as _,
+            recommendations: Arc::clone(&inerte) as _,
+            lyrics: Arc::new(SinLetras),
+            settings: Arc::clone(&inerte) as _,
+            metadata: inerte as _,
+            notifications: Arc::new(AvisosPorBus(publicador)),
             mantenimiento: None,
             lastfm: None,
             para_discord: None,
@@ -433,7 +429,7 @@ fn letras(
         )),
         Err(e) => {
             tracing::warn!(error = %e, "sin cliente HTTP: no habrá letras");
-            Arc::new(LyricsEnMemoria)
+            Arc::new(SinLetras)
         }
     }
 }
@@ -655,10 +651,7 @@ async fn reproduccion(
     };
 
     let (Some(motor), Some(eventos)) = (motor, eventos) else {
-        return Arc::new(PlaybackEnMemoria(Contexto {
-            store: MemoryStore::vacio(),
-            bus: Arc::clone(publicador),
-        }));
+        return Arc::new(SinAudio);
     };
 
     let actor =
@@ -694,13 +687,18 @@ mod tests {
     use super::*;
 
     fn contexto() -> AppContext {
-        AppContext::en_memoria(EventBus::new())
+        AppContext::sin_biblioteca(EventBus::new(), std::path::PathBuf::from(r"D:\Musica"))
     }
 
     #[tokio::test]
-    async fn el_contexto_sirve_datos_desde_el_primer_arranque() {
+    async fn sin_base_de_datos_la_biblioteca_falla_en_vez_de_inventar() {
+        // Antes había aquí trece servicios sobre un catálogo de ejemplo, y este
+        // mismo test exigía lo contrario: que la lista **no** viniera vacía,
+        // "porque el frontend necesita algo que pintar". La consecuencia era que
+        // abrir la aplicación con la base de datos rota enseñaba una biblioteca
+        // de Queen y Radiohead como si fuera la del usuario.
         let ctx = contexto();
-        let pagina = ctx
+        let error = ctx
             .library
             .tracks(
                 &TrackFilter::default(),
@@ -708,51 +706,25 @@ mod tests {
                 &PageRequest::new(0, 50),
             )
             .await
-            .expect("lista");
+            .expect_err("no hay biblioteca que listar");
 
-        assert!(
-            !pagina.items.is_empty(),
-            "el frontend necesita algo que pintar"
-        );
-        assert!(pagina.total.is_some());
+        assert_eq!(error.code(), "STORAGE");
     }
 
     #[tokio::test]
-    async fn reproducir_emite_los_eventos_esperados() {
+    async fn sin_base_de_datos_los_ajustes_siguen_diciendo_donde_esta_la_carpeta() {
+        // Es lo único que se responde de verdad, y a propósito: es el dato que
+        // el usuario necesita para ir a mirar qué le ha pasado a su música.
         let ctx = contexto();
-        let mut rx = ctx.bus.subscribe();
-
-        let pista = ctx
-            .library
-            .tracks(
-                &TrackFilter::default(),
-                localify_core::domain::track::TrackSort::TitleAsc,
-                &PageRequest::new(0, 1),
-            )
-            .await
-            .expect("lista")
-            .items
-            .remove(0);
-
-        ctx.playback
-            .play_track(&pista.id, PlaybackContext::Library)
-            .await
-            .expect("reproduce");
-
-        let primero = rx.recv().await.expect("recibe");
-        assert!(matches!(
-            primero,
-            localify_core::events::DomainEvent::TrackChanged { .. }
-        ));
-        let segundo = rx.recv().await.expect("recibe");
-        assert!(matches!(
-            segundo,
-            localify_core::events::DomainEvent::PlayStatusChanged { .. }
-        ));
+        let ajustes = ctx.settings.get().await;
+        assert_eq!(ajustes.library_path, std::path::PathBuf::from(r"D:\Musica"));
     }
 
     #[tokio::test]
-    async fn reproducir_algo_inexistente_devuelve_no_encontrado() {
+    async fn sin_tarjeta_de_sonido_reproducir_falla_en_vez_de_fingir() {
+        // Fingía: marcaba la canción como sonando y dejaba la barra a cero. El
+        // usuario la veía puesta en el reproductor y no oía nada, sin ninguna
+        // explicación en pantalla.
         let ctx = contexto();
         let error = ctx
             .playback
@@ -761,36 +733,21 @@ mod tests {
                 PlaybackContext::Single,
             )
             .await
-            .expect_err("debe fallar");
-        assert_eq!(error.code(), "NOT_FOUND");
+            .expect_err("no hay dispositivo de audio");
+
+        assert_eq!(error.code(), "AUDIO");
     }
 
     #[tokio::test]
-    async fn la_busqueda_incrementa_el_identificador_de_consulta() {
+    async fn sin_tarjeta_de_sonido_el_reproductor_se_pinta_parado() {
+        // El estado sí se responde: un error aquí dejaría la barra inferior rota
+        // en vez de simplemente quieta.
         let ctx = contexto();
-        let primera = ctx
-            .search
-            .search(
-                "queen",
-                localify_core::ports::services::SearchScope::default(),
-                &PageRequest::new(0, 20),
-            )
-            .await
-            .expect("busca");
-        let segunda = ctx
-            .search
-            .search(
-                "queen",
-                localify_core::ports::services::SearchScope::default(),
-                &PageRequest::new(0, 20),
-            )
-            .await
-            .expect("busca");
-
-        assert!(
-            segunda.query_id > primera.query_id,
-            "el cliente descarta respuestas viejas comparando este número"
+        let estado = ctx.playback.state().await;
+        assert_eq!(
+            estado.status,
+            localify_core::domain::queue::PlayStatus::Stopped
         );
-        assert!(!primera.tracks.is_empty());
+        assert!(estado.track.is_none());
     }
 }

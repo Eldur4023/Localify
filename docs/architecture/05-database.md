@@ -503,8 +503,9 @@ Reglas:
 2. Toda migración se ejecuta dentro de una transacción.
 3. Antes de aplicar migraciones, se copia `localify.db` a
    `localify.db.bak.v{n}` (se conservan las 2 últimas).
-4. Si una migración falla, la app arranca en **modo degradado**: UI operativa,
-   error visible, opción de exportar la base de datos. No se cierra.
+4. Si una migración falla, la app arranca **sin biblioteca**: la ventana se abre
+   y cada operación devuelve el error, que la UI enseña. No se cierra y no se
+   sustituye el catálogo por datos de ejemplo.
 5. Sin migraciones hacia atrás: instalar una versión anterior sobre una base de
    datos más nueva se detecta por `user_version` y se avisa.
 

@@ -14,9 +14,9 @@
 //! los demás, porque lo que se inyecta es un handle que implementa el mismo
 //! trait.
 //!
-//! **Estado: se completa entre las Fases 5 y 9.** Mientras tanto, el módulo
-//! [`memory`] aporta implementaciones provisionales que cumplen el contrato
-//! completo, para que la API y el frontend puedan construirse en paralelo.
+//! El módulo [`inerte`] cubre lo que queda cuando falta una pieza de la que
+//! todo lo demás depende —la base de datos, la tarjeta de sonido—: la
+//! aplicación arranca igual y dice qué falta, en vez de cerrarse o de inventar.
 
 // En los tests, `expect` con un mensaje es la forma correcta de fallar.
 #![cfg_attr(test, allow(clippy::expect_used))]
@@ -25,7 +25,7 @@ pub mod actors;
 pub mod ajustes;
 pub mod biblioteca;
 pub mod combinado;
-pub mod memory;
+pub mod inerte;
 pub mod metadata;
 pub mod playlists;
 pub mod proveedor;
