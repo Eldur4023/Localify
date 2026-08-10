@@ -8,13 +8,14 @@ use localify_core::error::CoreResult;
 use localify_core::page::{Cursor, Page, PageRequest};
 use localify_core::ports::database::AlbumRepository;
 use localify_core::text;
-use rusqlite::{Row, params};
+use rusqlite::{OptionalExtension, Row, params};
 
 use crate::error::{DbResult, ToCore};
 use crate::mappers::{
     COLUMNAS_TRACK_ROW, JOINS_TRACK_ROW, a_fecha_lanzamiento, a_track_row, anyo_de, de_tipo_album,
 };
 use crate::pool::Pool;
+use crate::repositories::artists::asegurar_artista;
 
 pub struct SqliteAlbumRepository {
     pool: Pool,
@@ -86,23 +87,21 @@ impl AlbumRepository for SqliteAlbumRepository {
                      FROM albums WHERE id = ?1",
                 )?;
 
-                let base = stmt.query_row([id.as_str()], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, Option<String>>(2)?,
-                        r.get::<_, Option<u16>>(3)?,
-                        r.get::<_, Option<String>>(4)?,
-                        r.get::<_, i64>(5)?,
-                        r.get::<_, Option<String>>(6)?,
-                    ))
-                });
+                let base = stmt
+                    .query_row([id.as_str()], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                            r.get::<_, Option<u16>>(3)?,
+                            r.get::<_, Option<String>>(4)?,
+                            r.get::<_, i64>(5)?,
+                            r.get::<_, Option<String>>(6)?,
+                        ))
+                    })
+                    .optional()?;
 
-                let base = match base {
-                    Ok(b) => b,
-                    Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-                    Err(e) => return Err(e.into()),
-                };
+                let Some(base) = base else { return Ok(None) };
 
                 let mut stmt = conn.prepare_cached(
                     "SELECT ar.id, ar.name
@@ -147,17 +146,17 @@ impl AlbumRepository for SqliteAlbumRepository {
         self.pool
             .escribir(move |tx| {
                 for album in &albums {
-                    for artista in &album.artists {
-                        tx.execute(
-                            "INSERT INTO artists (id, name, name_norm) VALUES (?1, ?2, ?3)
-                             ON CONFLICT (id) DO UPDATE SET name = ?2, name_norm = ?3",
-                            params![
-                                artista.id.as_str(),
-                                artista.name,
-                                text::normalize(&artista.name)
-                            ],
-                        )?;
-                    }
+                    // El identificador con el que queda cada artista no tiene
+                    // por qué ser el que traía: uno local se resuelve contra el
+                    // que ya hubiera con ese nombre. Escribirlos a pelo aquí era
+                    // la puerta por la que un álbum importado seguía creando
+                    // artistas repetidos aunque el camino de las pistas ya no lo
+                    // hiciera.
+                    let artistas: Vec<String> = album
+                        .artists
+                        .iter()
+                        .map(|a| asegurar_artista(tx, a))
+                        .collect::<DbResult<_>>()?;
 
                     tx.execute(
                         "INSERT INTO albums (
@@ -191,16 +190,22 @@ impl AlbumRepository for SqliteAlbumRepository {
                         "DELETE FROM album_artists WHERE album_id = ?1",
                         [album.id.as_str()],
                     )?;
-                    for (posicion, artista) in album.artists.iter().enumerate() {
+                    // Se deduplica por el identificador **ya canonizado**, igual
+                    // que en `tracks`: dos locales distintos pueden resolverse
+                    // al mismo artista, y la pareja repetida violaría la clave
+                    // primaria abortando la transacción entera.
+                    let mut vistos = std::collections::HashSet::new();
+                    let mut posicion = 0_i64;
+                    for id in &artistas {
+                        if !vistos.insert(id.clone()) {
+                            continue;
+                        }
                         tx.execute(
                             "INSERT INTO album_artists (album_id, artist_id, position)
                              VALUES (?1, ?2, ?3)",
-                            params![
-                                album.id.as_str(),
-                                artista.id.as_str(),
-                                i64::try_from(posicion).unwrap_or(0)
-                            ],
+                            params![album.id.as_str(), id, posicion],
                         )?;
+                        posicion += 1;
                     }
                 }
                 Ok(())
@@ -393,6 +398,84 @@ mod tests {
             popularity: None,
             added_at: chrono::Utc::now(),
         }
+    }
+
+    /// Cuántos artistas hay guardados con ese nombre normalizado.
+    async fn cuantos_llamados(pool: &Pool, nombre: &str) -> i64 {
+        let n = text::normalize(nombre);
+        pool.leer(move |conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM artists WHERE name_norm = ?1",
+                [&n],
+                |r| r.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .expect("cuenta")
+    }
+
+    #[tokio::test]
+    async fn guardar_un_album_no_duplica_a_su_artista() {
+        // El camino de las pistas ya canonizaba los identificadores locales,
+        // pero este escribía los suyos a pelo: un álbum bastaba para volver a
+        // sembrar el «coldrain» repetido que la migración V4 acababa de limpiar.
+        let (repo, _tracks, pool, _g) = repos().await;
+
+        repo.upsert(&[album("Uno", vec![artista("Queen")])])
+            .await
+            .expect("guarda");
+        repo.upsert(&[album("Otro", vec![artista("Queen")])])
+            .await
+            .expect("guarda");
+
+        assert_eq!(cuantos_llamados(&pool, "Queen").await, 1);
+    }
+
+    #[tokio::test]
+    async fn el_artista_de_un_album_se_engancha_al_del_catalogo() {
+        // Es lo que hace que el álbum importado herede la foto y los géneros en
+        // lugar de colgar de un duplicado mudo.
+        let (repo, _tracks, pool, _g) = repos().await;
+        let del_catalogo = ArtistRef {
+            id: ArtistId::from_trusted("UC1WV_zQ6vd52xitFX2cANYg"),
+            name: "coldrain".into(),
+        };
+
+        repo.upsert(&[album("Del catálogo", vec![del_catalogo])])
+            .await
+            .expect("guarda");
+        let importado = album("Importado", vec![artista("coldrain")]);
+        repo.upsert(std::slice::from_ref(&importado))
+            .await
+            .expect("guarda");
+
+        assert_eq!(cuantos_llamados(&pool, "coldrain").await, 1);
+        let leido = repo.get(&importado.id).await.expect("lee").expect("existe");
+        assert_eq!(leido.artists[0].id.as_str(), "UC1WV_zQ6vd52xitFX2cANYg");
+    }
+
+    #[tokio::test]
+    async fn un_artista_repetido_en_el_mismo_album_no_tumba_el_lote() {
+        // Dos locales con el mismo nombre se canonizan al mismo identificador, y
+        // la pareja repetida violaría la clave primaria de `album_artists`
+        // abortando la transacción entera.
+        let (repo, _tracks, _pool, _g) = repos().await;
+        let uno = album(
+            "Con crédito repetido",
+            vec![artista("Casey Edwards"), artista("Casey Edwards")],
+        );
+        let otro = album("Acompañante", vec![artista("Victor Borba")]);
+
+        repo.upsert(&[uno.clone(), otro.clone()])
+            .await
+            .expect("el lote entero tiene que guardarse");
+
+        let leido = repo.get(&uno.id).await.expect("lee").expect("existe");
+        assert_eq!(leido.artists.len(), 1);
+        assert!(
+            repo.get(&otro.id).await.expect("lee").is_some(),
+            "el otro álbum del lote no puede perderse por culpa del primero"
+        );
     }
 
     #[tokio::test]

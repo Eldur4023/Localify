@@ -17,8 +17,8 @@ pub mod servicios;
 pub mod store;
 
 pub use servicios::{
-    CacheEnMemoria, Contexto, DownloadEnMemoria, LibraryEnMemoria, LyricsEnMemoria,
-    MetadataEnMemoria, NotificationEnMemoria, PlaybackEnMemoria, PlaylistEnMemoria, QueueEnMemoria,
+    Contexto, DownloadEnMemoria, LibraryEnMemoria, LyricsEnMemoria, MetadataEnMemoria,
+    NotificationEnMemoria, PlaybackEnMemoria, PlaylistEnMemoria, QueueEnMemoria,
     RecommendationEnMemoria, SearchEnMemoria, SettingsEnMemoria,
 };
 pub use store::{Datos, MemoryStore};

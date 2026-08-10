@@ -4,16 +4,83 @@ use async_trait::async_trait;
 use localify_core::domain::album::AlbumRow;
 use localify_core::domain::artist::{Artist, ArtistRow};
 use localify_core::domain::ids::ArtistId;
-use localify_core::domain::track::TrackRow;
+use localify_core::domain::track::{ArtistRef, TrackRow};
 use localify_core::error::CoreResult;
 use localify_core::page::{Cursor, Page, PageRequest};
 use localify_core::ports::database::ArtistRepository;
 use localify_core::text;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::error::{DbResult, ToCore};
 use crate::mappers::{COLUMNAS_TRACK_ROW, JOINS_TRACK_ROW, a_track_row, anyo_de};
 use crate::pool::Pool;
+
+/// Deja el artista guardado y devuelve el identificador con el que quedó.
+///
+/// ## Por qué no basta con insertarlo
+///
+/// Un artista no tiene un identificador universal: es un canal en YouTube
+/// Music, un UUID en MusicBrainz, y **nada** cuando llega desde la página de
+/// incrustación de Spotify, que solo publica los nombres. Para ese último caso
+/// se inventa uno local, y como se inventaba por cada canción, importar una
+/// playlist de treinta temas de un grupo creaba treinta artistas idénticos.
+///
+/// El resultado era la vista de artistas con siete «coldrain», seis de ellos con
+/// una canción y sin foto.
+///
+/// ## Qué hace
+///
+/// Si el identificador ya es de un catálogo, se respeta: es una identidad de
+/// verdad y dos artistas del mismo nombre pueden ser dos personas distintas.
+/// Solo cuando es local —o sea, cuando no sabemos quién es— se busca por nombre
+/// normalizado y se reutiliza el que hubiera, **prefiriendo uno no local**: ese
+/// es el que trae foto y géneros, y engancharse a él es lo que hace que las
+/// canciones importadas aparezcan bajo el artista bueno.
+///
+/// El riesgo asumido es fundir dos homónimos reales que nos hayan llegado los
+/// dos sin identidad. Es preferible: pasa rara vez, y la alternativa se veía en
+/// la vista de artistas.
+///
+/// ## Por qué vive aquí y no en cada llamante
+///
+/// Porque hay dos caminos de escritura —pistas y álbumes— y estuvieron cada uno
+/// con su copia del `INSERT`. Solo el de pistas canonizaba, así que un álbum
+/// importado seguía sembrando artistas locales repetidos por la puerta de atrás.
+/// Con una sola función no hay forma de escribir un artista saltándose la regla.
+///
+/// # Errors
+/// Si la consulta o la inserción fallan.
+pub(crate) fn asegurar_artista(tx: &Transaction<'_>, artista: &ArtistRef) -> DbResult<String> {
+    let id = id_canonico(tx, artista)?;
+    tx.execute(
+        "INSERT INTO artists (id, name, name_norm) VALUES (?1, ?2, ?3)
+         ON CONFLICT (id) DO UPDATE SET name = ?2, name_norm = ?3",
+        params![id, artista.name, text::normalize(&artista.name)],
+    )?;
+    Ok(id)
+}
+
+fn id_canonico(tx: &Transaction<'_>, artista: &ArtistRef) -> DbResult<String> {
+    let propio = artista.id.as_str().to_owned();
+    if !artista.id.es_local() {
+        return Ok(propio);
+    }
+
+    // `ORDER BY` con un booleano: `false` ordena antes que `true`, así que los
+    // que no son locales salen primero.
+    let existente = tx
+        .query_row(
+            "SELECT id FROM artists
+             WHERE name_norm = ?1
+             ORDER BY (id LIKE 'local:%'), id
+             LIMIT 1",
+            [text::normalize(&artista.name)],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?;
+
+    Ok(existente.unwrap_or(propio))
+}
 
 pub struct SqliteArtistRepository {
     pool: Pool,
@@ -43,20 +110,18 @@ impl ArtistRepository for SqliteArtistRepository {
                     "SELECT name, image_url, popularity, followers FROM artists WHERE id = ?1",
                 )?;
 
-                let base = stmt.query_row([id.as_str()], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, Option<String>>(1)?,
-                        r.get::<_, Option<u8>>(2)?,
-                        r.get::<_, Option<u64>>(3)?,
-                    ))
-                });
+                let base = stmt
+                    .query_row([id.as_str()], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, Option<String>>(1)?,
+                            r.get::<_, Option<u8>>(2)?,
+                            r.get::<_, Option<u64>>(3)?,
+                        ))
+                    })
+                    .optional()?;
 
-                let base = match base {
-                    Ok(b) => b,
-                    Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-                    Err(e) => return Err(e.into()),
-                };
+                let Some(base) = base else { return Ok(None) };
 
                 let mut stmt = conn.prepare_cached(
                     "SELECT g.name FROM artist_genres ag

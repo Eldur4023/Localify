@@ -12,7 +12,7 @@ use localify_core::error::CoreResult;
 use localify_core::page::{Cursor, Page, PageRequest};
 use localify_core::ports::database::PlaylistRepository;
 use localify_core::text;
-use rusqlite::{Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::error::{DbError, DbResult, ToCore};
 use crate::mappers::{
@@ -138,24 +138,20 @@ impl PlaylistRepository for SqlitePlaylistRepository {
                      FROM playlists WHERE id = ?1",
                 )?;
 
-                let fila = stmt.query_row([&id_txt], |r| {
-                    Ok(Playlist {
-                        id,
-                        name: r.get(0)?,
-                        description: r.get(1)?,
-                        cover_path: r.get(2)?,
-                        source: a_origen_playlist(&r.get::<_, String>(3)?),
-                        source_id: r.get(4)?,
-                        created_at: a_fecha(r.get::<_, i64>(5)?),
-                        updated_at: a_fecha(r.get::<_, i64>(6)?),
+                Ok(stmt
+                    .query_row([&id_txt], |r| {
+                        Ok(Playlist {
+                            id,
+                            name: r.get(0)?,
+                            description: r.get(1)?,
+                            cover_path: r.get(2)?,
+                            source: a_origen_playlist(&r.get::<_, String>(3)?),
+                            source_id: r.get(4)?,
+                            created_at: a_fecha(r.get::<_, i64>(5)?),
+                            updated_at: a_fecha(r.get::<_, i64>(6)?),
+                        })
                     })
-                });
-
-                match fila {
-                    Ok(p) => Ok(Some(p)),
-                    Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                    Err(e) => Err(e.into()),
-                }
+                    .optional()?)
             })
             .await
             .to_core()

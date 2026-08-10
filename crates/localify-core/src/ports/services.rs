@@ -513,50 +513,12 @@ pub trait LyricsService: Send + Sync + 'static {
     async fn get(&self, track: &TrackId) -> CoreResult<Option<Lyrics>>;
 }
 
-/// Espacios de nombres de la caché, cada uno con su caducidad.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CacheNamespace {
-    SpotifyTrack,
-    SpotifyAlbum,
-    SpotifyArtist,
-    SpotifySearch,
-    Lyrics,
-    /// Caché negativa: recordar que algo no existe evita reintentarlo sin fin.
-    LyricsNotFound,
-}
-
-impl CacheNamespace {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::SpotifyTrack => "spotify:track",
-            Self::SpotifyAlbum => "spotify:album",
-            Self::SpotifyArtist => "spotify:artist",
-            Self::SpotifySearch => "spotify:search",
-            Self::Lyrics => "lyrics",
-            Self::LyricsNotFound => "lyrics:negative",
-        }
-    }
-
-    /// Caducidad por defecto, en segundos.
-    #[must_use]
-    pub const fn ttl_secs(self) -> u64 {
-        const DIA: u64 = 86_400;
-        match self {
-            Self::SpotifyTrack | Self::SpotifyAlbum | Self::SpotifyArtist => 30 * DIA,
-            Self::SpotifySearch => 3600,
-            Self::Lyrics | Self::LyricsNotFound => 30 * DIA,
-        }
-    }
-}
-
-#[async_trait]
-pub trait CacheService: Send + Sync + 'static {
-    async fn get_bytes(&self, ns: CacheNamespace, key: &str) -> Option<Vec<u8>>;
-    async fn put_bytes(&self, ns: CacheNamespace, key: &str, value: &[u8]);
-    async fn invalidate(&self, ns: CacheNamespace, key: &str);
-    async fn purge_expired(&self) -> CoreResult<u64>;
-}
+// La caché no tiene puerto de servicio. Hubo un `CacheService` con su propia
+// enumeración de espacios de nombres y su propia tabla de caducidades, pero
+// nunca llegó a conectarse: quien cachea de verdad —las recomendaciones— usa
+// `CacheRepository`, que recibe el espacio y el TTL como argumentos. Dos puertos
+// para lo mismo, uno de ellos con una única implementación que devolvía `None` a
+// todo y estaba cableada en producción.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToastLevel {
@@ -574,33 +536,4 @@ pub trait NotificationService: Send + Sync + 'static {
     /// Aviso in-app, con clave i18n. Localify **nunca** notifica descargas: son
     /// invisibles por diseño.
     async fn toast(&self, level: ToastLevel, key: &str, params: &[(String, String)]);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn los_namespaces_de_cache_son_distintos() {
-        let todos = [
-            CacheNamespace::SpotifyTrack,
-            CacheNamespace::SpotifyAlbum,
-            CacheNamespace::SpotifyArtist,
-            CacheNamespace::SpotifySearch,
-            CacheNamespace::Lyrics,
-            CacheNamespace::LyricsNotFound,
-        ];
-        let unicos: std::collections::HashSet<_> = todos.iter().map(|n| n.as_str()).collect();
-        assert_eq!(
-            unicos.len(),
-            todos.len(),
-            "dos namespaces comparten prefijo"
-        );
-    }
-
-    #[test]
-    fn la_busqueda_caduca_mucho_antes_que_los_metadatos() {
-        // Los metadatos de una pista no cambian; los resultados de búsqueda sí.
-        assert!(CacheNamespace::SpotifySearch.ttl_secs() < CacheNamespace::SpotifyTrack.ttl_secs());
-    }
 }

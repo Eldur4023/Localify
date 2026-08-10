@@ -32,10 +32,10 @@ use localify_core::error::{CoreError, CoreResult};
 use localify_core::events::{DomainEvent, EventPublisher, LibraryScope, ProviderStatus};
 use localify_core::page::{Page, PageRequest};
 use localify_core::ports::services::{
-    CacheNamespace, CacheService, DownloadHandle, DownloadService, GrupoDeVersiones, HomeItems,
-    HomeSection, LibraryService, LyricsService, MetadataService, NotificationService,
-    PlaybackService, PlaylistService, PrimeraCoincidencia, QueueService, RecommendationService,
-    RemoteResults, SearchResults, SearchScope, SearchService, SettingsService, ToastLevel,
+    DownloadHandle, DownloadService, GrupoDeVersiones, HomeItems, HomeSection, LibraryService,
+    LyricsService, MetadataService, NotificationService, PlaybackService, PlaylistService,
+    PrimeraCoincidencia, QueueService, RecommendationService, RemoteResults, SearchResults,
+    SearchScope, SearchService, SettingsService, ToastLevel,
 };
 use localify_core::text;
 use uuid::Uuid;
@@ -1194,20 +1194,5 @@ impl NotificationService for NotificationEnMemoria {
             message_key: key.to_owned(),
             params: params.to_vec(),
         });
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct CacheEnMemoria;
-
-#[async_trait]
-impl CacheService for CacheEnMemoria {
-    async fn get_bytes(&self, _ns: CacheNamespace, _key: &str) -> Option<Vec<u8>> {
-        None
-    }
-    async fn put_bytes(&self, _ns: CacheNamespace, _key: &str, _value: &[u8]) {}
-    async fn invalidate(&self, _ns: CacheNamespace, _key: &str) {}
-    async fn purge_expired(&self) -> CoreResult<u64> {
-        Ok(0)
     }
 }

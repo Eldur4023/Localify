@@ -17,6 +17,7 @@ use crate::mappers::{
     fecha_track_row,
 };
 use crate::pool::Pool;
+use crate::repositories::artists::asegurar_artista;
 
 pub struct SqliteTrackRepository {
     pool: Pool,
@@ -363,53 +364,6 @@ fn refrescar_artist_display(tx: &Transaction<'_>, track_id: &str) -> DbResult<()
     Ok(())
 }
 
-/// Identificador con el que guardar un artista, reutilizando el que ya hubiera.
-///
-/// ## Por qué hace falta
-///
-/// Un artista no tiene un identificador universal: es un canal en YouTube
-/// Music, un UUID en MusicBrainz, y **nada** cuando llega desde la página de
-/// incrustación de Spotify, que solo publica los nombres. Para ese último caso
-/// se inventaba uno local, y como se inventaba por cada canción, importar una
-/// playlist de treinta temas de un grupo creaba treinta artistas idénticos.
-///
-/// El resultado era la vista de artistas con siete «coldrain», seis de ellos con
-/// una canción y sin foto.
-///
-/// ## Qué hace
-///
-/// Si el identificador ya es de un catálogo, se respeta: es una identidad de
-/// verdad y dos artistas del mismo nombre pueden ser dos personas distintas.
-/// Solo cuando es local —o sea, cuando no sabemos quién es— se busca por nombre
-/// normalizado y se reutiliza el que hubiera, **prefiriendo uno no local**: ese
-/// es el que trae foto y géneros, y engancharse a él es lo que hace que las
-/// canciones importadas aparezcan bajo el artista bueno.
-///
-/// El riesgo asumido es fundir dos homónimos reales que nos hayan llegado los
-/// dos sin identidad. Es preferible: pasa rara vez, y la alternativa está a la
-/// vista en la captura.
-fn id_canonico(tx: &Transaction<'_>, artista: &ArtistRef) -> DbResult<String> {
-    let propio = artista.id.as_str().to_owned();
-    if !artista.id.es_local() {
-        return Ok(propio);
-    }
-
-    // `ORDER BY` con un booleano: `false` ordena antes que `true`, así que los
-    // que no son locales salen primero.
-    let existente = tx
-        .query_row(
-            "SELECT id FROM artists
-             WHERE name_norm = ?1
-             ORDER BY (id LIKE 'local:%'), id
-             LIMIT 1",
-            [text::normalize(&artista.name)],
-            |r| r.get::<_, String>(0),
-        )
-        .optional()?;
-
-    Ok(existente.unwrap_or(propio))
-}
-
 /// Inserta una pista y sus relaciones dentro de una transacción ya abierta.
 fn upsert_track(tx: &Transaction<'_>, track: &Track) -> DbResult<()> {
     // Los álbumes y artistas referenciados deben existir antes que la pista:
@@ -428,22 +382,14 @@ fn upsert_track(tx: &Transaction<'_>, track: &Track) -> DbResult<()> {
         )?;
     }
 
-    // Los identificadores se canonizan **antes** de escribir nada: uno local
-    // puede resolverse a un artista que ya existe, y entonces la fila que hay
-    // que crear no es la suya. Ver `id_canonico`.
-    let artistas: Vec<(String, &str)> = track
+    // Los artistas se escriben **antes** que la pista, y el identificador con el
+    // que quedan no tiene por qué ser el que traían: uno local puede resolverse
+    // a un artista que ya existe. Ver `asegurar_artista`.
+    let artistas: Vec<String> = track
         .artists
         .iter()
-        .map(|a| Ok((id_canonico(tx, a)?, a.name.as_str())))
+        .map(|a| asegurar_artista(tx, a))
         .collect::<DbResult<_>>()?;
-
-    for (id, nombre) in &artistas {
-        tx.execute(
-            "INSERT INTO artists (id, name, name_norm) VALUES (?1, ?2, ?3)
-             ON CONFLICT (id) DO UPDATE SET name = ?2, name_norm = ?3",
-            params![id, nombre, text::normalize(nombre)],
-        )?;
-    }
 
     tx.execute(
         "INSERT INTO tracks (
@@ -500,7 +446,7 @@ fn upsert_track(tx: &Transaction<'_>, track: &Track) -> DbResult<()> {
     // repetida se colaría igual.
     let mut vistos = std::collections::HashSet::new();
     let mut posicion = 0_i64;
-    for (id, _) in &artistas {
+    for id in &artistas {
         if !vistos.insert(id.clone()) {
             continue;
         }
@@ -546,7 +492,7 @@ impl TrackRepository for SqliteTrackRepository {
                             row.get::<_, Option<String>>("release_date")?,
                         ))
                     })
-                    .optional_row()?;
+                    .optional()?;
 
                 let Some(b) = base else { return Ok(None) };
 
@@ -739,21 +685,6 @@ impl TrackRepository for SqliteTrackRepository {
             })
             .await
             .to_core()
-    }
-}
-
-/// `query_row` que devuelve `None` en vez de error cuando no hay filas.
-trait OptionalRow<T> {
-    fn optional_row(self) -> rusqlite::Result<Option<T>>;
-}
-
-impl<T> OptionalRow<T> for rusqlite::Result<T> {
-    fn optional_row(self) -> rusqlite::Result<Option<T>> {
-        match self {
-            Ok(v) => Ok(Some(v)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e),
-        }
     }
 }
 

@@ -13,13 +13,13 @@ use std::sync::Arc;
 use localify_core::events::EventPublisher;
 use localify_core::ports::database::MaintenanceRepository;
 use localify_core::ports::services::{
-    CacheService, DownloadService, LibraryService, LyricsService, MetadataService,
-    NotificationService, PlaybackService, PlaylistService, QueueService, RecommendationService,
-    SearchService, SettingsService,
+    DownloadService, LibraryService, LyricsService, MetadataService, NotificationService,
+    PlaybackService, PlaylistService, QueueService, RecommendationService, SearchService,
+    SettingsService,
 };
 use localify_services::memory::{
-    CacheEnMemoria, Contexto, DownloadEnMemoria, LibraryEnMemoria, LyricsEnMemoria, MemoryStore,
-    MetadataEnMemoria, NotificationEnMemoria, PlaybackEnMemoria, PlaylistEnMemoria, QueueEnMemoria,
+    Contexto, DownloadEnMemoria, LibraryEnMemoria, LyricsEnMemoria, MemoryStore, MetadataEnMemoria,
+    NotificationEnMemoria, PlaybackEnMemoria, PlaylistEnMemoria, QueueEnMemoria,
     RecommendationEnMemoria, SearchEnMemoria, SettingsEnMemoria,
 };
 
@@ -42,7 +42,6 @@ pub struct AppContext {
     pub settings: Arc<dyn SettingsService>,
     pub metadata: Arc<dyn MetadataService>,
     pub notifications: Arc<dyn NotificationService>,
-    pub cache: Arc<dyn CacheService>,
     /// Mantenimiento de la base de datos.
     ///
     /// Es lo único aquí que no es un servicio de dominio: no lo usa ningún
@@ -221,7 +220,6 @@ impl AppContext {
             settings,
             metadata,
             notifications: Arc::new(NotificationEnMemoria(provisional)),
-            cache: Arc::new(CacheEnMemoria),
             mantenimiento: Some(mantenimiento(&infra)),
             lastfm: Some(lastfm),
             para_discord: Some(PiezasDeDiscord {
@@ -257,7 +255,6 @@ impl AppContext {
             settings: Arc::new(SettingsEnMemoria(ctx.clone())),
             metadata: Arc::new(MetadataEnMemoria),
             notifications: Arc::new(NotificationEnMemoria(ctx)),
-            cache: Arc::new(CacheEnMemoria),
             mantenimiento: None,
             lastfm: None,
             para_discord: None,
