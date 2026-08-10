@@ -26,6 +26,8 @@ pub enum LocalifyEvent {
     TrackChanged { track_id: String, source: String },
     #[serde(rename_all = "camelCase")]
     PlayStatusChanged { status: String },
+    /// Alguien movió la aguja dentro de la misma canción. Ver `DomainEvent::Seeked`.
+    Seeked { track_id: String, position_ms: u32 },
     #[serde(rename_all = "camelCase")]
     VolumeChanged { volume: f32 },
     #[serde(rename_all = "camelCase")]
@@ -180,6 +182,13 @@ impl From<DomainEvent> for LocalifyEvent {
             },
             DomainEvent::PlayStatusChanged { status } => Self::PlayStatusChanged {
                 status: estado_a_str(status).to_owned(),
+            },
+            DomainEvent::Seeked {
+                track_id,
+                position_ms,
+            } => Self::Seeked {
+                track_id: track_id.into_string(),
+                position_ms,
             },
             DomainEvent::VolumeChanged { volume } => Self::VolumeChanged { volume },
             DomainEvent::RepeatModeChanged { mode } => Self::RepeatModeChanged {

@@ -60,13 +60,29 @@ pub struct AppContext {
     ///
     /// `None` en modo degradado: la cola de scrobbles vive en la base de datos.
     pub lastfm: Option<Arc<localify_integrations::GestorLastfm>>,
-    /// De donde Discord saca la URL de la carátula.
+    /// De donde Discord saca la carátula de lo que suena.
     ///
     /// Está aquí por el mismo motivo que `mantenimiento`: no lo usa ningún
     /// comando, solo una tarea de fondo, y este es el único sitio donde el
-    /// `Pool` está a mano. `None` en modo degradado.
-    pub albums: Option<Arc<dyn localify_core::ports::database::AlbumRepository>>,
+    /// `Pool` y el proveedor están a mano. `None` en modo degradado.
+    pub para_discord: Option<PiezasDeDiscord>,
     pub bus: EventBus,
+}
+
+/// Lo que la tarea de Discord necesita y ningún comando usa.
+///
+/// Van juntas en una estructura y no como tres campos sueltos porque se piden
+/// las tres o ninguna: sin base de datos no hay biblioteca que anunciar, y la
+/// tarea no arranca.
+#[derive(Clone)]
+#[expect(
+    missing_debug_implementations,
+    reason = "son tres `Arc<dyn Trait>`; un `Debug` aquí solo imprimiría el nombre"
+)]
+pub struct PiezasDeDiscord {
+    pub albums: Arc<dyn localify_core::ports::database::AlbumRepository>,
+    pub tracks: Arc<dyn localify_core::ports::database::TrackRepository>,
+    pub provider: Arc<dyn localify_core::ports::metadata_provider::MetadataProvider>,
 }
 
 impl std::fmt::Debug for AppContext {
@@ -124,14 +140,7 @@ impl AppContext {
         let search_repo = Arc::new(SqliteSearchRepository::new(infra.pool.clone()));
 
         // ── Servicios reales ────────────────────────────────────────────────
-        let imagenes: Option<Arc<dyn localify_core::ports::metadata_provider::ImageFetcher>> =
-            match localify_integrations::DescargadorDeImagenes::nuevo() {
-                Ok(d) => Some(Arc::new(d)),
-                Err(e) => {
-                    tracing::warn!(error = %e, "sin cliente HTTP: no habrá portadas");
-                    None
-                }
-            };
+        let imagenes = descargador_de_imagenes();
 
         let metadata = Arc::new(
             localify_services::MetadataServiceImpl::nuevo(
@@ -215,7 +224,11 @@ impl AppContext {
             cache: Arc::new(CacheEnMemoria),
             mantenimiento: Some(mantenimiento(&infra)),
             lastfm: Some(lastfm),
-            albums: Some(albums),
+            para_discord: Some(PiezasDeDiscord {
+                albums,
+                tracks: Arc::clone(&tracks),
+                provider: Arc::clone(&provider),
+            }),
             bus,
         })
     }
@@ -247,7 +260,7 @@ impl AppContext {
             cache: Arc::new(CacheEnMemoria),
             mantenimiento: None,
             lastfm: None,
-            albums: None,
+            para_discord: None,
             bus,
         }
     }
@@ -546,6 +559,21 @@ fn listas(
             imagenes: imagenes.map(Arc::clone),
         },
     ))
+}
+
+/// El cliente HTTP de las imágenes, o nada.
+///
+/// Quedarse sin él no impide arrancar: se pierden las portadas y las fotos de
+/// artista, y todo lo demás sigue igual.
+fn descargador_de_imagenes()
+-> Option<Arc<dyn localify_core::ports::metadata_provider::ImageFetcher>> {
+    match localify_integrations::DescargadorDeImagenes::nuevo() {
+        Ok(d) => Some(Arc::new(d)),
+        Err(e) => {
+            tracing::warn!(error = %e, "sin cliente HTTP: no habrá portadas");
+            None
+        }
+    }
 }
 
 /// Abre el motor de audio, o se queda sin él.

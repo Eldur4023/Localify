@@ -894,3 +894,32 @@ async fn al_terminar_de_verdad_suena_la_que_estaba_preparada() {
         "ahora sí toca la segunda"
     );
 }
+
+#[tokio::test]
+async fn saltar_dentro_de_la_cancion_avisa_de_donde_quedo() {
+    // Saltar no cambia ni de pista ni de estado, así que no emitía nada. Quien
+    // publica la posición hacia fuera —el perfil de Discord lleva la hora a la
+    // que empezó y a la que acaba— se quedaba anunciando el minuto de antes
+    // hasta la canción siguiente.
+    let c = ctx(10).await;
+    reproducir(&c, 0).await;
+
+    c.player
+        .seek(DurationMs::from_secs(90))
+        .await
+        .expect("salta");
+
+    assert!(
+        c.bus.nombres().contains(&"seeked".to_owned()),
+        "un salto tiene que anunciarse: {:?}",
+        c.bus.nombres()
+    );
+    assert!(
+        c.motor
+            .ordenes()
+            .iter()
+            .any(|o| matches!(o, Orden::Saltar(_, 90_000))),
+        "y el motor tiene que recibirlo: {:?}",
+        c.motor.ordenes()
+    );
+}

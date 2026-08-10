@@ -25,10 +25,11 @@ pub mod ipc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use localify_core::domain::ids::AlbumId;
 use localify_core::domain::queue::PlayStatus;
+use localify_core::domain::track::TrackRow;
 use localify_core::events::DomainEvent;
-use localify_core::ports::database::AlbumRepository;
+use localify_core::ports::database::{AlbumRepository, TrackRepository};
+use localify_core::ports::metadata_provider::MetadataProvider;
 use localify_core::ports::services::{MetadataService, PlaybackService, SettingsService};
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
@@ -137,6 +138,12 @@ pub struct Dependencias {
     /// lo que hace que la carátula aparezca también al reproducir algo que se
     /// encontró buscando canciones.
     pub metadata: Arc<dyn MetadataService>,
+    /// Para releer la pista completa cuando hay que preguntarle al catálogo por
+    /// su miniatura: `resolve_recording` necesita título y artistas, y la fila
+    /// del reproductor solo trae el nombre ya compuesto.
+    pub tracks: Arc<dyn TrackRepository>,
+    /// El catálogo, para la miniatura de las canciones sin álbum.
+    pub provider: Arc<dyn MetadataProvider>,
 }
 
 impl std::fmt::Debug for Dependencias {
@@ -160,28 +167,56 @@ async fn deseada(deps: &Dependencias) -> Option<Actividad> {
     let ahora = chrono::Utc::now().timestamp();
     let comienzo = ahora - i64::from(posicion.as_ms() / 1000);
 
+    let portada = portada_de(deps, &pista).await;
     Some(Actividad {
         titulo: pista.title,
         artista: pista.artist_display,
         album: pista.album_title,
-        portada: portada_de(deps, pista.album_id.as_ref()).await,
+        portada,
         comienzo,
         fin: comienzo + i64::from(pista.duration.as_ms() / 1000),
     })
 }
 
-/// URL pública de la carátula de un álbum.
+/// URL pública de la carátula de lo que suena.
 ///
 /// Ocurre una vez por canción y fuera de cualquier camino crítico, así que puede
 /// permitirse pedir la ficha al proveedor si hace falta. Cualquier fallo devuelve
 /// `None`: quedarse sin imagen no puede impedir que se publique lo demás.
-async fn portada_de(deps: &Dependencias, album: Option<&AlbumId>) -> Option<String> {
-    let album = album?;
-    // Barato cuando ya está cacheada —comprueba que el fichero existe y vuelve—,
-    // y es lo que rellena `cover_url` cuando el álbum entró como referencia de
-    // una canción suelta.
-    let _ = deps.metadata.ensure_cover(album).await;
-    deps.albums.get(album).await.ok()??.cover_url
+///
+/// ## Tiene que ser una URL, y por eso no vale lo que usa la interfaz
+///
+/// La lista de canciones pinta la portada con `cover://`, que resuelve a un
+/// fichero del disco. Aquí no sirve: quien va a descargar esta imagen es el
+/// cliente de Discord, en otro proceso, donde ni `cover://` existe ni una ruta
+/// local significa nada. Hace falta una dirección pública, así que el orden de
+/// preferencia se recorre otra vez con URLs en vez de con ficheros.
+async fn portada_de(deps: &Dependencias, pista: &TrackRow) -> Option<String> {
+    // Primero el disco, igual que en la interfaz: para una canción de álbum, su
+    // imagen es la del álbum.
+    if let Some(album) = &pista.album_id {
+        // Barato cuando ya está cacheada —comprueba que el fichero existe y
+        // vuelve—, y es lo que rellena `cover_url` cuando el álbum entró como
+        // referencia de una canción suelta.
+        let _ = deps.metadata.ensure_cover(album).await;
+        if let Ok(Some(ficha)) = deps.albums.get(album).await
+            && let Some(url) = ficha.cover_url
+        {
+            return Some(url);
+        }
+    }
+
+    // Y si no hay disco, o el disco no trae imagen, la miniatura que el catálogo
+    // da para **esta canción**. Es el caso de casi todo lo que entra por una
+    // búsqueda o por una playlist importada, que es justamente donde antes no
+    // salía ninguna foto: sin álbum, esta función devolvía `None` y la actividad
+    // viajaba sin imagen.
+    let completa = deps.tracks.get(&pista.id).await.ok()??;
+    deps.provider
+        .resolve_recording(&completa)
+        .await
+        .ok()?
+        .and_then(|r| r.cover_url)
 }
 
 /// El bucle de Discord. **No se lanza sola**: la spawnea quien la llama, por el
@@ -215,7 +250,11 @@ pub async fn atender(deps: Dependencias, mut eventos: broadcast::Receiver<Domain
 
             tokio::select! {
                 recibido = eventos.recv() => match recibido {
-                    Ok(DomainEvent::TrackChanged { .. } | DomainEvent::PlayStatusChanged { .. }) => {
+                    Ok(
+                        DomainEvent::TrackChanged { .. }
+                        | DomainEvent::PlayStatusChanged { .. }
+                        | DomainEvent::Seeked { .. },
+                    ) => {
                         deseado = if activo(&deps).await { deseada(&deps).await } else { None };
                     }
                     Ok(_) => {}

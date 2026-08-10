@@ -171,6 +171,12 @@ struct Estado {
     duracion: DurationMs,
     /// `true` si ya se pidió el fundido de esta pista.
     fundido_pedido: bool,
+    /// Pista a la que ya se le dio un segundo intento de carga.
+    ///
+    /// Acota el reintento del temporal desaparecido a uno por canción: si al
+    /// segundo intento tampoco abre, el problema es el contenido y volver a
+    /// pedirlo es un bucle.
+    reintentado: Option<TrackId>,
     sucia: bool,
     /// Escucha en curso: qué suena y desde cuándo.
     ///
@@ -221,6 +227,7 @@ impl Estado {
             volumen: Volume::MAX,
             duracion: DurationMs::ZERO,
             fundido_pedido: false,
+            reintentado: None,
             sucia: false,
             escucha: None,
         }
@@ -411,10 +418,7 @@ async fn bucle(mut rx: mpsc::Receiver<Orden>, tx: mpsc::Sender<Orden>, deps: Arc
                 posicion,
                 responder,
             } => {
-                if let Some(v) = e.voz {
-                    deps.motor.seek(v, posicion);
-                    e.fundido_pedido = false;
-                }
+                saltar(&mut e, &deps, posicion);
                 let _ = responder.send(Ok(instantanea(&e, &deps)));
             }
             Orden::Volumen { valor, responder } => {
@@ -436,7 +440,7 @@ async fn bucle(mut rx: mpsc::Receiver<Orden>, tx: mpsc::Sender<Orden>, deps: Arc
                 completo,
                 desde,
             } => {
-                instalar(&mut e, &deps, &track, &ruta, completo, desde);
+                instalar(&mut e, &deps, &tx, &track, &ruta, completo, desde);
             }
             Orden::CambiarAFinal { track, ruta } => {
                 // Solo si sigue siendo la que suena: el usuario puede haber
@@ -448,7 +452,7 @@ async fn bucle(mut rx: mpsc::Receiver<Orden>, tx: mpsc::Sender<Orden>, deps: Arc
                         posicion_ms = posicion.as_ms(),
                         "relevo del temporal al fichero definitivo"
                     );
-                    instalar(&mut e, &deps, &track, &ruta, true, posicion);
+                    instalar(&mut e, &deps, &tx, &track, &ruta, true, posicion);
                 }
             }
             Orden::FalloAlPreparar { track } => {
@@ -691,6 +695,7 @@ fn preparar(
 fn instalar(
     e: &mut Estado,
     deps: &Arc<Dependencias>,
+    tx: &mpsc::Sender<Orden>,
     track: &TrackId,
     ruta: &std::path::Path,
     completo: bool,
@@ -750,6 +755,27 @@ fn instalar(
             anunciar_estado(e, deps);
         }
         Err(err) => {
+            // Un fichero a medio bajar que no se puede abrir casi siempre es la
+            // misma carrera: la descarga acabó entre pedir la ruta y usarla, el
+            // `.part` se verificó, se remuxeó a otro fichero y se desenlazó. En
+            // Windows el handle sigue abriéndose —`FILE_SHARE_DELETE`— pero lee
+            // cero bytes, así que el error que llega es "formato no soportado"
+            // y no "el fichero no está".
+            //
+            // Volver a pedirlo devuelve ya el fichero definitivo. Se hace una
+            // sola vez por pista: si al segundo intento tampoco carga, el
+            // problema es el contenido y reintentar es un bucle.
+            if !completo && e.reintentado.as_ref() != Some(track) {
+                debug!(
+                    track = %track.as_str(),
+                    bytes,
+                    "el temporal se esfumó al terminar la descarga; se pide el definitivo"
+                );
+                e.reintentado = Some(track.clone());
+                preparar(deps, tx, track.clone(), desde, Priority::Immediate);
+                return;
+            }
+
             warn!(
                 error = %err,
                 fichero = %ruta.display(),
@@ -765,6 +791,24 @@ fn instalar(
             });
             anunciar_estado(e, deps);
         }
+    }
+}
+
+/// Mueve la aguja dentro de la canción y avisa de dónde quedó.
+///
+/// El aviso importa porque saltar no cambia ni de pista ni de estado: sin él, no
+/// se emitía absolutamente nada, y quien publica la posición hacia fuera —el
+/// perfil de Discord— seguía anunciando la hora a la que empezó la canción.
+fn saltar(e: &mut Estado, deps: &Arc<Dependencias>, posicion: DurationMs) {
+    let Some(v) = e.voz else { return };
+    deps.motor.seek(v, posicion);
+    e.fundido_pedido = false;
+
+    if let Some(pista) = &e.pista {
+        deps.bus.publish(DomainEvent::Seeked {
+            track_id: pista.id.clone(),
+            position_ms: posicion.as_ms(),
+        });
     }
 }
 
@@ -974,6 +1018,12 @@ async fn actualizar_pista(e: &mut Estado, deps: &Arc<Dependencias>, track: &Trac
         .await
         .ok()
         .and_then(|v| v.into_iter().next());
+
+    // Cada vez que se pone una canción vuelve a tener derecho a su reintento.
+    // Sin esto, una pista que falló hace media hora ya no lo tendría, y el caso
+    // que se quiere cubrir —que la descarga acabe justo al abrirla— puede
+    // repetirse perfectamente la segunda vez que se pone.
+    e.reintentado = None;
 
     // La escucha anterior se cierra aquí y no en cada sitio que cambia de
     // canción: por este punto pasan las cuatro formas de hacerlo —terminar,

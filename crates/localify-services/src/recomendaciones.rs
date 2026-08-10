@@ -180,16 +180,30 @@ async fn candidatos(deps: &Arc<Dependencias>) -> CoreResult<usize> {
         t.id.clone()
     });
 
-    // Se quedan fuera las que ya has puesto alguna vez: es lo que separa esta
-    // fila de las de historial, que están tres secciones más abajo.
+    // Se quedan fuera las que ya has puesto alguna vez —es lo que separa esta
+    // fila de las de historial, que están tres secciones más abajo— y las que
+    // vienen sin duración.
+    //
+    // Lo segundo no es cosmético: `tracks` tiene `CHECK (duration_ms > 0)` y
+    // este catálogo devuelve cero cuando no la sabe, así que **una sola** de
+    // esas hacía fallar el `upsert` entero. Y como el lote es todo o nada, la
+    // sección se quedaba sin ningún candidato por culpa de uno.
     let mut nuevas = Vec::new();
+    let mut sin_duracion = 0_usize;
     for pista in escogidas {
+        if pista.duration.as_ms() == 0 {
+            sin_duracion += 1;
+            continue;
+        }
         if deps.historial.play_count(&pista.id).await.unwrap_or(0) == 0 {
             nuevas.push(pista);
         }
         if nuevas.len() >= POR_SECCION as usize {
             break;
         }
+    }
+    if sin_duracion > 0 {
+        debug!(sin_duracion, "candidatos descartados por no traer duración");
     }
     if nuevas.is_empty() {
         return Ok(0);

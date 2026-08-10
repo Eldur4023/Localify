@@ -66,6 +66,25 @@ fn es_video(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// `true` si la cadena tiene forma de identificador de canal de YouTube.
+///
+/// Los artistas de este catálogo **son** canales: `UC` y veintidós caracteres
+/// más. Cualquier otra cosa —un UUID de MusicBrainz, un identificador local de
+/// los que se inventan al importar una playlist, un id de Spotify— no existe
+/// aquí, y pedirla devuelve `400` después de haber gastado la petición.
+///
+/// Comprobarlo antes de salir a la red no es una optimización: sin esto, Inicio
+/// llenaba el log de errores de YouTube Music por artistas que este catálogo
+/// nunca podría conocer, y el ruido tapa los fallos de verdad.
+fn es_canal(id: &str) -> bool {
+    const LARGO_CANAL: usize = 24;
+    id.len() == LARGO_CANAL
+        && id.starts_with("UC")
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// `true` si las dos duraciones son la misma canción.
 ///
 /// Una duración desconocida —cero— no descarta: es lo que devuelve este
@@ -311,6 +330,12 @@ impl MetadataProvider for YtMusicProvider {
     }
 
     async fn artist_top_tracks(&self, id: &ArtistId) -> CoreResult<Vec<Track>> {
+        // No es de aquí: no hay nada que preguntar. Ver `es_canal`.
+        if !es_canal(id.as_str()) {
+            debug!(artista = %id, "no es un canal de YouTube: no se pregunta");
+            return Ok(Vec::new());
+        }
+
         let resp = self
             .cliente
             .navegar(id.as_str())
@@ -325,6 +350,11 @@ impl MetadataProvider for YtMusicProvider {
     }
 
     async fn artist_albums(&self, id: &ArtistId) -> CoreResult<Vec<Album>> {
+        if !es_canal(id.as_str()) {
+            debug!(artista = %id, "no es un canal de YouTube: no se pregunta");
+            return Ok(Vec::new());
+        }
+
         let resp = self
             .cliente
             .navegar(id.as_str())

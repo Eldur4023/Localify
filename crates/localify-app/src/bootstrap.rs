@@ -64,7 +64,7 @@ pub fn run() {
     let ajustes_integraciones = Arc::clone(&contexto.settings);
     let playback_discord = Arc::clone(&contexto.playback);
     let metadata_discord = Arc::clone(&contexto.metadata);
-    let albums_discord = contexto.albums.clone();
+    let piezas_discord = contexto.para_discord.clone();
 
     let builder = crate::registrar_comandos!(tauri::Builder::default())
         // Las portadas se sirven por su propio esquema en vez de por el
@@ -123,13 +123,15 @@ pub fn run() {
             }
             // Sin catálogo no arranca: en modo degradado no hay biblioteca que
             // anunciar, así que la tarea solo serviría para dormir.
-            if let Some(albums) = albums_discord {
+            if let Some(piezas) = piezas_discord {
                 tauri::async_runtime::spawn(localify_integrations::discord::atender(
                     localify_integrations::DependenciasDiscord {
                         playback: playback_discord,
                         ajustes: ajustes_integraciones,
-                        albums,
+                        albums: piezas.albums,
                         metadata: metadata_discord,
+                        tracks: piezas.tracks,
+                        provider: piezas.provider,
                     },
                     bus.subscribe(),
                 ));

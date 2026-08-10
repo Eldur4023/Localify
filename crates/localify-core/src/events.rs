@@ -87,6 +87,17 @@ pub enum DomainEvent {
     },
     #[serde(rename_all = "camelCase")]
     PlayStatusChanged { status: PlayStatus },
+    /// Alguien movió la aguja dentro de la misma canción.
+    ///
+    /// No lo necesita la interfaz —la posición ya le llega por su propio canal,
+    /// varias veces por segundo— sino quien publica **dónde** va la canción sin
+    /// consultarla continuamente. Discord es el caso: su actividad lleva la hora
+    /// a la que empezó y la hora a la que acaba, así que después de rebobinar la
+    /// barra de progreso del perfil queda mintiendo hasta la canción siguiente.
+    ///
+    /// Sin este evento, el único aviso que llega tras un salto es ninguno.
+    #[serde(rename_all = "camelCase")]
+    Seeked { track_id: TrackId, position_ms: u32 },
     #[serde(rename_all = "camelCase")]
     VolumeChanged { volume: f32 },
     #[serde(rename_all = "camelCase")]
@@ -221,6 +232,7 @@ impl DomainEvent {
         match self {
             Self::TrackChanged { .. } => "trackChanged",
             Self::PlayStatusChanged { .. } => "playStatusChanged",
+            Self::Seeked { .. } => "seeked",
             Self::VolumeChanged { .. } => "volumeChanged",
             Self::RepeatModeChanged { .. } => "repeatModeChanged",
             Self::ShuffleChanged { .. } => "shuffleChanged",
