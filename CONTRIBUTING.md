@@ -85,8 +85,10 @@ bridge, never the logs. There's a test that checks the last part.
 
 **The backend emits i18n keys; the frontend translates them**
 ([ADR-012](docs/architecture/08-decisions.md)). `tests/i18n.rs` enforces
-`es`/`en` parity and matching `{params}`. No user-facing English or Spanish in
-Rust.
+`es`/`en` parity, matching `{params}`, and that no key is orphaned — a
+translation nobody uses is invisible, so it stays forever and makes the
+catalogue describe an app that doesn't exist. Keys built at runtime are listed
+by prefix in `COMPUESTAS`. No user-facing English or Spanish in Rust.
 
 **Never write a file in place.** Temp file, verify, atomic rename. A power cut
 mid-write must not corrupt a library.

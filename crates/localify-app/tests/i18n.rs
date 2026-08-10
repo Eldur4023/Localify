@@ -102,6 +102,76 @@ fn parametros(texto: &str) -> Vec<String> {
     salida
 }
 
+/// Prefijos cuyas claves se componen en tiempo de ejecución.
+///
+/// Son los únicos sitios donde una clave no aparece literalmente en el código, y
+/// van enumerados a mano a propósito: la alternativa —aceptar cualquier clave
+/// que empiece por algo conocido— convertiría el test en un colador.
+const COMPUESTAS: &[&str] = &[
+    // `t(`album.type.${detalle.albumType}`)` en views/album.ts
+    "album.type.",
+    // `pasos(["discord_step_1", …])` → `t(`settings.${clave}`)` en views/settings.ts
+    "settings.discord_step_",
+    "settings.lastfm_step_",
+];
+
+/// Ninguna clave sobra.
+///
+/// Una traducción que ya no usa nadie no se ve —no rompe nada, no aparece en
+/// pantalla— y por eso se queda. Se habían acumulado dieciséis: la sección
+/// "Escuchado hace poco" de Inicio que dejó de existir, una etiqueta de silenciar
+/// para un botón que nunca se puso, "Ir al artista" para un menú que no puede
+/// ofrecerlo porque la fila no trae el identificador del artista.
+///
+/// Leer `es.json` era hacerse una idea equivocada de lo que la aplicación hace.
+#[test]
+fn ninguna_clave_sobra() {
+    let fuentes = fuentes_del_proyecto();
+
+    let huerfanas: Vec<String> = leer("es")
+        .into_keys()
+        .filter(|c| !COMPUESTAS.iter().any(|p| c.starts_with(p)))
+        .filter(|c| !fuentes.contains(&format!("\"{c}\"")))
+        .collect();
+
+    assert!(
+        huerfanas.is_empty(),
+        "claves que no usa nadie: {huerfanas:?}\n\
+         Si se componen en tiempo de ejecución, añade su prefijo a COMPUESTAS."
+    );
+}
+
+/// Todo el código del proyecto en una sola cadena.
+///
+/// El frontend y el backend juntos porque las claves salen de los dos: el
+/// backend emite `message_key` y el frontend lo traduce (ADR-012).
+fn fuentes_del_proyecto() -> String {
+    let raiz = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut todo = String::new();
+    for carpeta in ["frontend/src", "crates"] {
+        recoger(&raiz.join(carpeta), &mut todo);
+    }
+    todo
+}
+
+fn recoger(dir: &std::path::Path, salida: &mut String) {
+    let Ok(entradas) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entrada in entradas.flatten() {
+        let ruta = entrada.path();
+        if ruta.is_dir() {
+            recoger(&ruta, salida);
+        } else if matches!(
+            ruta.extension().and_then(|e| e.to_str()),
+            Some("ts" | "rs" | "html")
+        ) && let Ok(texto) = std::fs::read_to_string(&ruta)
+        {
+            salida.push_str(&texto);
+        }
+    }
+}
+
 #[test]
 fn los_catalogos_estan_en_utf8_sin_doble_codificar() {
     for idioma in ["es", "en"] {
