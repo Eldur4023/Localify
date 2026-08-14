@@ -97,6 +97,15 @@ pub struct ManejadorVoz {
     pub duracion: Option<DurationMs>,
     /// Posición desde la que arrancó, para calcular la absoluta.
     pub desplazamiento: DurationMs,
+    /// Frecuencia a la que se resampleó esta voz.
+    ///
+    /// Va aquí y no se pregunta a la salida porque **es un dato de la voz**: el
+    /// contador de marcos cuenta marcos de *esta* frecuencia, y si el usuario
+    /// cambia de dispositivo a mitad de canción la salida pasa a decir otra. Con
+    /// la de la salida, la posición de la canción que ya sonaba daba un salto
+    /// —de 3:20 a 3:38 al pasar de 44,1 a 48 kHz— sin que nadie hubiera tocado
+    /// nada.
+    pub sample_rate: u32,
     parar: Arc<AtomicBool>,
     fallo: Arc<Mutex<Option<String>>>,
     hilo: Option<JoinHandle<()>>,
@@ -114,14 +123,8 @@ impl std::fmt::Debug for ManejadorVoz {
 impl ManejadorVoz {
     /// Posición absoluta de la reproducción de esta voz.
     #[must_use]
-    pub fn posicion(&self, sample_rate: u32) -> DurationMs {
-        let marcos = self.estado.marcos.load(Ordering::Relaxed);
-        let ms = if sample_rate == 0 {
-            0
-        } else {
-            u32::try_from(marcos * 1000 / u64::from(sample_rate)).unwrap_or(u32::MAX)
-        };
-        DurationMs::new(self.desplazamiento.as_ms().saturating_add(ms))
+    pub fn posicion(&self) -> DurationMs {
+        self.desde_marcos(self.estado.marcos.load(Ordering::Relaxed))
     }
 
     /// Hasta dónde llega el audio ya decodificado.
@@ -130,12 +133,15 @@ impl ManejadorVoz {
     /// en descarga, es exactamente lo que se puede escuchar sin esperar, y por
     /// tanto lo que la interfaz debe pintar como "cargado".
     #[must_use]
-    pub fn decodificado(&self, sample_rate: u32) -> DurationMs {
-        let marcos = self.estado.decodificados.load(Ordering::Relaxed);
-        let ms = if sample_rate == 0 {
+    pub fn decodificado(&self) -> DurationMs {
+        self.desde_marcos(self.estado.decodificados.load(Ordering::Relaxed))
+    }
+
+    fn desde_marcos(&self, marcos: u64) -> DurationMs {
+        let ms = if self.sample_rate == 0 {
             0
         } else {
-            u32::try_from(marcos * 1000 / u64::from(sample_rate)).unwrap_or(u32::MAX)
+            u32::try_from(marcos * 1000 / u64::from(self.sample_rate)).unwrap_or(u32::MAX)
         };
         DurationMs::new(self.desplazamiento.as_ms().saturating_add(ms))
     }
@@ -228,6 +234,7 @@ pub fn arrancar(
             estado: Arc::clone(&estado),
             duracion,
             desplazamiento,
+            sample_rate,
             parar,
             fallo,
             hilo: Some(hilo),
@@ -371,7 +378,7 @@ mod tests {
             manejador.desplazamiento.as_ms()
         );
         assert!(
-            manejador.posicion(SR).as_ms() >= 450,
+            manejador.posicion().as_ms() >= 450,
             "la posicion debe partir del salto, no de cero"
         );
         assert!(esperar_muestras(&voz, 1024));

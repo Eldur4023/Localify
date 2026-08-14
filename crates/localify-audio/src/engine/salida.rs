@@ -15,10 +15,21 @@
 //! callback de error; este hilo lo recoge, reconstruye el stream sobre el
 //! dispositivo que quede por defecto y sigue. El mezclador ni se entera: su
 //! estado no vive aquí.
+//!
+//! ## Seguir al sistema, pero solo si se le estaba siguiendo
+//!
+//! Elegir «predeterminado» en Ajustes significa *el que use el sistema*, así que
+//! cuando el usuario cambia la salida de Windows, Localify la cambia con él. Se
+//! comprueba desde aquí y no por notificación de WASAPI porque cpal no expone
+//! `IMMNotificationClient`, y sondear un identificador dos veces por segundo
+//! cuesta menos que mantener un objeto COM vivo con su propio hilo.
+//!
+//! Elegir un dispositivo **concreto** significa lo contrario: ese y no otro. Ahí
+//! no se sigue a nadie, y el único motivo para reconstruir es que desaparezca.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use localify_core::domain::audio::AudioDevice;
@@ -29,6 +40,12 @@ use crate::engine::mezclador::Mezclador;
 
 /// Cada cuánto despierta el hilo a comprobar si hay que reconstruir.
 const LATIDO: Duration = Duration::from_millis(200);
+
+/// Cada cuánto se le pregunta al sistema cuál es su salida predeterminada.
+///
+/// Medio segundo: el usuario acaba de cambiarla desde la bandeja del sistema y
+/// no percibe ese retraso, y son dos consultas COM por segundo en vez de cinco.
+const VIGILANCIA_PREDETERMINADO: Duration = Duration::from_millis(500);
 
 /// Lo que el hilo de salida acepta.
 enum Orden {
@@ -55,6 +72,11 @@ impl EstadoSalida {
             perdido: AtomicBool::new(false),
             dispositivo: Mutex::new(None),
         })
+    }
+
+    /// Identificador del dispositivo sobre el que está montado el stream.
+    fn id_en_uso(&self) -> Option<String> {
+        self.dispositivo.lock().ok()?.as_ref().map(|d| d.id.clone())
     }
 }
 
@@ -119,6 +141,16 @@ impl Salida {
         self.estado.sample_rate.load(Ordering::Acquire)
     }
 
+    /// El estado compartido, para quien necesite enterarse de los cambios.
+    ///
+    /// Lo usa el vigilante del motor: la frecuencia no es un dato fijo del
+    /// arranque —cambia si el usuario cambia de salida— y leerla una vez y
+    /// guardarla es exactamente el fallo que dejaba la posición desalineada.
+    #[must_use]
+    pub fn estado(&self) -> Arc<EstadoSalida> {
+        Arc::clone(&self.estado)
+    }
+
     #[must_use]
     pub fn dispositivo_actual(&self) -> Option<AudioDevice> {
         self.estado.dispositivo.lock().ok().and_then(|g| g.clone())
@@ -181,14 +213,33 @@ fn bucle<F>(
         }
     };
 
+    let mut ultima_comprobacion = Instant::now();
+
     loop {
         match ordenes.recv_timeout(LATIDO) {
             Ok(Orden::Cerrar) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Ok(Orden::Dispositivo(id)) => {
                 deseado = id;
-                estado.perdido.store(true, Ordering::Release);
+                // Solo si de verdad cambia de dispositivo. `aplicar_a_audio`
+                // manda esta orden tras **cualquier** cambio de la sección de
+                // audio, así que mover el deslizador del crossfade reconstruía
+                // el stream y cortaba el sonido un instante por cada pixel.
+                if toca_reconstruir(estado, deseado.as_deref()) {
+                    estado.perdido.store(true, Ordering::Release);
+                }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+
+        // Seguir al sistema **solo** si se le estaba siguiendo: con un
+        // dispositivo elegido a mano, que Windows cambie el suyo no es asunto
+        // nuestro.
+        if deseado.is_none() && ultima_comprobacion.elapsed() >= VIGILANCIA_PREDETERMINADO {
+            ultima_comprobacion = Instant::now();
+            if toca_reconstruir(estado, None) {
+                info!("el sistema ha cambiado de salida predeterminada");
+                estado.perdido.store(true, Ordering::Release);
+            }
         }
 
         if estado.perdido.load(Ordering::Acquire) {
@@ -221,6 +272,23 @@ fn bucle<F>(
     debug!("hilo de salida terminado");
 }
 
+/// Bloque más grande que la tarjeta puede llegar a pedir.
+///
+/// Es lo que el mezclador tiene que reservar: si se queda corto, el callback
+/// pide más de lo que hay y el hilo de tiempo real no puede asignar para
+/// arreglarlo.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "el tope de 16384 lo acota muy por debajo de usize"
+)]
+fn marcos_maximos_de(config: &cpal::SupportedStreamConfig) -> usize {
+    match config.buffer_size() {
+        cpal::SupportedBufferSize::Range { max, .. } => *max as usize,
+        cpal::SupportedBufferSize::Unknown => 4096,
+    }
+    .clamp(64, 16_384)
+}
+
 /// Elige dispositivo, negocia configuración y arranca el stream.
 fn abrir<F>(
     id: Option<&str>,
@@ -232,19 +300,20 @@ where
 {
     let (dispositivo, config) = elegir(id)?;
     let sample_rate = config.sample_rate();
-    let marcos_maximos = match config.buffer_size() {
-        cpal::SupportedBufferSize::Range { max, .. } => *max as usize,
-        cpal::SupportedBufferSize::Unknown => 4096,
-    }
-    .clamp(64, 16_384);
 
-    let mezclador = construir(sample_rate, marcos_maximos);
+    let mezclador = construir(sample_rate, marcos_maximos_de(&config));
     let stream = montar(&dispositivo, &config, &mezclador, estado)?;
     anotar(estado, &dispositivo, sample_rate);
     Ok((stream, mezclador))
 }
 
 /// Reconstruye el stream conservando el mezclador y todo su estado.
+///
+/// El mezclador sobrevive a propósito —perderlo cortaría la canción— pero sus
+/// buffers, su limitador y su rampa de volumen estaban calculados para el
+/// dispositivo anterior. Se reajustan **antes** de montar el stream nuevo: si se
+/// hiciera después, el primer bloque que pidiera la tarjeta encontraría todavía
+/// la configuración vieja.
 fn reabrir(
     id: Option<&str>,
     estado: &Arc<EstadoSalida>,
@@ -252,9 +321,33 @@ fn reabrir(
 ) -> Result<cpal::Stream, AudioError> {
     let (dispositivo, config) = elegir(id)?;
     let sample_rate = config.sample_rate();
+
+    if let Ok(mut m) = mezclador.lock() {
+        m.reconfigurar(sample_rate, marcos_maximos_de(&config));
+    }
+
     let stream = montar(&dispositivo, &config, mezclador, estado)?;
     anotar(estado, &dispositivo, sample_rate);
     Ok(stream)
+}
+
+/// `true` si el dispositivo que tocaría usar no es el que está montado.
+///
+/// Con `None` —«el predeterminado»— se le pregunta al sistema cuál es ahora, que
+/// es lo que permite seguirle cuando el usuario lo cambia desde Windows. Si no
+/// contesta, se deja lo que hay: quedarse con la salida actual es mejor que
+/// reconstruir a ciegas.
+fn toca_reconstruir(estado: &Arc<EstadoSalida>, deseado: Option<&str>) -> bool {
+    let Some(en_uso) = estado.id_en_uso() else {
+        return true;
+    };
+    match deseado {
+        Some(id) => id != en_uso,
+        None => cpal::default_host()
+            .default_output_device()
+            .and_then(|d| d.id().ok())
+            .is_some_and(|id| id.to_string() != en_uso),
+    }
 }
 
 fn anotar(estado: &Arc<EstadoSalida>, dispositivo: &cpal::Device, sample_rate: u32) {
@@ -387,6 +480,66 @@ fn rellenar(mezclador: &Arc<Mutex<Mezclador>>, datos: &mut [f32], canales: usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Un estado que dice estar montado sobre `id`.
+    fn montado_en(id: &str) -> Arc<EstadoSalida> {
+        let estado = EstadoSalida::nuevo();
+        if let Ok(mut g) = estado.dispositivo.lock() {
+            *g = Some(AudioDevice {
+                id: id.to_owned(),
+                name: id.to_owned(),
+                is_default: false,
+            });
+        }
+        estado
+    }
+
+    /// El identificador del predeterminado del sistema, si esta maquina tiene.
+    fn predeterminado() -> Option<String> {
+        cpal::default_host()
+            .default_output_device()
+            .and_then(|d| d.id().ok())
+            .map(|i| i.to_string())
+    }
+
+    #[test]
+    fn con_un_dispositivo_elegido_a_mano_no_se_sigue_al_sistema() {
+        // La regla que pidió el usuario: si ha elegido una salida concreta, que
+        // Windows cambie la suya no debe moverle la música de sitio.
+        let estado = montado_en("los-cascos");
+        assert!(
+            !toca_reconstruir(&estado, Some("los-cascos")),
+            "el dispositivo pedido ya es el montado: no hay nada que reconstruir"
+        );
+    }
+
+    #[test]
+    fn con_el_predeterminado_se_sigue_al_sistema() {
+        let Some(pred) = predeterminado() else {
+            return; // sin tarjeta de sonido en esta maquina
+        };
+
+        // Montado sobre algo que ya no es el predeterminado: hay que seguirle.
+        let viejo = montado_en("una-salida-que-ya-no-es-la-del-sistema");
+        assert!(toca_reconstruir(&viejo, None));
+
+        // Y montado sobre el predeterminado, no se toca nada. Sin esto, el
+        // sondeo reconstruiria el stream dos veces por segundo para siempre.
+        let actual = montado_en(&pred);
+        assert!(!toca_reconstruir(&actual, None));
+    }
+
+    #[test]
+    fn cambiar_a_otro_dispositivo_si_reconstruye() {
+        let estado = montado_en("los-cascos");
+        assert!(toca_reconstruir(&estado, Some("los-altavoces")));
+    }
+
+    #[test]
+    fn sin_stream_montado_siempre_toca_reconstruir() {
+        // Es el arranque: no hay nada, así que hay que abrir algo.
+        assert!(toca_reconstruir(&EstadoSalida::nuevo(), None));
+    }
 
     #[test]
     fn sin_dispositivo_no_se_finge_que_lo_hay() {

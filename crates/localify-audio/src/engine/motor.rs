@@ -29,7 +29,7 @@ use tracing::{debug, warn};
 
 use crate::dsp::{EqCompartido, marcos_de};
 use crate::engine::mezclador::{Mezclador, VolumenCompartido};
-use crate::engine::salida::{self, Salida};
+use crate::engine::salida::{self, EstadoSalida, Salida};
 use crate::engine::voz::{self, ManejadorVoz, OrigenAudio};
 use crate::source::EstadoDescarga;
 
@@ -140,8 +140,8 @@ impl MotorAudio {
             .name("localify-audio-watch".to_owned())
             .spawn({
                 let interior = Arc::clone(&interior);
-                let sample_rate = salida.sample_rate();
-                move || vigilar(&interior, sample_rate)
+                let estado = salida.estado();
+                move || vigilar(&interior, &estado)
             })
             .map_err(|_| AudioError::NoDevice)?;
 
@@ -221,13 +221,25 @@ impl AudioEventSource for ReceptorEventos {
     }
 }
 
-/// El hilo vigilante: traduce atómicos a eventos.
-fn vigilar(interior: &Arc<Interior>, sample_rate: u32) {
+/// El hilo vigilante: traduce atómicos a eventos y reacciona a los cambios de
+/// dispositivo.
+fn vigilar(interior: &Arc<Interior>, salida: &Arc<EstadoSalida>) {
     let mut avisadas: std::collections::HashSet<VoiceId> = std::collections::HashSet::new();
     let mut terminadas: std::collections::HashSet<VoiceId> = std::collections::HashSet::new();
+    let mut frecuencia = salida.sample_rate.load(Ordering::Acquire);
 
     while !interior.cerrando.load(Ordering::Acquire) {
         std::thread::sleep(PERIODO_VIGILANTE);
+
+        // Cambiar de salida puede cambiar la frecuencia, y con ella todo lo que
+        // se calculó a partir de la anterior. Va antes de tocar `voces` porque
+        // readaptar necesita ese mismo candado.
+        let ahora = salida.sample_rate.load(Ordering::Acquire);
+        if ahora != frecuencia {
+            debug!(antes = frecuencia, ahora, "la salida cambio de frecuencia");
+            frecuencia = ahora;
+            readaptar(interior, ahora);
+        }
 
         let Ok(voces) = interior.voces.lock() else {
             break;
@@ -257,7 +269,7 @@ fn vigilar(interior: &Arc<Interior>, sample_rate: u32) {
 
             // Aviso de final próximo, una sola vez por voz.
             if let Some(total) = v.duracion {
-                let pos = v.posicion(sample_rate);
+                let pos = v.posicion();
                 let restante = total.as_ms().saturating_sub(pos.as_ms());
                 if restante <= AVISO_FINAL.as_ms() && avisadas.insert(*id) {
                     let _ = interior.eventos.send(EngineEvent::ApproachingEnd {
@@ -271,6 +283,120 @@ fn vigilar(interior: &Arc<Interior>, sample_rate: u32) {
         drop(voces);
     }
     debug!("vigilante terminado");
+}
+
+/// Rehace lo que dependía de la frecuencia anterior.
+///
+/// ## Qué se rompía sin esto
+///
+/// Una voz se decodifica **resampleada a la frecuencia del dispositivo**. Al
+/// cambiar de salida, el stream nuevo consume a otra velocidad muestras que se
+/// generaron para la vieja: pasar de 44,1 a 48 kHz reproducía la canción un 9 %
+/// más rápida y un tono y medio más aguda, y en cuanto el resampleador y el
+/// anillo se desajustaban del todo lo que salía era ruido.
+///
+/// Es el motivo real de que cambiar la salida de Windows «corrompiera» el audio.
+///
+/// ## Cómo se arregla
+///
+/// Volviendo a arrancar cada voz desde donde iba, ya con la frecuencia nueva.
+/// Es la misma operación que un salto de posición, y cuesta lo mismo: un hueco
+/// de unos milisegundos mientras el decodificador se coloca. Un hueco se perdona;
+/// una canción acelerada, no.
+///
+/// El ecualizador se republica porque sus coeficientes son biquads calculados
+/// para una frecuencia concreta: con la equivocada, la curva se desplaza y en
+/// proporciones grandes los filtros dejan de ser estables.
+fn readaptar(interior: &Arc<Interior>, sample_rate: u32) {
+    if let Ok(perfil) = interior.perfil.lock() {
+        interior.eq.publicar(&perfil, sample_rate);
+    }
+    // Publicar no basta: el mezclador solo recoge los coeficientes cuando
+    // alguien se lo pide. Sin esta línea, la curva se quedaba calculada para la
+    // frecuencia anterior hasta que el usuario tocara el ecualizador.
+    if let Ok(g) = interior.mezclador.lock()
+        && let Ok(mut m) = g.lock()
+    {
+        m.refrescar_eq(&interior.eq);
+    }
+
+    // Se rearman todas, no solo la que suena: la siguiente puede estar ya
+    // decodificándose para un fundido, y entraría igual de desafinada.
+    //
+    // Las agotadas no: reconstruirlas las haría parecer vivas otra vez —el
+    // estado es nuevo, con `agotada` a falso— y el reproductor se quedaría
+    // esperando un final que ya había ocurrido.
+    let vivas: Vec<(VoiceId, DurationMs)> = interior
+        .voces
+        .lock()
+        .map(|g| {
+            g.iter()
+                .filter(|(_, v)| !v.estado.agotada.load(Ordering::Acquire))
+                .map(|(id, v)| (*id, v.posicion()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for (id, posicion) in vivas {
+        rearmar(interior, id, posicion, sample_rate);
+    }
+}
+
+/// Vuelve a arrancar una voz desde `posicion`, conservando su sitio.
+///
+/// Si estaba sonando entra directa en el mezclador; si estaba esperando su turno
+/// vuelve a la lista de preparadas. Lo usan el salto de posición y el cambio de
+/// dispositivo, que son la misma operación vista desde dos sitios.
+fn rearmar(
+    interior: &Arc<Interior>,
+    voice: VoiceId,
+    posicion: DurationMs,
+    sample_rate: u32,
+) -> bool {
+    let origen = interior
+        .origenes
+        .lock()
+        .ok()
+        .and_then(|g| g.get(&voice).cloned());
+    let Some(origen) = origen else {
+        warn!(?voice, "rearmar una voz sin origen conocido");
+        return false;
+    };
+
+    let sonaba = interior
+        .mezclador
+        .lock()
+        .ok()
+        .and_then(|g| g.lock().ok().and_then(|m| m.id_actual()))
+        == Some(voice);
+
+    match voz::arrancar(voice, &origen, posicion, sample_rate) {
+        Ok((manejador, nueva)) => {
+            // El manejador viejo se suelta aquí: su `Drop` para el hilo de
+            // decodificación anterior y cierra su fichero.
+            if let Ok(mut voces) = interior.voces.lock() {
+                voces.insert(voice, manejador);
+            }
+            if sonaba {
+                if let Ok(g) = interior.mezclador.lock()
+                    && let Ok(mut m) = g.lock()
+                {
+                    m.poner_actual(Some(nueva));
+                }
+            } else {
+                interior.pendientes().insert(voice, nueva);
+            }
+            true
+        }
+        Err(e) => {
+            warn!(?voice, error = %e, "no se pudo rearmar la voz");
+            let _ = interior.eventos.send(EngineEvent::Failed {
+                voice,
+                reason_key: e.to_string(),
+            });
+            false
+        }
+    }
 }
 
 impl AudioEngine for MotorAudio {
@@ -330,50 +456,10 @@ impl AudioEngine for MotorAudio {
         // Saltar reconstruye la voz desde la posición pedida: es lo que permite
         // descartar los tres segundos ya decodificados sin inventar un
         // mecanismo para vaciar un anillo que otro hilo está leyendo.
-        let origen = self
-            .interior
-            .origenes
-            .lock()
-            .ok()
-            .and_then(|g| g.get(&voice).cloned());
-        let Some(origen) = origen else {
-            warn!(?voice, "salto sobre una voz desconocida");
-            return;
-        };
-
-        let sonaba = self
-            .interior
-            .mezclador
-            .lock()
-            .ok()
-            .and_then(|g| g.lock().ok().and_then(|m| m.id_actual()))
-            == Some(voice);
-
-        match voz::arrancar(voice, &origen, position, self.salida.sample_rate()) {
-            Ok((manejador, nueva)) => {
-                // El manejador viejo se suelta aquí: su `Drop` para el hilo de
-                // decodificación anterior y cierra su fichero.
-                if let Ok(mut voces) = self.interior.voces.lock() {
-                    voces.insert(voice, manejador);
-                }
-                if sonaba {
-                    if let Ok(g) = self.interior.mezclador.lock()
-                        && let Ok(mut m) = g.lock()
-                    {
-                        m.poner_actual(Some(nueva));
-                    }
-                } else {
-                    self.interior.pendientes().insert(voice, nueva);
-                }
-            }
-            Err(e) => {
-                warn!(?voice, error = %e, "no se pudo saltar");
-                let _ = self.interior.eventos.send(EngineEvent::Failed {
-                    voice,
-                    reason_key: e.to_string(),
-                });
-            }
-        }
+        //
+        // Es la misma operación que hace falta al cambiar de dispositivo, y por
+        // eso comparten función: ver `rearmar`.
+        rearmar(&self.interior, voice, position, self.salida.sample_rate());
     }
 
     fn crossfade_to(&self, next: VoiceId, duration: DurationMs) {
@@ -430,7 +516,7 @@ impl AudioEngine for MotorAudio {
             .voces
             .lock()
             .ok()
-            .and_then(|g| g.get(&id).map(|v| v.posicion(self.salida.sample_rate())))
+            .and_then(|g| g.get(&id).map(ManejadorVoz::posicion))
             .unwrap_or(DurationMs::ZERO)
     }
 
@@ -448,10 +534,7 @@ impl AudioEngine for MotorAudio {
             .voces
             .lock()
             .ok()
-            .and_then(|g| {
-                g.get(&id)
-                    .map(|v| v.decodificado(self.salida.sample_rate()))
-            })
+            .and_then(|g| g.get(&id).map(ManejadorVoz::decodificado))
             .unwrap_or(DurationMs::ZERO)
     }
 

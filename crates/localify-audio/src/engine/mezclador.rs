@@ -236,6 +236,37 @@ impl Mezclador {
         }
     }
 
+    /// Reajusta todo lo que dependía del dispositivo anterior.
+    ///
+    /// ## Por qué hace falta
+    ///
+    /// Cuando el usuario cambia la salida del sistema, el stream se reconstruye
+    /// pero **este objeto sobrevive**: conserva las voces, y perderlas cortaría
+    /// la canción. El precio es que todo lo que se calculó con la frecuencia y el
+    /// tamaño de bloque del dispositivo viejo se queda obsoleto:
+    ///
+    /// - Los buffers, reservados para el bloque más grande que pedía la tarjeta
+    ///   anterior. Si la nueva pide más, `rellenar` indexaba `mezcla_b` fuera de
+    ///   rango durante un fundido —pánico en el hilo de tiempo real— y
+    ///   `rellenar_a_canales` sacaba silencio sin decir por qué.
+    /// - El limitador, cuyos tiempos de ataque y recuperación están en marcos.
+    /// - La rampa de volumen, por lo mismo.
+    ///
+    /// Corre en el hilo de salida, no en el de audio: aquí sí se puede asignar.
+    /// Mientras dura, el callback encuentra el candado tomado y saca un bloque de
+    /// silencio, que son los diez milisegundos de siempre.
+    pub fn reconfigurar(&mut self, sample_rate: u32, marcos_maximos: usize) {
+        #[allow(clippy::cast_precision_loss, reason = "96000 cabe exacto en f32")]
+        let sr = sample_rate.max(1) as f32;
+        self.suavizado_volumen = (-1.0 / ((CONSTANTE_VOLUMEN_MS / 1000.0) * sr)).exp();
+        self.limitador = Limitador::nuevo(sample_rate);
+        // El estado de los filtros son muestras del dispositivo anterior:
+        // arrastrarlas al nuevo ritmo suena como un chasquido.
+        self.eq.reiniciar();
+        self.mezcla_b.resize(marcos_maximos * 2, 0.0);
+        self.estereo.resize(marcos_maximos * 2, 0.0);
+    }
+
     /// Instala la voz que debe sonar, descartando cualquier fundido en curso.
     pub fn poner_actual(&mut self, voz: Option<Voz>) {
         self.actual = voz;
@@ -745,6 +776,44 @@ mod tests {
         let mut salida = vec![9.0_f32; 6 * 4096];
         m.rellenar_a_canales(&mut salida, 6);
         assert!(salida.iter().all(|v| v.abs() < f32::EPSILON));
+    }
+
+    #[test]
+    fn tras_reconfigurar_cabe_el_bloque_del_dispositivo_nuevo() {
+        // El caso real: sonando por unos cascos con bloques de 480 marcos, el
+        // usuario cambia la salida de Windows a una tarjeta que pide 2048. El
+        // mezclador sobrevive al cambio —perderlo cortaria la cancion— pero sus
+        // buffers seguian reservados para 480, asi que `rellenar_a_canales`
+        // sacaba silencio y el fundido indexaba `mezcla_b` fuera de rango.
+        let mut m = mezclador(480);
+        m.reconfigurar(48_000, 2048);
+
+        let (voz, _) = voz_con(0, &vec![0.4; 32_768], false);
+        m.poner_actual(Some(voz));
+
+        let mut salida = vec![9.0_f32; 6 * 2048];
+        m.rellenar_a_canales(&mut salida, 6);
+        assert!(
+            salida.chunks_exact(6).any(|marco| marco[0].abs() > 0.01),
+            "el bloque del dispositivo nuevo tiene que sonar, no salir en silencio"
+        );
+    }
+
+    #[test]
+    fn tras_reconfigurar_el_fundido_no_desborda_su_buffer() {
+        // Sin reservar de nuevo `mezcla_b`, esto era un panico por indice fuera
+        // de rango **en el hilo de tiempo real**.
+        let mut m = mezclador(480);
+        m.reconfigurar(48_000, 2048);
+
+        let (a, _) = voz_con(0, &vec![0.4; 32_768], false);
+        m.poner_actual(Some(a));
+        let (b, estado_b) = voz_con(1, &vec![0.4; 32_768], false);
+        m.fundir_a(b, 1024);
+
+        let mut estereo = vec![0.0_f32; 2 * 2048];
+        m.rellenar(&mut estereo);
+        assert_eq!(estado_b.marcos.load(Ordering::Relaxed), 2048);
     }
 
     #[test]
