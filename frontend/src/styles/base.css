@@ -73,8 +73,21 @@ option {
   color: var(--text-base);
 }
 
+/*
+ * La opción marcada, con un color **opaco**.
+ *
+ * Llevaba `--bg-tinted`, que es un blanco al 7 %. En el documento eso se compone
+ * sobre la superficie oscura de debajo y se ve como un gris apenas más claro;
+ * dentro del desplegable no hay superficie nuestra debajo, porque esa lista la
+ * dibuja el sistema, así que el 7 % se componía sobre el blanco de la plataforma
+ * y salía casi blanco. Con el texto blanco heredado, la fila seleccionada era la
+ * única ilegible de la lista: se leía solo al pasarle el ratón por encima, que es
+ * cuando Chromium pone su propio resaltado.
+ *
+ * Ningún color translúcido sirve aquí por el mismo motivo.
+ */
 option:checked {
-  background-color: var(--bg-tinted);
+  background-color: var(--bg-card-hover);
 }
 
 ul,
