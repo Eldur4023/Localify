@@ -37,6 +37,9 @@ pub struct TrackRowDto {
     pub id: String,
     pub title: String,
     pub artist_display: String,
+    /// El artista principal. Es lo que permite «Ir al artista» desde una fila:
+    /// `artistDisplay` es texto y no lleva a ningún sitio.
+    pub artist_id: Option<String>,
     pub album_id: Option<String>,
     pub album_title: Option<String>,
     pub duration_ms: u32,
@@ -54,6 +57,9 @@ impl From<TrackRow> for TrackRowDto {
             id: t.id.into_string(),
             title: t.title,
             artist_display: t.artist_display,
+            artist_id: t
+                .artist_id
+                .map(localify_core::domain::ids::ArtistId::into_string),
             album_id: t
                 .album_id
                 .map(localify_core::domain::ids::AlbumId::into_string),
@@ -229,7 +235,7 @@ impl From<ArtistDetail> for ArtistDetailDto {
 mod tests {
     use localify_core::domain::audio::DurationMs;
     use localify_core::domain::availability::Availability;
-    use localify_core::domain::ids::{AlbumId, TrackId};
+    use localify_core::domain::ids::{AlbumId, ArtistId, TrackId};
 
     use super::*;
 
@@ -238,6 +244,7 @@ mod tests {
             id: TrackId::from_trusted("3z8h0TU7ReDPLIbEnYhWZb"),
             title: "Under Pressure".into(),
             artist_display: "Queen, David Bowie".into(),
+            artist_id: Some(ArtistId::from_trusted("1dfeR4HaWDbWqFHLkxsg1d")),
             album_id: Some(AlbumId::from_trusted("1GbtB4zTqAsyfZEsm1RZfx")),
             album_title: Some("Hot Space".into()),
             duration: DurationMs::new(248_000),

@@ -128,13 +128,32 @@ export function opcionesDePista(pista: TrackRowDto, ctx: ContextoDePista): Opcio
     },
   ];
 
+  // Ir al álbum y al artista. Van juntos y con un separador delante porque son
+  // las dos que **navegan** en vez de hacer algo con la canción.
+  //
+  // Cada una aparece solo si tiene destino. `artistId` es el principal: la fila
+  // no trae la lista entera de artistas —sería una consulta por fila— y para
+  // esto basta, que es a donde llevaría un clic en su nombre.
   if (pista.albumId) {
+    const albumId = pista.albumId;
     menu.push({
       clave: "album",
       separar: true,
       etiqueta: t("menu.go_to_album"),
       ejecutar: () => {
-        globalThis.location.hash = `#/album/${pista.albumId ?? ""}`;
+        globalThis.location.hash = `#/album/${albumId}`;
+      },
+    });
+  }
+
+  if (pista.artistId) {
+    const artistId = pista.artistId;
+    menu.push({
+      clave: "artist",
+      separar: !pista.albumId,
+      etiqueta: t("menu.go_to_artist"),
+      ejecutar: () => {
+        globalThis.location.hash = `#/artist/${artistId}`;
       },
     });
   }

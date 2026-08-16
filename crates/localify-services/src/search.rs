@@ -603,6 +603,7 @@ mod tests {
             id: TrackId::from_trusted(id.to_owned()),
             title: titulo.to_owned(),
             artist_display: artista.to_owned(),
+            artist_id: None,
             album_id: None,
             album_title: None,
             duration: DurationMs::from_secs(segundos),

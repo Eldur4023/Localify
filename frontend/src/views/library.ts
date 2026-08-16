@@ -66,7 +66,15 @@ export function mountLibraryView(contenedor: HTMLElement): Vista {
   const cuerpo = document.createElement("div");
   cuerpo.className = "vista__body";
 
-  el.append(cabecera, cuerpo);
+  // Recién instalada, esta es la primera pantalla que se ve, y era una lista
+  // vacía con un "0 canciones" encima: indistinguible de un fallo de carga. Que
+  // el texto diga qué hacer —buscar algo— importa más aquí que en ningún otro
+  // sitio, porque es donde alguien decide si la aplicación funciona.
+  const vacio = document.createElement("p");
+  vacio.className = "vista__empty";
+  vacio.hidden = true;
+
+  el.append(cabecera, vacio, cuerpo);
   contenedor.replaceChildren(el);
 
   // ── Estado de la consulta ───────────────────────────────────────────────
@@ -110,10 +118,15 @@ export function mountLibraryView(contenedor: HTMLElement): Vista {
   function pintarCuenta(): void {
     const cuantas = total === null ? trackList.lista.items.length : Number(total);
     cuenta.textContent = t("library.count", { count: cuantas });
+    // Solo con el total ya contado. Mientras es `null` no se sabe si está vacía
+    // o si la primera página aún no ha llegado, y enseñar "no hay nada" durante
+    // la carga es peor que no enseñar nada.
+    vacio.hidden = total === null || cuantas > 0;
   }
 
   function etiquetas(): void {
     titulo.textContent = t("library.title");
+    vacio.textContent = t("library.empty");
     for (const [i, o] of ORDENES.entries()) {
       const opt = orden.options.item(i);
       if (opt) opt.textContent = t(o.clave);

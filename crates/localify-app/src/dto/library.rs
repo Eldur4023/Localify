@@ -79,6 +79,9 @@ pub struct LibraryStatsDto {
     pub artist_count: u64,
     pub total_duration_ms: u64,
     pub total_bytes: u64,
+    /// Canciones cuya descarga falló. Es lo que hace visible un fallo que si no
+    /// no se ve en ninguna pantalla.
+    pub failed_count: u64,
 }
 
 impl From<LibraryStats> for LibraryStatsDto {
@@ -90,6 +93,7 @@ impl From<LibraryStats> for LibraryStatsDto {
             artist_count: s.artist_count,
             total_duration_ms: s.total_duration_ms,
             total_bytes: s.total_bytes,
+            failed_count: s.failed_count,
         }
     }
 }

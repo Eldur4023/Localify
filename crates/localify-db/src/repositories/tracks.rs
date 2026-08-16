@@ -345,7 +345,7 @@ fn construir_filtro(filter: &TrackFilter) -> (String, Vec<Box<dyn rusqlite::ToSq
 /// Es la operación que mantiene coherente la denormalización de ADR-011. Se
 /// ejecuta en la misma transacción que escribe las relaciones, así que no puede
 /// quedar desfasada.
-fn refrescar_artist_display(tx: &Transaction<'_>, track_id: &str) -> DbResult<()> {
+pub(crate) fn refrescar_artist_display(tx: &Transaction<'_>, track_id: &str) -> DbResult<()> {
     let display: String = tx.query_row(
         "SELECT COALESCE(GROUP_CONCAT(nombre, ', '), '')
          FROM (SELECT ar.name AS nombre
@@ -673,6 +673,11 @@ impl TrackRepository for SqliteTrackRepository {
                     conn.query_row("SELECT COUNT(*) FROM albums", [], |r| r.get(0))?;
                 let artist_count: i64 =
                     conn.query_row("SELECT COUNT(*) FROM artists", [], |r| r.get(0))?;
+                let failed_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM download_jobs WHERE state = 'failed'",
+                    [],
+                    |r| r.get(0),
+                )?;
 
                 Ok(LibraryStats {
                     track_count: track_count.max(0).unsigned_abs(),
@@ -681,6 +686,7 @@ impl TrackRepository for SqliteTrackRepository {
                     artist_count: artist_count.max(0).unsigned_abs(),
                     total_duration_ms: total_duration_ms.max(0).unsigned_abs(),
                     total_bytes: total_bytes.max(0).unsigned_abs(),
+                    failed_count: failed_count.max(0).unsigned_abs(),
                 })
             })
             .await
@@ -811,8 +817,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dos_artistas_con_identidad_y_el_mismo_nombre_no_se_funden() {
+    async fn dos_artistas_del_mismo_catalogo_y_el_mismo_nombre_no_se_funden() {
         // Pueden ser dos personas distintas: unirlos sería inventarse un dato.
+        // Hay más de un Nirvana en MusicBrainz.
         let (repo, pool, _g) = repo().await;
         let uno = ArtistRef {
             id: ArtistId::from_trusted("UCaaaaaaaaaaaaaaaaaaaaaa"),

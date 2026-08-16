@@ -41,6 +41,7 @@
   "library.artists": "Artists",
   "library.playlists": "Playlists",
   "library.count": "{count} songs",
+  "library.empty": "Nothing here yet. Search for something and hit play.",
   "library.sort.title": "Title",
   "library.sort.artist": "Artist",
   "library.sort.album": "Album",
@@ -124,6 +125,7 @@
   "menu.like": "Save to Liked Songs",
   "menu.unlike": "Remove from Liked Songs",
   "menu.go_to_album": "Go to album",
+  "menu.go_to_artist": "Go to artist",
   "menu.delete_download": "Delete the download",
   "menu.remove": "Remove from this playlist",
 
@@ -170,6 +172,8 @@
   "settings.wipe_do": "Delete everything",
   "settings.wipe_done": "{count} songs deleted from disk",
   "settings.storage_used": "{tracks} songs take up {size}",
+  "settings.failed": "{count} songs could not be downloaded",
+  "settings.retry_done": "{count} songs are back in the queue",
   "settings.normalize": "Match volume across songs",
   "settings.discord_section": "Discord",
   "settings.lastfm_section": "Last.fm",
@@ -230,6 +234,7 @@
   "sidecar.ffmpeg": "audio component",
 
   "common.loading": "Loading…",
+  "common.retry": "Try again",
   "common.cancel": "Cancel",
   "common.close": "Close",
   "common.confirm": "OK",

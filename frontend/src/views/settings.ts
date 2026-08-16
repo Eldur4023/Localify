@@ -807,27 +807,71 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
 
       const uso = document.createElement("p");
       uso.className = "ajustes__ayuda";
-      void library
-        .stats()
-        .then((st) => {
+
+      // ── Descargas fallidas ────────────────────────────────────────────
+      //
+      // Este es el único sitio de la aplicación donde un fallo de descarga se
+      // ve. Las descargas son invisibles por diseño y las listas no dicen si
+      // una canción está en disco, así que una que no se pudo emparejar
+      // simplemente no sonaba, sin explicación y sin marcha atrás.
+      //
+      // Solo aparece si hay alguna. Un "0 canciones fallidas" permanente sería
+      // invitar a preocuparse por algo que no pasa.
+      const fallidas = document.createElement("p");
+      fallidas.className = "ajustes__ayuda";
+      fallidas.hidden = true;
+
+      const reintentar = document.createElement("button");
+      reintentar.type = "button";
+      reintentar.className = "boton";
+      reintentar.textContent = t("common.retry");
+      reintentar.hidden = true;
+      reintentar.addEventListener("click", () => {
+        void (async () => {
+          reintentar.disabled = true;
+          reintentar.textContent = t("common.loading");
+          try {
+            const n = await library.retryFailed();
+            mostrarError(t("settings.retry_done", { count: String(n) }), "");
+            await refrescarUso();
+          } catch (e) {
+            mostrarError(t("error.internal"), String(e));
+          }
+          reintentar.disabled = false;
+          reintentar.textContent = t("common.retry");
+        })();
+      });
+
+      async function refrescarUso(): Promise<void> {
+        try {
+          const st = await library.stats();
           uso.textContent = t("settings.storage_used", {
             tracks: String(st.localCount),
             size: tamano(st.totalBytes),
           });
-        })
-        .catch(() => {
+          const hay = st.failedCount > 0;
+          fallidas.hidden = !hay;
+          reintentar.hidden = !hay;
+          if (hay) {
+            fallidas.textContent = t("settings.failed", {
+              count: String(st.failedCount),
+            });
+          }
+        } catch {
           uso.textContent = "";
-        });
+        }
+      }
+      void refrescarUso();
 
       const acciones = document.createElement("div");
       acciones.className = "ajustes__acciones";
-      acciones.append(revisar);
+      acciones.append(revisar, reintentar);
       // El destructivo va en su propia fila, separado del de revisar: pegados,
       // el rojo se convierte en "el botón de al lado" y se pulsa por inercia.
       const peligro = document.createElement("div");
       peligro.className = "ajustes__acciones ajustes__acciones--peligro";
       peligro.append(vaciar);
-      cuerpo.append(acciones, uso, peligro);
+      cuerpo.append(acciones, uso, fallidas, peligro);
 
       el.append(bloque);
     }

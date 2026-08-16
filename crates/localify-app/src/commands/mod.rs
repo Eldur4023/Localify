@@ -56,6 +56,7 @@ macro_rules! registrar_comandos {
             $crate::commands::library::library_rescan,
             $crate::commands::library::library_delete_download,
             $crate::commands::library::library_wipe_downloads,
+            $crate::commands::library::library_retry_failed,
             $crate::commands::library::album_detail,
             $crate::commands::library::artist_detail,
             // ── Búsqueda ────────────────────────────────────────────────────

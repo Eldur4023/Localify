@@ -9,7 +9,7 @@ use localify_core::domain::album::AlbumType;
 use localify_core::domain::audio::{AudioFormat, DurationMs};
 use localify_core::domain::availability::Availability;
 use localify_core::domain::download::{Confidence, DownloadState, Priority};
-use localify_core::domain::ids::{AlbumId, TrackId};
+use localify_core::domain::ids::{AlbumId, ArtistId, TrackId};
 use localify_core::domain::library::AudioSource;
 use localify_core::domain::playlist::PlaylistSource;
 use localify_core::domain::queue::RepeatMode;
@@ -203,6 +203,9 @@ pub const COLUMNAS_TRACK_ROW: &str = "
     t.id,
     t.title,
     t.artist_display,
+    (SELECT ta.artist_id FROM track_artists ta
+      WHERE ta.track_id = t.id
+      ORDER BY ta.position LIMIT 1) AS artist_id,
     t.album_id,
     a.title AS album_title,
     t.duration_ms,
@@ -238,12 +241,14 @@ pub const JOINS_TRACK_ROW: &str = "
 pub fn a_track_row(row: &Row<'_>) -> DbResult<TrackRow> {
     let availability = disponibilidad_de_fila(row)?;
     let album_id: Option<String> = row.get("album_id")?;
+    let artist_id: Option<String> = row.get("artist_id")?;
     let added_at = fecha_de_fila(row)?;
 
     Ok(TrackRow {
         id: TrackId::from_trusted(row.get::<_, String>("id")?),
         title: row.get("title")?,
         artist_display: row.get("artist_display")?,
+        artist_id: artist_id.map(ArtistId::from_trusted),
         album_id: album_id.map(AlbumId::from_trusted),
         album_title: row.get("album_title")?,
         duration: DurationMs::new(row.get::<_, i64>("duration_ms")? as u32),

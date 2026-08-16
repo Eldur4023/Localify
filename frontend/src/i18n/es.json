@@ -41,6 +41,7 @@
   "library.artists": "Artistas",
   "library.playlists": "Playlists",
   "library.count": "{count} canciones",
+  "library.empty": "Aquí no hay nada todavía. Busca algo y dale a reproducir.",
   "library.sort.title": "Título",
   "library.sort.artist": "Artista",
   "library.sort.album": "Álbum",
@@ -124,6 +125,7 @@
   "menu.like": "Añadir a Tus me gusta",
   "menu.unlike": "Quitar de Tus me gusta",
   "menu.go_to_album": "Ir al álbum",
+  "menu.go_to_artist": "Ir al artista",
   "menu.delete_download": "Borrar la descarga",
   "menu.remove":"Quitar de esta playlist",
 
@@ -170,6 +172,8 @@
   "settings.wipe_do": "Borrar todo",
   "settings.wipe_done": "{count} canciones borradas del disco",
   "settings.storage_used": "{tracks} canciones ocupan {size}",
+  "settings.failed": "{count} canciones no se pudieron descargar",
+  "settings.retry_done": "{count} canciones vuelven a la cola",
   "settings.normalize": "Igualar el volumen entre canciones",
   "settings.discord_section": "Discord",
   "settings.lastfm_section": "Last.fm",
@@ -230,6 +234,7 @@
   "sidecar.ffmpeg": "componente de audio",
 
   "common.loading": "Cargando…",
+  "common.retry": "Reintentar",
   "common.cancel": "Cancelar",
   "common.close": "Cerrar",
   "common.confirm": "Aceptar",

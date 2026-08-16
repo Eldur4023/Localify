@@ -81,6 +81,17 @@ pub struct TrackRow {
     pub id: TrackId,
     pub title: String,
     pub artist_display: String,
+    /// El artista principal, para poder ir a su ficha.
+    ///
+    /// Solo el primero, no la lista entera: `artist_display` es texto —los
+    /// nombres unidos por comas, ADR-011— y arrastrar aquí un vector por fila
+    /// costaría una consulta más en cada una de las cincuenta mil, que es
+    /// exactamente lo que este tipo existe para evitar. Con el principal basta
+    /// para lo que el menú ofrece, que es «ir al artista», y es el que la
+    /// posición 0 de `track_artists` marca como tal.
+    ///
+    /// `None` en una pista sin artistas acreditados.
+    pub artist_id: Option<ArtistId>,
     pub album_id: Option<AlbumId>,
     pub album_title: Option<String>,
     pub duration: DurationMs,

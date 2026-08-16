@@ -191,6 +191,13 @@ export const library = {
     invoke<void>("library_delete_download", { trackId }),
   /** Borra todo el audio descargado. Devuelve cuántas pistas. */
   wipeDownloads: () => invoke<number>("library_wipe_downloads"),
+  /**
+   * Vuelve a encolar lo que falló al descargarse. Devuelve cuántas.
+   *
+   * Es la única salida de un fallo de emparejamiento: sin esto, una canción que
+   * no se pudo bajar se quedaba así para siempre.
+   */
+  retryFailed: () => invoke<number>("library_retry_failed"),
   albumDetail: (albumId: string) => invoke<AlbumDetailDto>("album_detail", { albumId }),
   artistDetail: (artistId: string) =>
     invoke<ArtistDetailDto>("artist_detail", { artistId }),

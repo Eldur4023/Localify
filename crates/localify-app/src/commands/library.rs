@@ -130,6 +130,17 @@ pub async fn library_delete_download(
     Ok(())
 }
 
+/// Vuelve a encolar las descargas que fallaron. Devuelve cuántas.
+///
+/// Existe porque un fallo de emparejamiento no tenía marcha atrás: la canción se
+/// quedaba en `Failed` para siempre y lo único que podía hacer el usuario era
+/// borrar una descarga que nunca llegó a existir. El servicio ya sabía
+/// reintentar; lo que faltaba era una puerta.
+#[tauri::command]
+pub async fn library_retry_failed(ctx: State<'_, AppContext>) -> Resultado<u32> {
+    Ok(ctx.downloads.retry_failed().await?)
+}
+
 /// Borra **todo** lo descargado. Devuelve cuántas pistas.
 ///
 /// Se van los ficheros de audio; se quedan el catálogo, las playlists, los

@@ -54,6 +54,13 @@ pub struct LibraryStats {
     pub artist_count: u64,
     pub total_duration_ms: u64,
     pub total_bytes: u64,
+    /// Canciones cuya descarga falló y sigue fallada.
+    ///
+    /// Es el único sitio donde ese número aparece. Las descargas son invisibles
+    /// por diseño y las listas no dicen si una canción está en disco, así que sin
+    /// esto un fallo de emparejamiento no se veía en ninguna parte: la canción
+    /// simplemente no sonaba, y no había forma de pedir que se reintentara.
+    pub failed_count: u64,
 }
 
 /// Resultado de reconciliar disco y base de datos.

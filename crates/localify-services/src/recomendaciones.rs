@@ -619,6 +619,7 @@ mod tests {
             id: TrackId::nuevo_local(),
             title: format!("P{n}"),
             artist_display: "A".into(),
+            artist_id: None,
             album_id: None,
             album_title: None,
             duration: localify_core::domain::audio::DurationMs::from_secs(180),

@@ -129,7 +129,12 @@ export type LibraryStatsDto = { trackCount: bigint,
  * Cuántas están realmente en disco. Distinguirlo importa: el catálogo
  * incluye resultados de búsqueda que nunca se han descargado.
  */
-localCount: bigint, albumCount: bigint, artistCount: bigint, totalDurationMs: bigint, totalBytes: bigint, };
+localCount: bigint, albumCount: bigint, artistCount: bigint, totalDurationMs: bigint, totalBytes: bigint, 
+/**
+ * Canciones cuya descarga falló. Es lo que hace visible un fallo que si no
+ * no se ve en ninguna pantalla.
+ */
+failedCount: bigint, };
 
 /**
  * Todo lo que el backend comunica hacia el frontend.
@@ -307,7 +312,12 @@ clientId: string | null, };
 /**
  * Detalle de una pista. Solo se pide al abrir una vista concreta.
  */
-export type TrackDetailDto = { artists: Array<ArtistRefDto>, trackNumber: number | null, discNumber: number | null, isrc: string | null, releaseDate: string | null, addedAt: bigint, playCount: number, lastPlayedAt: bigint | null, id: string, title: string, artistDisplay: string, albumId: string | null, albumTitle: string | null, durationMs: number, availability: AvailabilityDto, isFavorite: boolean, explicit: boolean, 
+export type TrackDetailDto = { artists: Array<ArtistRefDto>, trackNumber: number | null, discNumber: number | null, isrc: string | null, releaseDate: string | null, addedAt: bigint, playCount: number, lastPlayedAt: bigint | null, id: string, title: string, artistDisplay: string, 
+/**
+ * El artista principal. Es lo que permite «Ir al artista» desde una fila:
+ * `artistDisplay` es texto y no lleva a ningún sitio.
+ */
+artistId: string | null, albumId: string | null, albumTitle: string | null, durationMs: number, availability: AvailabilityDto, isFavorite: boolean, explicit: boolean, 
 /**
  * Segundos desde época en que la fila entró en **esta** lista, o `null` si
  * la lista no fecha sus filas. Ver [`TrackRow::added_at`].
@@ -326,7 +336,12 @@ localOnly: boolean, albumId: string | null, artistId: string | null, genreId: bi
  * Plana y estrecha a propósito: es lo que se serializa 50 000 veces al
  * recorrer la biblioteca, y cada campo de más se paga en cada scroll.
  */
-export type TrackRowDto = { id: string, title: string, artistDisplay: string, albumId: string | null, albumTitle: string | null, durationMs: number, availability: AvailabilityDto, isFavorite: boolean, explicit: boolean, 
+export type TrackRowDto = { id: string, title: string, artistDisplay: string, 
+/**
+ * El artista principal. Es lo que permite «Ir al artista» desde una fila:
+ * `artistDisplay` es texto y no lleva a ningún sitio.
+ */
+artistId: string | null, albumId: string | null, albumTitle: string | null, durationMs: number, availability: AvailabilityDto, isFavorite: boolean, explicit: boolean, 
 /**
  * Segundos desde época en que la fila entró en **esta** lista, o `null` si
  * la lista no fecha sus filas. Ver [`TrackRow::added_at`].
