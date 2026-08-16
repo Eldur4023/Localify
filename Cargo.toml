@@ -149,16 +149,38 @@ print_stderr = "deny"
 # ── Perfiles ─────────────────────────────────────────────────────────────────
 [profile.dev]
 opt-level = 0
-debug = true
+# Números de línea sí, tipos y variables no.
+#
+# `debug = true` genera la información completa para un depurador paso a paso, y
+# eso son cientos de megabytes de PDB que hay que escribir y enlazar en cada
+# compilación. Lo que este proyecto usa de verdad es el fichero y la línea de un
+# `panic!` o de un test que falla, y eso lo conserva `line-tables-only`.
+#
+# Si algún día hace falta un depurador de verdad, `cargo build --profile
+# profiling` sigue trayendo la información completa.
+debug = "line-tables-only"
 # Las dependencias se compilan optimizadas incluso en dev: el motor de audio y
 # la decodificación son inusables sin optimizar, y solo se compilan una vez.
+# Sin información de depuración: nadie va a poner un punto de ruptura dentro de
+# symphonia, y sus PDB son la mitad del `target/`.
 [profile.dev.package."*"]
 opt-level = 2
+debug = false
 
 [profile.release]
 opt-level = 3
-lto = "fat"
-codegen-units = 1
+# LTO fino, no completo.
+#
+# Con `lto = "fat"` y `codegen-units = 1` la compilación de publicación tardaba
+# casi tres minutos, y se reconstruye después de cada cambio. `thin` optimiza
+# entre crates igual, solo que en paralelo y sin fundir el programa entero en una
+# sola unidad.
+#
+# Lo que se paga son unos pocos puntos porcentuales en las rutas calientes, y
+# aquí no hay ninguna que los note: el mezclador procesa bloques de diez
+# milisegundos con unos cientos de operaciones, y la decodificación la hace
+# symphonia, que se compila optimizada de todos modos.
+lto = "thin"
 panic = "abort"
 strip = true
 incremental = false
