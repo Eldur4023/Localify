@@ -57,7 +57,97 @@ pub(crate) fn asegurar_artista(tx: &Transaction<'_>, artista: &ArtistRef) -> DbR
          ON CONFLICT (id) DO UPDATE SET name = ?2, name_norm = ?3",
         params![id, artista.name, text::normalize(&artista.name)],
     )?;
-    Ok(id)
+
+    // Y si el mismo artista ya estaba guardado por el otro catálogo, se funden.
+    // Ver `gemelo_de_otro_catalogo`.
+    let Some(gemelo) = gemelo_de_otro_catalogo(tx, &id, &artista.name)? else {
+        return Ok(id);
+    };
+    let (bueno, viejo) = if es_canal(&id) {
+        (id, gemelo)
+    } else {
+        (gemelo, id)
+    };
+    fundir(tx, &viejo, &bueno)?;
+    Ok(bueno)
+}
+
+/// `true` si el identificador es un canal de YouTube: `UC` y 22 caracteres más.
+fn es_canal(id: &str) -> bool {
+    id.len() == 24 && id.starts_with("UC")
+}
+
+/// El mismo artista guardado por el **otro** catálogo, si lo hay.
+///
+/// ## Por qué esto sí se funde y lo de la V4 no
+///
+/// Dos identidades del mismo catálogo con el mismo nombre pueden ser dos
+/// personas distintas —hay más de un Nirvana en MusicBrainz— y unirlas sería
+/// inventarse un dato. Pero un canal de YouTube y un UUID de MusicBrainz son dos
+/// formas de nombrar al mismo artista: tener los dos es el residuo de haber
+/// cambiado de proveedor, no un homónimo.
+///
+/// ## La salvaguarda
+///
+/// Solo cuando de cada lado hay **exactamente uno**. Que haya dos UUIDs con el
+/// mismo nombre es justo la señal de que sí son dos personas, y entonces no se
+/// toca nada: se prefiere dejar un duplicado a fusionar a quien no toca.
+fn gemelo_de_otro_catalogo(
+    tx: &Transaction<'_>,
+    propio: &str,
+    nombre: &str,
+) -> DbResult<Option<String>> {
+    let mut stmt = tx.prepare_cached(
+        "SELECT id FROM artists
+         WHERE name_norm = ?1 AND id <> ?2 AND id NOT LIKE 'local:%'",
+    )?;
+    let candidatos: Vec<String> = stmt
+        .query_map(params![text::normalize(nombre), propio], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+
+    let del_otro_lado: Vec<String> = candidatos
+        .into_iter()
+        .filter(|c| es_canal(c) != es_canal(propio))
+        .collect();
+
+    Ok(match del_otro_lado.len() {
+        1 => del_otro_lado.into_iter().next(),
+        _ => None,
+    })
+}
+
+/// Traslada todo lo de `viejo` a `bueno` y borra el primero.
+///
+/// Es lo mismo que hacen las migraciones V4 y V5, y por el mismo motivo lleva
+/// `OR IGNORE`: la pista puede acreditar ya a los dos, y entonces la fila buena
+/// existe y la vieja sobra. Lo que el `OR IGNORE` no mueve se lo lleva el
+/// `ON DELETE CASCADE` al borrar el artista.
+fn fundir(tx: &Transaction<'_>, viejo: &str, bueno: &str) -> DbResult<()> {
+    for tabla in ["track_artists", "album_artists", "artist_genres"] {
+        tx.execute(
+            &format!("UPDATE OR IGNORE {tabla} SET artist_id = ?2 WHERE artist_id = ?1"),
+            params![viejo, bueno],
+        )?;
+    }
+
+    // Las pistas afectadas, **antes** de borrar: después ya no se sabe cuáles
+    // eran. Son las que ahora acreditan al superviviente.
+    let afectadas: Vec<String> = {
+        let mut stmt =
+            tx.prepare_cached("SELECT track_id FROM track_artists WHERE artist_id = ?1")?;
+        stmt.query_map([bueno], |r| r.get(0))?
+            .collect::<Result<_, _>>()?
+    };
+
+    tx.execute("DELETE FROM artists WHERE id = ?1", [viejo])?;
+
+    // La grafía superviviente puede no ser la que había —«kittydog» y
+    // «Kittydog» son dos filas con el mismo `name_norm`—, así que el nombre
+    // visible de la pista se recompone.
+    for track in &afectadas {
+        crate::repositories::tracks::refrescar_artist_display(tx, track)?;
+    }
+    Ok(())
 }
 
 fn id_canonico(tx: &Transaction<'_>, artista: &ArtistRef) -> DbResult<String> {

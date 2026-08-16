@@ -836,6 +836,93 @@ mod tests {
         assert_eq!(cuantos_llamados(&pool, "Nirvana").await, 2);
     }
 
+    #[tokio::test]
+    async fn el_mismo_artista_visto_por_dos_catalogos_se_funde_en_el_canal() {
+        // Un canal de YouTube y un UUID de MusicBrainz no son dos personas: son
+        // dos formas de nombrar a la misma, y tener las dos es el residuo de
+        // haber cambiado de proveedor. Gana el canal porque es el que trae foto
+        // y el único al que el InnerTube responde: a un UUID contesta 400.
+        let (repo, pool, _g) = repo().await;
+        let de_musicbrainz = ArtistRef {
+            id: ArtistId::from_trusted("dd6aeb09-60b7-400d-b9e7-b1e5800bb84a"),
+            name: "Casey Edwards".into(),
+        };
+        let de_youtube = ArtistRef {
+            id: ArtistId::from_trusted("UCLlchLQvkIB_QWxH6J2tLIA"),
+            name: "Casey Edwards".into(),
+        };
+
+        let antigua = pista("Bury the Light", vec![de_musicbrainz]);
+        repo.upsert(std::slice::from_ref(&antigua))
+            .await
+            .expect("guarda");
+        repo.upsert(&[pista("Devil Trigger", vec![de_youtube])])
+            .await
+            .expect("guarda");
+
+        assert_eq!(cuantos_llamados(&pool, "Casey Edwards").await, 1);
+
+        // Y la canción vieja se queda colgando del superviviente, no huérfana.
+        let leida = repo.get(&antigua.id).await.expect("lee").expect("existe");
+        assert_eq!(leida.artists[0].id.as_str(), "UCLlchLQvkIB_QWxH6J2tLIA");
+    }
+
+    #[tokio::test]
+    async fn fundir_entre_catalogos_recompone_el_nombre_visible() {
+        // «kittydog» y «Kittydog» comparten `name_norm` y son dos filas: al
+        // fundirlas cambia la grafía que se lee en la lista, y `artist_display`
+        // está denormalizado (ADR-011).
+        let (repo, pool, _g) = repo().await;
+        let minusculas = ArtistRef {
+            id: ArtistId::from_trusted("df256f61-301f-4bc8-8396-8bd931a0739d"),
+            name: "kittydog".into(),
+        };
+        let canal = ArtistRef {
+            id: ArtistId::from_trusted("UCLPvTw05UjNlxdeaXMbY2xw"),
+            name: "Kittydog".into(),
+        };
+
+        let vieja = pista("Una", vec![minusculas]);
+        repo.upsert(std::slice::from_ref(&vieja))
+            .await
+            .expect("guarda");
+        repo.upsert(&[pista("Otra", vec![canal])])
+            .await
+            .expect("guarda");
+
+        let filas = repo.rows_by_ids(&[vieja.id]).await.expect("lee");
+        assert_eq!(filas[0].artist_display, "Kittydog");
+        assert!(artist_display_coherente(&pool).await.expect("comprueba"));
+    }
+
+    #[tokio::test]
+    async fn con_dos_candidatos_del_otro_catalogo_no_se_funde_nada() {
+        // Dos UUIDs con el mismo nombre son la señal de que sí son dos personas
+        // distintas. Ante la duda, un duplicado es mejor que fusionar a quien no
+        // toca.
+        let (repo, pool, _g) = repo().await;
+        let uno = ArtistRef {
+            id: ArtistId::from_trusted("aaaaaaaa-0000-0000-0000-000000000001"),
+            name: "Nirvana".into(),
+        };
+        let otro = ArtistRef {
+            id: ArtistId::from_trusted("aaaaaaaa-0000-0000-0000-000000000002"),
+            name: "Nirvana".into(),
+        };
+        let canal = ArtistRef {
+            id: ArtistId::from_trusted("UCcccccccccccccccccccccc"),
+            name: "Nirvana".into(),
+        };
+        repo.upsert(&[pista("A", vec![uno]), pista("B", vec![otro])])
+            .await
+            .expect("guarda");
+        repo.upsert(&[pista("C", vec![canal])])
+            .await
+            .expect("guarda");
+
+        assert_eq!(cuantos_llamados(&pool, "Nirvana").await, 3);
+    }
+
     fn pista(titulo: &str, artistas: Vec<ArtistRef>) -> Track {
         Track {
             id: TrackId::nuevo_local(),
