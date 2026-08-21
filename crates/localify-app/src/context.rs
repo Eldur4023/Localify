@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use localify_core::domain::settings::CookiesVigentes;
 use localify_core::events::EventPublisher;
 use localify_core::ports::database::MaintenanceRepository;
 use localify_core::ports::services::{
@@ -61,7 +62,143 @@ pub struct AppContext {
     /// comando, solo una tarea de fondo, y este es el único sitio donde el
     /// `Pool` y el proveedor están a mano. `None` en modo degradado.
     pub para_discord: Option<PiezasDeDiscord>,
+    /// Las dos comprobaciones de Ajustes que tocan a yt-dlp directamente.
+    pub diagnostico: Arc<Diagnostico>,
     pub bus: EventBus,
+}
+
+/// Comprobar las cookies y poner yt-dlp al día.
+///
+/// No son servicios de dominio y por eso no van detrás de un puerto: las dos son
+/// «ejecuta el binario y cuenta qué pasó», sin ninguna decisión de negocio
+/// detrás. Inventarles un trait sería una abstracción con un solo implementador
+/// que además no abstrae nada.
+pub struct Diagnostico {
+    ejecutor: Option<Arc<dyn localify_ytdlp::proceso::Ejecutor>>,
+    cookies: Arc<CookiesVigentes>,
+    binarios: std::path::PathBuf,
+}
+
+impl std::fmt::Debug for Diagnostico {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Diagnostico").finish_non_exhaustive()
+    }
+}
+
+/// El vídeo con el que se comprueban las cookies.
+///
+/// «Me at the zoo», el primero que se subió a YouTube. Se elige por ser el que
+/// menos probabilidades tiene de desaparecer, y no se descarga: solo se pide su
+/// ficha, que es la misma operación con la que falla el emparejador.
+const VIDEO_DE_PRUEBA: &str = "https://www.youtube.com/watch?v=jNQXAC9IVRw";
+
+impl Diagnostico {
+    fn real(
+        infra: &Infraestructura,
+        ejecutor: Arc<dyn localify_ytdlp::proceso::Ejecutor>,
+        cookies: Arc<CookiesVigentes>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            ejecutor: Some(ejecutor),
+            cookies,
+            binarios: infra.paths.binaries_dir(),
+        })
+    }
+
+    /// Sin base de datos no hay descargas que arreglar, pero la pantalla de
+    /// Ajustes sigue abierta y sus botones tienen que decir algo sensato en vez
+    /// de reventar.
+    fn inerte() -> Arc<Self> {
+        Arc::new(Self {
+            ejecutor: None,
+            cookies: Arc::default(),
+            binarios: std::path::PathBuf::new(),
+        })
+    }
+
+    /// Ejecuta una extracción real con las cookies configuradas.
+    ///
+    /// Lo que de verdad comprueba es que **el almacén de cookies se puede
+    /// leer**, que es donde falla casi siempre: en Windows, Chrome y sus
+    /// derivados lo cifran con App-Bound Encryption desde la versión 127, un
+    /// perfil abierto puede estar bloqueado, y un `cookies.txt` exportado hace
+    /// meses tiene la sesión caducada. Si el muro de «confirma que no eres un
+    /// bot» no aparece hoy en este vídeo, esto pasará aunque las cookies no
+    /// sirvan para otro: es una comprobación de que el mecanismo funciona, no
+    /// una garantía sobre el catálogo entero.
+    pub async fn probar_cookies(&self) -> crate::dto::settings::PruebaDto {
+        let Some(ejecutor) = &self.ejecutor else {
+            return crate::dto::settings::PruebaDto::fallo(
+                "settings.cookies_no_ytdlp",
+                String::new(),
+            );
+        };
+
+        let mut args = vec![
+            VIDEO_DE_PRUEBA.to_owned(),
+            "--simulate".to_owned(),
+            "--no-warnings".to_owned(),
+            "--no-playlist".to_owned(),
+            "--print".to_owned(),
+            "%(id)s".to_owned(),
+        ];
+        args.extend(localify_ytdlp::args_de_cookies(&self.cookies.leer()));
+
+        match ejecutor.ejecutar("yt-dlp", &args).await {
+            Ok(s) if s.es_ok() => crate::dto::settings::PruebaDto::ok("settings.cookies_ok"),
+            // El detalle es la salida cruda de yt-dlp, sin traducir: es la única
+            // parte que dice *qué* ha fallado, y traducirla sería inventarse un
+            // catálogo de mensajes de otro programa (ADR-012 manda las claves,
+            // no los diagnósticos ajenos).
+            Ok(s) => crate::dto::settings::PruebaDto::fallo(
+                "settings.cookies_error",
+                ultima_linea_util(&s.stderr),
+            ),
+            Err(e) => {
+                crate::dto::settings::PruebaDto::fallo("settings.cookies_error", e.to_string())
+            }
+        }
+    }
+
+    /// Pone yt-dlp al día y cuenta el resultado.
+    pub async fn actualizar_ytdlp(&self) -> crate::dto::settings::PruebaDto {
+        use localify_platform::Actualizacion;
+
+        let locator = localify_platform::SidecarLocator::new(self.binarios.clone());
+        match localify_platform::actualizar_yt_dlp(&locator, TOPE_ACTUALIZACION).await {
+            Actualizacion::AlDia(v) => {
+                crate::dto::settings::PruebaDto::detalle("settings.ytdlp_al_dia", v)
+            }
+            Actualizacion::Actualizado { ahora, .. } => {
+                crate::dto::settings::PruebaDto::detalle("settings.ytdlp_actualizado", ahora)
+            }
+            Actualizacion::NoEsNuestro => {
+                crate::dto::settings::PruebaDto::fallo("settings.ytdlp_ajeno", String::new())
+            }
+            Actualizacion::NoSePudo(motivo) => {
+                crate::dto::settings::PruebaDto::fallo("settings.ytdlp_error", motivo)
+            }
+        }
+    }
+}
+
+/// Cuánto se espera a que yt-dlp compruebe su versión.
+///
+/// Un minuto: comprobar tarda un segundo, pero si hay versión nueva se descarga
+/// el binario entero, que son unos diecisiete megas.
+pub const TOPE_ACTUALIZACION: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// La última línea de un error de yt-dlp que dice algo.
+///
+/// Su `stderr` trae la traza de Python por delante cuando algo revienta de
+/// verdad, y lo accionable siempre está al final.
+fn ultima_linea_util(stderr: &str) -> String {
+    stderr
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .unwrap_or("")
+        .to_owned()
 }
 
 /// Lo que la tarea de Discord necesita y ningún comando usa.
@@ -106,15 +243,17 @@ impl AppContext {
     ///
     /// # Errors
     /// Si el transporte HTTP no se puede construir.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "es una lista de cableado: lo que tiene sentido propio ya está extraído \
+                  —`Repositorios`, `metadatos`, `abrir_motor`, `descargas`…— y partirla más \
+                  solo esconde el orden en el que se construyen las cosas, que es justo lo \
+                  que hay que poder leer de un tirón"
+    )]
     pub async fn real(
         bus: EventBus,
         infra: Infraestructura,
     ) -> localify_core::error::CoreResult<Self> {
-        use localify_db::repositories::{
-            SqliteAlbumRepository, SqliteArtistRepository, SqliteSearchRepository,
-            SqliteTrackRepository,
-        };
-
         let publicador: Arc<dyn localify_core::events::EventPublisher> = Arc::new(bus.clone());
 
         // ── Proveedores de metadatos ────────────────────────────────────────
@@ -123,31 +262,23 @@ impl AppContext {
             Arc::clone(&conmutador) as _;
 
         // ── Repositorios ────────────────────────────────────────────────────
-        let tracks: Arc<dyn localify_core::ports::database::TrackRepository> =
-            Arc::new(SqliteTrackRepository::new(infra.pool.clone()));
-        let albums: Arc<dyn localify_core::ports::database::AlbumRepository> =
-            Arc::new(SqliteAlbumRepository::new(infra.pool.clone()));
-        let artists = Arc::new(SqliteArtistRepository::new(infra.pool.clone()));
-        let search_repo = Arc::new(SqliteSearchRepository::new(infra.pool.clone()));
+        let Repositorios {
+            tracks,
+            albums,
+            artists,
+            search: search_repo,
+        } = Repositorios::sobre(&infra);
 
         // ── Servicios reales ────────────────────────────────────────────────
         let imagenes = descargador_de_imagenes();
-
-        let metadata = Arc::new(
-            localify_services::MetadataServiceImpl::nuevo(
-                Arc::clone(&provider),
-                Arc::clone(&tracks),
-                Arc::clone(&albums),
-                artists,
-                Arc::clone(&publicador),
-                imagenes.clone(),
-                Arc::clone(&infra.paths),
-            )
-            // Para la portada de las pistas sin álbum: sale de la miniatura del
-            // vídeo que se emparejó.
-            .con_emparejamientos(Arc::new(
-                localify_db::repositories::SqliteYoutubeMatchRepository::new(infra.pool.clone()),
-            )),
+        let metadata = metadatos(
+            &infra,
+            &provider,
+            &tracks,
+            &albums,
+            artists,
+            &publicador,
+            imagenes.clone(),
         );
         let search = Arc::new(localify_services::SearchServiceImpl::nuevo(
             search_repo,
@@ -161,9 +292,26 @@ impl AppContext {
 
         // Compartido entre ajustes (escribe) y reproducción (lee al encadenar).
         let crossfade = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        // Lo mismo con las cookies: las escribe Ajustes y las lee yt-dlp en cada
+        // búsqueda y cada descarga.
+        let cookies: Arc<CookiesVigentes> = Arc::default();
+
+        // El ejecutor se crea aquí y no dentro de `descargas` porque lo comparten
+        // dos consumidores: la descarga y la comprobación de cookies de Ajustes.
+        let ejecutor_ytdlp: Arc<dyn localify_ytdlp::proceso::Ejecutor> = Arc::new(
+            localify_ytdlp::proceso::EjecutorReal::nuevo(infra.paths.binaries_dir()),
+        );
 
         // ── Descargas, cola y reproducción ──────────────────────────────────
-        let downloads = descargas(&infra, &tracks, &publicador, &provider).await;
+        let downloads = descargas(
+            &infra,
+            &tracks,
+            &publicador,
+            &provider,
+            &cookies,
+            &ejecutor_ytdlp,
+        )
+        .await;
         let queue = localify_services::QueueActor::nuevo(localify_services::DependenciasCola {
             tracks: Arc::clone(&tracks),
             bus: Arc::clone(&publicador),
@@ -190,7 +338,16 @@ impl AppContext {
         );
         let recommendations = recomendaciones(&infra, &tracks, &provider);
 
-        let settings = ajustes(&infra, &publicador, motor, crossfade, &spotify, &conmutador).await;
+        let settings = ajustes(
+            &infra,
+            &publicador,
+            motor,
+            crossfade,
+            Arc::clone(&cookies),
+            &spotify,
+            &conmutador,
+        )
+        .await;
         let lyrics = letras(&infra, &tracks);
         let lastfm = scrobbler(&infra, &tracks, &settings);
 
@@ -213,6 +370,7 @@ impl AppContext {
                 tracks: Arc::clone(&tracks),
                 provider: Arc::clone(&provider),
             }),
+            diagnostico: Diagnostico::real(&infra, ejecutor_ytdlp, cookies),
             bus,
         })
     }
@@ -254,9 +412,74 @@ impl AppContext {
             mantenimiento: None,
             lastfm: None,
             para_discord: None,
+            diagnostico: Diagnostico::inerte(),
             bus,
         }
     }
+}
+
+/// Los repositorios que `real` reparte entre varios servicios.
+///
+/// Van juntos porque se construyen igual —todos sobre el mismo `Pool`— y porque
+/// los cuatro los comparte más de un servicio. Los que usa uno solo se crean
+/// dentro de su propia función de cableado, donde se leen al lado de quien los
+/// necesita.
+struct Repositorios {
+    tracks: Arc<dyn localify_core::ports::database::TrackRepository>,
+    albums: Arc<dyn localify_core::ports::database::AlbumRepository>,
+    artists: Arc<localify_db::repositories::SqliteArtistRepository>,
+    search: Arc<localify_db::repositories::SqliteSearchRepository>,
+}
+
+impl Repositorios {
+    fn sobre(infra: &Infraestructura) -> Self {
+        use localify_db::repositories::{
+            SqliteAlbumRepository, SqliteArtistRepository, SqliteSearchRepository,
+            SqliteTrackRepository,
+        };
+
+        Self {
+            tracks: Arc::new(SqliteTrackRepository::new(infra.pool.clone())),
+            albums: Arc::new(SqliteAlbumRepository::new(infra.pool.clone())),
+            artists: Arc::new(SqliteArtistRepository::new(infra.pool.clone())),
+            search: Arc::new(SqliteSearchRepository::new(infra.pool.clone())),
+        }
+    }
+}
+
+/// Cablea el servicio de metadatos.
+///
+/// Se saca de `real` porque su construcción tiene una vuelta de tuerca que
+/// merece explicación propia, no porque sean muchas líneas.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "es cableado: cada argumento es una dependencia distinta"
+)]
+fn metadatos(
+    infra: &Infraestructura,
+    provider: &Arc<dyn localify_core::ports::metadata_provider::MetadataProvider>,
+    tracks: &Arc<dyn localify_core::ports::database::TrackRepository>,
+    albums: &Arc<dyn localify_core::ports::database::AlbumRepository>,
+    artists: Arc<localify_db::repositories::SqliteArtistRepository>,
+    publicador: &Arc<dyn EventPublisher>,
+    imagenes: Option<Arc<dyn localify_core::ports::metadata_provider::ImageFetcher>>,
+) -> Arc<localify_services::MetadataServiceImpl> {
+    Arc::new(
+        localify_services::MetadataServiceImpl::nuevo(
+            Arc::clone(provider),
+            Arc::clone(tracks),
+            Arc::clone(albums),
+            artists,
+            Arc::clone(publicador),
+            imagenes,
+            Arc::clone(&infra.paths),
+        )
+        // Para la portada de las pistas sin álbum: sale de la miniatura del
+        // vídeo que se emparejó.
+        .con_emparejamientos(Arc::new(
+            localify_db::repositories::SqliteYoutubeMatchRepository::new(infra.pool.clone()),
+        )),
+    )
 }
 
 /// Last.fm: la cola vive en la base de datos y las credenciales —clave, secreto
@@ -384,6 +607,7 @@ async fn ajustes(
     publicador: &Arc<dyn EventPublisher>,
     motor: Option<Arc<dyn localify_core::ports::audio_engine::AudioEngine>>,
     crossfade: Arc<std::sync::atomic::AtomicU32>,
+    cookies: Arc<CookiesVigentes>,
     spotify: &Arc<localify_spotify::provider::SpotifyProvider>,
     conmutador: &Arc<localify_services::proveedor::ProveedorConmutable>,
 ) -> Arc<dyn SettingsService> {
@@ -399,6 +623,7 @@ async fn ajustes(
                 fs: Arc::new(localify_platform::RealFileSystem::new()),
                 audio: motor,
                 crossfade,
+                cookies,
                 locale: Arc::new(localify_platform::SystemLocale::new()),
                 proveedor: Some(Arc::clone(conmutador)),
                 spotify: Some(Arc::clone(spotify) as _),
@@ -446,15 +671,18 @@ async fn descargas(
     tracks: &Arc<dyn localify_core::ports::database::TrackRepository>,
     publicador: &Arc<dyn EventPublisher>,
     provider: &Arc<dyn localify_core::ports::metadata_provider::MetadataProvider>,
+    cookies: &Arc<CookiesVigentes>,
+    ejecutor: &Arc<dyn localify_ytdlp::proceso::Ejecutor>,
 ) -> Arc<localify_services::DownloadActor> {
     use localify_db::repositories::{
         SqliteAudioFileRepository, SqliteDownloadJobRepository, SqliteYoutubeMatchRepository,
     };
 
-    let ejecutor: Arc<dyn localify_ytdlp::proceso::Ejecutor> = Arc::new(
-        localify_ytdlp::proceso::EjecutorReal::nuevo(infra.paths.binaries_dir()),
-    );
-    let cliente = Arc::new(localify_ytdlp::ClienteYtDlp::nuevo(Arc::clone(&ejecutor)));
+    let ejecutor = Arc::clone(ejecutor);
+    let cliente = Arc::new(localify_ytdlp::ClienteYtDlp::nuevo(
+        Arc::clone(&ejecutor),
+        Arc::clone(cookies),
+    ));
 
     let actor = Arc::new(localify_services::DownloadActor::arrancar(
         localify_services::DependenciasDescarga {

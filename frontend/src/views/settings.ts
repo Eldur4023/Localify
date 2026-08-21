@@ -26,8 +26,9 @@
  */
 
 import type {
-  AudioSettingsInputDto,
   AudioDeviceDto,
+  AudioSettingsInputDto,
+  DownloadSettingsDto,
   EqProfileDto,
   SettingsDto,
   SettingsPatchDto,
@@ -40,6 +41,45 @@ import { confirmar } from "../ui/dialogo.js";
 import { mountEqualizer, type Ecualizador } from "../ui/equalizer.js";
 import { mostrarError } from "../ui/error-overlay.js";
 import type { Vista } from "../router.js";
+
+/**
+ * Navegadores cuyas cookies sabe leer yt-dlp.
+ *
+ * La lista la valida el backend —`NAVEGADORES` en el dominio— y aquí solo se
+ * pinta. Duplicarla es el precio de no inventar un comando para pedir ocho
+ * cadenas que no cambian nunca; si divergieran, guardar el ajuste fallaría con
+ * un error claro en vez de romper las descargas en silencio.
+ */
+const NAVEGADORES = [
+  "firefox",
+  "chrome",
+  "chromium",
+  "edge",
+  "brave",
+  "opera",
+  "vivaldi",
+  "safari",
+] as const;
+
+/** Nombres tal como los conoce la gente, no como los llama yt-dlp. */
+const ETIQUETAS_NAVEGADOR: Record<string, string> = {
+  firefox: "Firefox",
+  chrome: "Chrome",
+  chromium: "Chromium",
+  edge: "Edge",
+  brave: "Brave",
+  opera: "Opera",
+  vivaldi: "Vivaldi",
+  safari: "Safari",
+};
+
+/**
+ * Valor centinela del desplegable para «un fichero».
+ *
+ * No puede chocar con ningún navegador porque yt-dlp no acepta espacios en ese
+ * argumento, así que ninguno se llamará nunca así.
+ */
+const FICHERO = "::fichero::";
 
 /** Un patch vacío: todas las secciones a `null`. */
 function patchVacio(): SettingsPatchDto {
@@ -245,6 +285,45 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
   }
 
   /**
+   * Igual que `guardarAudio`, para la sección de descargas.
+   *
+   * Devuelve la promesa porque quien elige un fichero de cookies tiene que
+   * esperar a que esté guardado antes de repintar: si no, la pantalla se dibuja
+   * con el ajuste anterior y parece que el selector no hizo nada.
+   */
+  async function guardarDescargas(
+    cambio: Partial<DownloadSettingsDto>,
+  ): Promise<void> {
+    if (!actual) return;
+    await aplicar({
+      ...patchVacio(),
+      download: { ...actual.download, ...cambio },
+    });
+  }
+
+  /** Botón de acción con su estado de carga y su error a la vista. */
+  function boton(etiqueta: string, accion: () => Promise<void>): HTMLButtonElement {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "boton";
+    b.textContent = etiqueta;
+    b.addEventListener("click", () => {
+      void (async () => {
+        b.disabled = true;
+        b.textContent = t("common.loading");
+        try {
+          await accion();
+        } catch (e) {
+          mostrarError(t("error.internal"), String(e));
+        }
+        b.disabled = false;
+        b.textContent = etiqueta;
+      })();
+    });
+    return b;
+  }
+
+  /**
    * Elige carpeta y pregunta qué hacer con lo que ya hay.
    *
    * La pregunta no se puede evitar: mover la música y dejarla donde está son
@@ -439,6 +518,103 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
           ),
         ),
       );
+
+      el.append(bloque);
+    }
+
+    // Descargas
+    //
+    // ## Por qué esta sección existe
+    //
+    // YouTube pide cada vez más «Sign in to confirm you're not a bot», y contra
+    // eso no hay reintento que valga: es una puerta cerrada, no un fallo
+    // pasajero. Las dos únicas cosas que la abren son unas cookies de sesión y
+    // un yt-dlp reciente, y hasta ahora ninguna de las dos se podía tocar desde
+    // la aplicación.
+    {
+      const { el: bloque, cuerpo } = seccion(t("settings.downloads"));
+
+      const ayuda = document.createElement("p");
+      ayuda.className = "ajustes__ayuda";
+      ayuda.textContent = t("settings.cookies_help");
+      cuerpo.append(ayuda);
+
+      // El desplegable lista los navegadores y una entrada más para el fichero.
+      // Van en el mismo control porque son la misma decisión —de dónde salen
+      // las cookies— y separarlos en dos obligaría a explicar cuál manda.
+      const opciones = [
+        { valor: "", texto: t("settings.cookies_none") },
+        ...NAVEGADORES.map((n) => ({ valor: n, texto: ETIQUETAS_NAVEGADOR[n] ?? n })),
+        { valor: FICHERO, texto: t("settings.cookies_file") },
+      ];
+      const elegido = s.download.cookiesFile
+        ? FICHERO
+        : (s.download.cookiesBrowser ?? "");
+
+      const selectorCookies = selector(opciones, elegido, (v) => {
+        if (v === FICHERO) {
+          // Se pide el fichero **antes** de guardar: guardar «fichero» sin ruta
+          // dejaría el ajuste en un estado que no significa nada.
+          void (async () => {
+            const ruta = await api.pickCookies();
+            if (ruta) {
+              await guardarDescargas({ cookiesBrowser: null, cookiesFile: ruta });
+            }
+            pintar();
+          })();
+          return;
+        }
+        void guardarDescargas({
+          cookiesBrowser: v === "" ? null : v,
+          cookiesFile: null,
+        });
+      });
+      cuerpo.append(campo(t("settings.cookies"), selectorCookies));
+
+      if (s.download.cookiesFile) {
+        const ruta = document.createElement("p");
+        ruta.className = "ajustes__ayuda";
+        ruta.textContent = s.download.cookiesFile;
+        cuerpo.append(ruta);
+      }
+
+      // El aviso solo aparece con el navegador elegido, que es cuando aplica:
+      // `--cookies-from-browser` lee el almacén entero, no solo YouTube.
+      if (s.download.cookiesBrowser) {
+        const aviso = document.createElement("p");
+        aviso.className = "ajustes__ayuda ajustes__ayuda--aviso";
+        aviso.textContent = t("settings.cookies_warning");
+        cuerpo.append(aviso);
+      }
+
+      const resultado = document.createElement("p");
+      resultado.className = "ajustes__ayuda";
+
+      const comprobar = boton(t("settings.cookies_test"), async () => {
+        const r = await api.testCookies();
+        resultado.textContent = r.detail
+          ? `${t(r.messageKey)} — ${r.detail}`
+          : t(r.messageKey);
+        resultado.classList.toggle("ajustes__ayuda--aviso", !r.ok);
+      });
+
+      const actualizar = boton(t("settings.ytdlp_update"), async () => {
+        const r = await api.updateYtdlp();
+        resultado.textContent = r.detail
+          ? `${t(r.messageKey)} — ${r.detail}`
+          : t(r.messageKey);
+        resultado.classList.toggle("ajustes__ayuda--aviso", !r.ok);
+      });
+
+      const acciones = document.createElement("div");
+      acciones.className = "ajustes__acciones";
+      acciones.append(comprobar, actualizar);
+      cuerpo.append(acciones, resultado);
+
+      const nota = document.createElement("p");
+      nota.className = "ajustes__ayuda";
+      nota.textContent = t("settings.ytdlp_help");
+      cuerpo.append(nota);
 
       el.append(bloque);
     }

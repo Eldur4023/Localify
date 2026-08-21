@@ -157,6 +157,7 @@ impl Ctx {
             // contempla ese caso como normal, no como degradado.
             audio: None,
             crossfade: Arc::clone(&self.crossfade),
+            cookies: Arc::default(),
             locale: Arc::new(LocaleFalso("es-ES")),
             proveedor: None,
             spotify: None,

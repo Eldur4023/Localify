@@ -155,12 +155,9 @@ pub struct SidecarStatus {
     pub available: bool,
 }
 
-#[async_trait]
-pub trait SidecarManager: Send + Sync + 'static {
-    async fn status(&self) -> CoreResult<Vec<SidecarStatus>>;
-    /// Descarga o actualiza los binarios que falten o estén obsoletos.
-    async fn ensure_available(&self) -> CoreResult<Vec<SidecarStatus>>;
-    /// yt-dlp se rompe cuando YouTube cambia; actualizarlo es la reparación
-    /// habitual y debe poder hacerse sin publicar versión de Localify.
-    async fn update(&self, name: &str) -> CoreResult<SidecarStatus>;
-}
+// Los sidecars no tienen puerto de servicio. Hubo un `SidecarManager` con tres
+// métodos y ningún implementador —de ahí que nadie actualizara nunca yt-dlp— y
+// lo que hacía falta de verdad resultó ser una función: `actualizar_yt_dlp`, en
+// `localify-platform`. Es «ejecuta el binario y cuenta qué pasó», sin ninguna
+// decisión de negocio que aislar, así que el trait solo servía para hacer creer
+// que la funcionalidad existía.

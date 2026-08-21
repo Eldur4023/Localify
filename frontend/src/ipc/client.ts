@@ -32,6 +32,7 @@ import type {
   PositionDto,
   ProviderStatusDto,
   QueueSnapshotDto,
+  PruebaDto,
   SearchResultsDto,
   SettingsDto,
   SettingsPatchDto,
@@ -302,6 +303,18 @@ export const settings = {
     invoke<void>("settings_preview_eq", { profile }),
   /** Abre el selector nativo. `null` si el usuario cancela. */
   pickFolder: () => invoke<string | null>("settings_pick_folder"),
+  /** Selector nativo para el fichero de cookies en formato Netscape. */
+  pickCookies: () => invoke<string | null>("settings_pick_cookies"),
+  /**
+   * Comprueba que las cookies configuradas sirven de verdad.
+   *
+   * Elegir un navegador en un desplegable no garantiza nada: yt-dlp puede no
+   * saber descifrar su almacén. Sin esta comprobación uno se entera tres
+   * canciones después, cuando el fallo ya no se parece a lo que tocó.
+   */
+  testCookies: () => invoke<PruebaDto>("settings_test_cookies"),
+  /** Fuerza la comprobación de versión de yt-dlp, que ya se hace al arrancar. */
+  updateYtdlp: () => invoke<PruebaDto>("settings_update_ytdlp"),
   /**
    * Cambia la carpeta de la biblioteca.
    *

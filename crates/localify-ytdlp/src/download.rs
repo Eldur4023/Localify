@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use localify_core::domain::audio::DurationMs;
 use localify_core::domain::download::BYTES_MINIMOS_REPRODUCIBLE;
-use localify_core::domain::settings::FormatPreference;
+use localify_core::domain::settings::{CookieSource, CookiesVigentes, FormatPreference};
 use serde::Deserialize;
 use tracing::{debug, warn};
 
@@ -88,6 +88,12 @@ impl EntradaJson {
 /// Cliente de yt-dlp.
 pub struct ClienteYtDlp {
     ejecutor: Arc<dyn Ejecutor>,
+    /// Origen de las cookies, compartido con Ajustes.
+    ///
+    /// Se lee en cada invocación en vez de guardarse al construir: cambiar el
+    /// ajuste tiene que servir para la siguiente canción, no para la siguiente
+    /// sesión. Es el mismo trato que recibe el crossfade.
+    cookies: Arc<CookiesVigentes>,
 }
 
 impl std::fmt::Debug for ClienteYtDlp {
@@ -96,10 +102,35 @@ impl std::fmt::Debug for ClienteYtDlp {
     }
 }
 
+/// Los argumentos con los que yt-dlp se autentica, según el origen configurado.
+///
+/// ## Van en todas las invocaciones, no solo en la descarga
+///
+/// El muro de «Sign in to confirm you're not a bot» aparece también al extraer
+/// la ficha de un vídeo. Sin cookies ahí, el emparejamiento falla antes de que
+/// haya nada que descargar, y el error que se ve no habla de descargas.
+#[must_use]
+pub fn args_de_cookies(origen: &CookieSource) -> Vec<String> {
+    match origen {
+        CookieSource::Ninguna => Vec::new(),
+        CookieSource::Navegador(nombre) => {
+            vec!["--cookies-from-browser".to_owned(), nombre.clone()]
+        }
+        CookieSource::Fichero(ruta) => {
+            vec!["--cookies".to_owned(), ruta.to_string_lossy().into_owned()]
+        }
+    }
+}
+
 impl ClienteYtDlp {
     #[must_use]
-    pub fn nuevo(ejecutor: Arc<dyn Ejecutor>) -> Self {
-        Self { ejecutor }
+    pub fn nuevo(ejecutor: Arc<dyn Ejecutor>, cookies: Arc<CookiesVigentes>) -> Self {
+        Self { ejecutor, cookies }
+    }
+
+    /// Los argumentos de autenticación vigentes.
+    fn cookies(&self) -> Vec<String> {
+        args_de_cookies(&self.cookies.leer())
     }
 
     /// Ejecuta una consulta y devuelve los candidatos.
@@ -121,7 +152,7 @@ impl ClienteYtDlp {
             format!("ytsearch{RESULTADOS_POR_CONSULTA}:{}", consulta.texto)
         };
 
-        let args = vec![
+        let mut args = vec![
             objetivo,
             // Un objeto JSON por línea, sin descargar nada.
             "--dump-json".to_owned(),
@@ -133,6 +164,7 @@ impl ClienteYtDlp {
             "--playlist-end".to_owned(),
             RESULTADOS_POR_CONSULTA.to_string(),
         ];
+        args.extend(self.cookies());
 
         let salida = self.ejecutor.ejecutar(BINARIO, &args).await?;
 
@@ -160,7 +192,7 @@ impl ClienteYtDlp {
         preferencia: FormatPreference,
         observador: &dyn ObservadorDescarga,
     ) -> YtDlpResult<PathBuf> {
-        let args = vec![
+        let mut args = vec![
             format!("https://www.youtube.com/watch?v={video_id}"),
             "-f".to_owned(),
             formats::expresion(preferencia).to_owned(),
@@ -176,6 +208,7 @@ impl ClienteYtDlp {
             "--no-warnings".to_owned(),
             "--no-playlist".to_owned(),
         ];
+        args.extend(self.cookies());
 
         let puente = PuenteProgreso {
             observador,
@@ -455,7 +488,7 @@ mod tests {
     #[tokio::test]
     async fn buscar_en_youtube_music_usa_una_url_y_no_ytsearch() {
         let e = Arc::new(EjecutorFalso::nuevo().con_stdout(&json_candidato("a", "X", "C", 200.0)));
-        let cliente = ClienteYtDlp::nuevo(e.clone());
+        let cliente = ClienteYtDlp::nuevo(e.clone(), Arc::default());
 
         let candidatos = cliente
             .buscar(&Consulta {
@@ -479,7 +512,7 @@ mod tests {
     #[tokio::test]
     async fn buscar_en_youtube_usa_ytsearch_con_limite() {
         let e = Arc::new(EjecutorFalso::nuevo().con_stdout(""));
-        let cliente = ClienteYtDlp::nuevo(e.clone());
+        let cliente = ClienteYtDlp::nuevo(e.clone(), Arc::default());
 
         cliente
             .buscar(&Consulta {
@@ -504,7 +537,7 @@ mod tests {
             stdout: json_candidato("abc", "X", "C", 200.0),
             stderr: "ERROR: uno de los resultados falló".into(),
         }));
-        let cliente = ClienteYtDlp::nuevo(e);
+        let cliente = ClienteYtDlp::nuevo(e, Arc::default());
 
         let candidatos = cliente
             .buscar(&Consulta {
@@ -521,7 +554,7 @@ mod tests {
     #[tokio::test]
     async fn un_fallo_sin_resultados_si_es_un_error() {
         let e = Arc::new(EjecutorFalso::nuevo().con_error(1, "ERROR: Video unavailable"));
-        let cliente = ClienteYtDlp::nuevo(e);
+        let cliente = ClienteYtDlp::nuevo(e, Arc::default());
 
         let error = cliente
             .buscar(&Consulta {
@@ -561,7 +594,7 @@ mod tests {
             BYTES_MINIMOS_REPRODUCIBLE + 1
         );
         let e = Arc::new(EjecutorFalso::nuevo().con_stdout(&lineas));
-        let cliente = ClienteYtDlp::nuevo(e);
+        let cliente = ClienteYtDlp::nuevo(e, Arc::default());
 
         let obs = ObservadorDePrueba::default();
         cliente
@@ -590,7 +623,7 @@ mod tests {
     #[tokio::test]
     async fn una_descarga_lenta_no_avisa_de_reproducible_antes_de_tiempo() {
         let e = Arc::new(EjecutorFalso::nuevo().con_stdout("LOCALIFY|1024|4000000|NA"));
-        let cliente = ClienteYtDlp::nuevo(e);
+        let cliente = ClienteYtDlp::nuevo(e, Arc::default());
 
         let obs = ObservadorDePrueba::default();
         cliente
@@ -607,7 +640,7 @@ mod tests {
     #[tokio::test]
     async fn la_descarga_pide_el_formato_preferido_y_el_destino() {
         let e = Arc::new(EjecutorFalso::nuevo().con_stdout(""));
-        let cliente = ClienteYtDlp::nuevo(e.clone());
+        let cliente = ClienteYtDlp::nuevo(e.clone(), Arc::default());
 
         let obs = ObservadorDePrueba::default();
         cliente
@@ -634,5 +667,117 @@ mod tests {
         assert_eq!(url_escape("queen under pressure"), "queen+under+pressure");
         assert_eq!(url_escape("AC/DC"), "AC%2FDC");
         assert_eq!(url_escape("Björk"), "Bj%C3%B6rk");
+    }
+}
+
+#[cfg(test)]
+mod tests_cookies {
+    use super::*;
+
+    #[test]
+    fn sin_origen_no_se_pasa_ningun_argumento() {
+        // Es el caso por defecto y el que tiene que seguir funcionando igual que
+        // antes de que existieran las cookies.
+        assert!(args_de_cookies(&CookieSource::Ninguna).is_empty());
+    }
+
+    #[test]
+    fn el_navegador_va_como_cookies_from_browser() {
+        assert_eq!(
+            args_de_cookies(&CookieSource::Navegador("firefox".into())),
+            vec!["--cookies-from-browser".to_owned(), "firefox".to_owned()]
+        );
+    }
+
+    #[test]
+    fn el_fichero_va_como_cookies() {
+        // Argumentos distintos: `--cookies` toma un fichero en formato Netscape
+        // y `--cookies-from-browser` un nombre de navegador. Confundirlos hace
+        // que yt-dlp busque un perfil llamado "C:\...".
+        assert_eq!(
+            args_de_cookies(&CookieSource::Fichero(PathBuf::from(r"C:\c.txt"))),
+            vec!["--cookies".to_owned(), r"C:\c.txt".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn la_busqueda_tambien_lleva_las_cookies() {
+        // El muro de "confirma que no eres un bot" aparece al extraer la ficha
+        // de un vídeo, no solo al descargarlo: sin cookies aquí, el
+        // emparejamiento falla antes de que haya nada que bajar.
+        let e = Arc::new(EjecutorEspia::default());
+        let cookies = Arc::new(CookiesVigentes::default());
+        cookies.poner(CookieSource::Navegador("firefox".into()));
+
+        let cliente = ClienteYtDlp::nuevo(e.clone(), cookies);
+        let _ = cliente
+            .buscar(&Consulta {
+                texto: "algo".into(),
+                music: false,
+                directa: false,
+                origen: "test",
+            })
+            .await;
+
+        let args = e.ultimos();
+        assert!(args.contains(&"--cookies-from-browser".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn cambiar_el_ajuste_surte_efecto_sin_reconstruir_el_cliente() {
+        // Las cookies se leen en cada invocación a propósito: el usuario las
+        // configura con la aplicación abierta, y tienen que servir para la
+        // siguiente canción y no para la siguiente sesión.
+        let e = Arc::new(EjecutorEspia::default());
+        let cookies = Arc::new(CookiesVigentes::default());
+        let cliente = ClienteYtDlp::nuevo(e.clone(), Arc::clone(&cookies));
+
+        let consulta = Consulta {
+            texto: "algo".into(),
+            music: false,
+            directa: false,
+            origen: "test",
+        };
+        let _ = cliente.buscar(&consulta).await;
+        assert!(!e.ultimos().contains(&"--cookies-from-browser".to_owned()));
+
+        cookies.poner(CookieSource::Navegador("edge".into()));
+        let _ = cliente.buscar(&consulta).await;
+        assert!(e.ultimos().contains(&"edge".to_owned()));
+    }
+
+    /// Ejecutor que solo anota con qué se le llamó.
+    #[derive(Debug, Default)]
+    struct EjecutorEspia(std::sync::Mutex<Vec<String>>);
+
+    impl EjecutorEspia {
+        fn ultimos(&self) -> Vec<String> {
+            self.0.lock().expect("sin envenenar").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Ejecutor for EjecutorEspia {
+        async fn ejecutar(
+            &self,
+            _b: &'static str,
+            args: &[String],
+        ) -> YtDlpResult<crate::proceso::Salida> {
+            *self.0.lock().expect("sin envenenar") = args.to_vec();
+            Ok(crate::proceso::Salida {
+                codigo: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        async fn ejecutar_con_progreso(
+            &self,
+            b: &'static str,
+            args: &[String],
+            _o: &dyn ObservadorLineas,
+        ) -> YtDlpResult<crate::proceso::Salida> {
+            self.ejecutar(b, args).await
+        }
     }
 }

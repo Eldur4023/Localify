@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let binarios = std::path::Path::new(&std::env::var("APPDATA")?)
         .join("Localify")
         .join("bin");
-    let cliente = ClienteYtDlp::nuevo(Arc::new(EjecutorReal::nuevo(binarios)));
+    let cliente = ClienteYtDlp::nuevo(Arc::new(EjecutorReal::nuevo(binarios)), Arc::default());
 
     let plan = plan_de_consultas(&pista, None);
     println!("plan: {} consultas\n", plan.len());

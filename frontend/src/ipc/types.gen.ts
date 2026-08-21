@@ -80,7 +80,19 @@ export type DownloadSettingsDto = { preferredFormat: string,
 /**
  * Descargas simultáneas por carril (inmediato y prefetch).
  */
-maxConcurrent: number, maxRetries: number, };
+maxConcurrent: number, maxRetries: number, 
+/**
+ * Navegador del que leer las cookies de YouTube, o `null`.
+ *
+ * Plano y no una unión etiquetada porque en la pantalla son un desplegable
+ * y un selector de fichero, dos controles independientes. Que sean
+ * excluyentes lo impone `TryFrom`, no la forma del dato.
+ */
+cookiesBrowser: string | null, 
+/**
+ * Ruta del fichero de cookies en formato Netscape, o `null`.
+ */
+cookiesFile: string | null, };
 
 export type EqProfileDto = { id: string, nameKey: string, gainsDb: Array<number>, };
 
@@ -244,6 +256,16 @@ export type PrimeraCoincidenciaDto = { "kind": "track", "item": TrackRowDto } | 
  * Estado de un proveedor externo.
  */
 export type ProviderStatusDto = { "state": "ready" } | { "state": "notConfigured" } | { "state": "unavailable", reasonKey: string, };
+
+/**
+ * Resultado de una comprobación de Ajustes.
+ *
+ * El mensaje va como clave i18n y el detalle como texto crudo: el detalle es la
+ * salida de yt-dlp, que es de otro programa y no hay catálogo que la traduzca.
+ * La alternativa —tragársela— dejaría al usuario con «no funciona» y sin la
+ * línea que dice por qué.
+ */
+export type PruebaDto = { ok: boolean, messageKey: string, detail: string, };
 
 export type QueueEntryDto = { entryId: string, track: TrackRowDto, };
 

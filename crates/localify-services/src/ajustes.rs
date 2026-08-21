@@ -35,8 +35,8 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use localify_core::domain::audio::{AudioDevice, EqProfile};
 use localify_core::domain::settings::{
-    AudioSettings, DownloadSettings, IntegrationSettings, Language, MetadataProviderKind, Settings,
-    SettingsPatch, SettingsSection, SpotifySettings, UiSettings,
+    AudioSettings, CookieSource, DownloadSettings, IntegrationSettings, Language,
+    MetadataProviderKind, Settings, SettingsPatch, SettingsSection, SpotifySettings, UiSettings,
 };
 use localify_core::error::{CoreError, CoreResult};
 use localify_core::events::{DomainEvent, EventPublisher, ProviderStatus};
@@ -90,6 +90,12 @@ pub struct Dependencias {
     /// crítico de cada cambio de canción, donde una llamada `async` a otro
     /// actor añadiría una espera para leer un `u32`.
     pub crossfade: Arc<std::sync::atomic::AtomicU32>,
+    /// Origen de cookies vigente, compartido con el cliente de yt-dlp.
+    ///
+    /// Por celda compartida y por el mismo motivo que el crossfade: lo lee quien
+    /// lanza cada descarga, y cambiarlo debe surtir efecto en la siguiente
+    /// canción y no al reiniciar.
+    pub cookies: Arc<localify_core::domain::settings::CookiesVigentes>,
     pub locale: Arc<dyn LocaleProvider>,
     /// Conmutador del catálogo de metadatos.
     ///
@@ -155,12 +161,36 @@ impl SettingsServiceImpl {
             actual: RwLock::new(settings),
         };
         servicio.aplicar_a_audio();
+        servicio.aplicar_a_descargas();
         // También al arrancar: el conmutador nace en su valor por defecto y sin
         // esto, el proveedor elegido no se respetaría hasta volver a tocarlo.
         if let Some(conmutador) = &servicio.deps.proveedor {
             conmutador.cambiar(servicio.instantanea().metadata_provider);
         }
         servicio
+    }
+
+    /// Vuelca a quien lanza yt-dlp el origen de cookies configurado.
+    ///
+    /// Se llama al cargar y tras cada cambio de la sección. Un origen inválido
+    /// —un navegador que yt-dlp no conoce, un fichero que ya no está— se
+    /// descarta aquí en vez de propagarse: con él, **todas** las descargas
+    /// fallarían, y el error de yt-dlp no dice que la culpa sea de un ajuste.
+    fn aplicar_a_descargas(&self) {
+        let origen = {
+            let s = self
+                .actual
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            s.download.cookies.clone()
+        };
+
+        if origen.es_valido() {
+            self.deps.cookies.poner(origen);
+        } else {
+            warn!(?origen, "origen de cookies no utilizable; se ignora");
+            self.deps.cookies.poner(CookieSource::Ninguna);
+        }
     }
 
     /// Vuelca al audio lo que dependa de él.
@@ -391,6 +421,9 @@ impl SettingsService for SettingsServiceImpl {
 
         if secciones.contains(&SettingsSection::Audio) {
             self.aplicar_a_audio();
+        }
+        if secciones.contains(&SettingsSection::Download) {
+            self.aplicar_a_descargas();
         }
         if secciones.contains(&SettingsSection::Provider)
             && let Some(conmutador) = &self.deps.proveedor

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use localify_core::ports::platform::AppPaths;
 use localify_platform::{LocalifyPaths, adquirir_instancia};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Arranca la aplicación.
 pub fn run() {
@@ -65,6 +65,7 @@ pub fn run() {
     let playback_discord = Arc::clone(&contexto.playback);
     let metadata_discord = Arc::clone(&contexto.metadata);
     let piezas_discord = contexto.para_discord.clone();
+    let binarios_ytdlp = paths.binaries_dir();
 
     let builder = crate::registrar_comandos!(tauri::Builder::default())
         // Las portadas se sirven por su propio esquema en vez de por el
@@ -108,6 +109,20 @@ pub fn run() {
             if let Some(repo) = mantenimiento {
                 tauri::async_runtime::spawn(mantener(repo));
             }
+
+            // yt-dlp se pone al día en paralelo, sin bloquear nada.
+            //
+            // Se rompe cuando YouTube cambia, cada pocas semanas, y hasta ahora
+            // nadie lo actualizaba: el binario se quedaba con la versión del día
+            // que se instaló. Meses después, las descargas empiezan a fallar sin
+            // motivo aparente, que es exactamente el síntoma que había.
+            //
+            // Va en una tarea propia y no en el arranque porque comprobar tarda
+            // un segundo y descargar puede tardar veinte, y ninguna de las dos
+            // cosas debe retrasar la ventana. Si una descarga ocurre mientras
+            // tanto, usa el binario viejo: reemplazarlo no afecta a un proceso
+            // que ya está en marcha.
+            tauri::async_runtime::spawn(poner_al_dia(binarios_ytdlp));
 
             // Las dos integraciones se enganchan al bus y no se les vuelve a
             // hablar. Arrancan aunque estén desactivadas: cada una comprueba su
@@ -370,5 +385,28 @@ fn construir_contexto(
             error!(error = %e, "arranque sin biblioteca: la base de datos no abre");
             crate::context::AppContext::sin_biblioteca(bus.clone(), paths.library_dir().to_owned())
         }
+    }
+}
+
+/// Comprueba la versión de yt-dlp y la actualiza si hace falta.
+///
+/// No devuelve nada y no puede fallar hacia fuera: quedarse sin actualizar es
+/// molesto, pero impedir el arranque por ello sería mucho peor. Todo lo que pasa
+/// va al log, que es donde se mira cuando las descargas empiezan a fallar.
+async fn poner_al_dia(binarios: std::path::PathBuf) {
+    use localify_platform::Actualizacion;
+
+    let locator = localify_platform::SidecarLocator::new(binarios);
+    match localify_platform::actualizar_yt_dlp(&locator, crate::context::TOPE_ACTUALIZACION).await {
+        Actualizacion::AlDia(v) => info!(version = %v, "yt-dlp al día"),
+        Actualizacion::Actualizado { antes, ahora } => {
+            info!(%antes, %ahora, "yt-dlp actualizado");
+        }
+        Actualizacion::NoEsNuestro => {
+            debug!("yt-dlp viene del PATH del sistema: no se toca");
+        }
+        // Sin red, sin permisos o con GitHub limitando: se sigue con la versión
+        // que haya, que es lo que se hacía siempre hasta ahora.
+        Actualizacion::NoSePudo(motivo) => warn!(%motivo, "no se pudo actualizar yt-dlp"),
     }
 }

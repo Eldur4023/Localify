@@ -150,6 +150,13 @@ pub struct DownloadSettings {
     /// Descargas simultáneas **por carril** (inmediato y prefetch).
     pub max_concurrent: u8,
     pub max_retries: u8,
+    /// De dónde salen las cookies de YouTube. Ver [`CookieSource`].
+    ///
+    /// `serde(default)` porque este campo llegó después: sin él, una
+    /// configuración guardada por una versión anterior no se podría leer y la
+    /// sección entera volvería a sus valores de fábrica.
+    #[serde(default)]
+    pub cookies: CookieSource,
 }
 
 impl Default for DownloadSettings {
@@ -158,7 +165,84 @@ impl Default for DownloadSettings {
             preferred_format: FormatPreference::Opus,
             max_concurrent: 2,
             max_retries: 3,
+            cookies: CookieSource::Ninguna,
         }
+    }
+}
+
+/// De dónde saca yt-dlp las cookies de YouTube.
+///
+/// ## Para qué hacen falta
+///
+/// YouTube pide cada vez más a menudo «Sign in to confirm you're not a bot», y
+/// entonces la descarga falla sin que haya nada que reintentar: no es un fallo
+/// transitorio, es una puerta cerrada. Con las cookies de una sesión iniciada,
+/// yt-dlp pasa.
+///
+/// ## Lo que hay que saber antes de activarlo
+///
+/// `Navegador` le da a yt-dlp acceso de lectura al almacén de cookies de ese
+/// navegador **entero**, no solo a las de YouTube: es como funciona
+/// `--cookies-from-browser` y no hay forma de acotarlo. `Fichero` es lo
+/// contrario: un fichero que el usuario exporta y que contiene exactamente lo
+/// que él decidió meter.
+///
+/// Ninguna de las dos cosas se copia, se registra ni cruza el puente IPC más
+/// allá de la ruta y el nombre del navegador.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CookieSource {
+    #[default]
+    Ninguna,
+    /// Se leen del perfil del navegador, con `--cookies-from-browser`.
+    Navegador(String),
+    /// Fichero en formato Netscape, con `--cookies`.
+    Fichero(PathBuf),
+}
+
+/// Navegadores que yt-dlp sabe leer.
+///
+/// La lista va aquí y no en el frontend porque es la que decide qué es válido:
+/// un nombre que yt-dlp no conozca hace fallar **todas** las descargas, no solo
+/// la primera, y el error no dice que la culpa sea de un ajuste.
+pub const NAVEGADORES: [&str; 8] = [
+    "firefox", "chrome", "chromium", "edge", "brave", "opera", "vivaldi", "safari",
+];
+
+impl CookieSource {
+    /// `true` si el origen es utilizable tal como está.
+    #[must_use]
+    pub fn es_valido(&self) -> bool {
+        match self {
+            Self::Ninguna => true,
+            Self::Navegador(n) => NAVEGADORES.contains(&n.as_str()),
+            Self::Fichero(p) => p.is_file(),
+        }
+    }
+}
+
+/// El origen de cookies vigente, compartido con quien lanza yt-dlp.
+///
+/// Va por celda compartida y no por consulta al servicio de ajustes por el mismo
+/// motivo que el crossfade: se lee en el camino de cada descarga, y cambiarlo
+/// tiene que surtir efecto sin reiniciar la aplicación.
+#[derive(Debug, Default)]
+pub struct CookiesVigentes(std::sync::RwLock<CookieSource>);
+
+impl CookiesVigentes {
+    #[must_use]
+    pub fn leer(&self) -> CookieSource {
+        self.0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn poner(&self, origen: CookieSource) {
+        *self
+            .0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = origen;
     }
 }
 

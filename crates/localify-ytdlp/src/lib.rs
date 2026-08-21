@@ -35,7 +35,7 @@ pub mod tags;
 pub mod verify;
 
 pub use adaptadores::{DescargadorYtDlp, MatcherYtDlp};
-pub use download::ClienteYtDlp;
+pub use download::{ClienteYtDlp, args_de_cookies};
 pub use error::{YtDlpError, YtDlpResult};
 pub use remux::Remuxeador;
 pub use scoring::{elegir_mejor, puntuar};

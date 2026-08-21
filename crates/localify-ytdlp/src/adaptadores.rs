@@ -320,7 +320,7 @@ mod tests {
             "Queen - Topic",
             248.0,
         )));
-        let matcher = MatcherYtDlp::nuevo(Arc::new(ClienteYtDlp::nuevo(e.clone())));
+        let matcher = MatcherYtDlp::nuevo(Arc::new(ClienteYtDlp::nuevo(e.clone(), Arc::default())));
 
         let resultado = matcher
             .find_best(&pista("Under Pressure", "Queen", 248), &[], None)
@@ -348,7 +348,7 @@ mod tests {
             e = e.con_stdout(&flojo);
         }
         let e = Arc::new(e);
-        let matcher = MatcherYtDlp::nuevo(Arc::new(ClienteYtDlp::nuevo(e.clone())));
+        let matcher = MatcherYtDlp::nuevo(Arc::new(ClienteYtDlp::nuevo(e.clone(), Arc::default())));
 
         let resultado = matcher
             .find_best(&p, &[], None)
@@ -375,7 +375,7 @@ mod tests {
                     248.0,
                 )),
         );
-        let matcher = MatcherYtDlp::nuevo(Arc::new(ClienteYtDlp::nuevo(e)));
+        let matcher = MatcherYtDlp::nuevo(Arc::new(ClienteYtDlp::nuevo(e, Arc::default())));
 
         let resultado = matcher
             .find_best(&pista("Under Pressure", "Queen", 248), &[], None)
@@ -394,7 +394,7 @@ mod tests {
                 .con_stdout(&mismo)
                 .con_stdout(&mismo),
         );
-        let matcher = MatcherYtDlp::nuevo(Arc::new(ClienteYtDlp::nuevo(e)));
+        let matcher = MatcherYtDlp::nuevo(Arc::new(ClienteYtDlp::nuevo(e, Arc::default())));
 
         let resultado = matcher
             .find_best(&pista("Under Pressure", "Queen", 248), &[], None)
@@ -410,7 +410,7 @@ mod tests {
     #[tokio::test]
     async fn sin_datos_de_la_pista_no_se_sale_a_buscar() {
         let e = Arc::new(EjecutorFalso::nuevo());
-        let matcher = MatcherYtDlp::nuevo(Arc::new(ClienteYtDlp::nuevo(e.clone())));
+        let matcher = MatcherYtDlp::nuevo(Arc::new(ClienteYtDlp::nuevo(e.clone(), Arc::default())));
 
         let error = matcher
             .find_best(&pista("", "", 200), &[], None)
@@ -433,7 +433,7 @@ mod tests {
                 .con_stdout("")
                 .con_stdout(""),
         );
-        let matcher = MatcherYtDlp::nuevo(Arc::new(ClienteYtDlp::nuevo(e)));
+        let matcher = MatcherYtDlp::nuevo(Arc::new(ClienteYtDlp::nuevo(e, Arc::default())));
 
         let resultado = matcher
             .find_best(

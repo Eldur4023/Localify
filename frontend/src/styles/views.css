@@ -1189,3 +1189,15 @@
 .versiones__lista .track--suelta {
   height: var(--row-height-compact);
 }
+
+/*
+ * Aviso dentro de una ayuda de Ajustes.
+ *
+ * Es texto de apoyo que sí hay que leer: la advertencia de que
+ * `--cookies-from-browser` abre el almacén entero del navegador, o el motivo por
+ * el que una comprobación ha fallado. Cambia el color y nada más — un icono o un
+ * recuadro lo convertiría en una alarma, y no lo es.
+ */
+.ajustes__ayuda--aviso {
+  color: var(--warning);
+}

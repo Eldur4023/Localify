@@ -41,8 +41,9 @@ pub use queue::{
 };
 pub use scrobble::{PendingScrobble, merece_scrobble};
 pub use settings::{
-    AudioSettings, DownloadSettings, FormatPreference, IntegrationSettings, Language, Settings,
-    SettingsPatch, SettingsSection, SpotifySettings, UiSettings,
+    AudioSettings, CookieSource, CookiesVigentes, DownloadSettings, FormatPreference,
+    IntegrationSettings, Language, Settings, SettingsPatch, SettingsSection, SpotifySettings,
+    UiSettings,
 };
 pub use track::{AlbumRef, ArtistRef, Track, TrackFilter, TrackRow, TrackSort};
 pub use versiones::{ClaseDeVersion, clase, titulo_canonico};

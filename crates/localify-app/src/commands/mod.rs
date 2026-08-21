@@ -95,6 +95,9 @@ macro_rules! registrar_comandos {
             $crate::commands::settings::settings_lastfm_pending,
             $crate::commands::settings::settings_change_library_path,
             $crate::commands::settings::settings_pick_folder,
+            $crate::commands::settings::settings_pick_cookies,
+            $crate::commands::settings::settings_test_cookies,
+            $crate::commands::settings::settings_update_ytdlp,
             $crate::commands::settings::settings_preview_eq,
             $crate::commands::settings::api_version,
         ])

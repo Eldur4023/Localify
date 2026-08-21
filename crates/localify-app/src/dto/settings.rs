@@ -6,8 +6,8 @@
 
 use localify_core::domain::audio::{AudioDevice, EqProfile};
 use localify_core::domain::settings::{
-    AudioSettings, DownloadSettings, FormatPreference, IntegrationSettings, Language, ListDensity,
-    MetadataProviderKind, Settings, SettingsPatch, UiSettings,
+    AudioSettings, CookieSource, DownloadSettings, FormatPreference, IntegrationSettings, Language,
+    ListDensity, MetadataProviderKind, NAVEGADORES, Settings, SettingsPatch, UiSettings,
 };
 use localify_core::events::ProviderStatus;
 use serde::{Deserialize, Serialize};
@@ -122,6 +122,14 @@ pub struct DownloadSettingsDto {
     /// Descargas simultáneas por carril (inmediato y prefetch).
     pub max_concurrent: u8,
     pub max_retries: u8,
+    /// Navegador del que leer las cookies de YouTube, o `null`.
+    ///
+    /// Plano y no una unión etiquetada porque en la pantalla son un desplegable
+    /// y un selector de fichero, dos controles independientes. Que sean
+    /// excluyentes lo impone `TryFrom`, no la forma del dato.
+    pub cookies_browser: Option<String>,
+    /// Ruta del fichero de cookies en formato Netscape, o `null`.
+    pub cookies_file: Option<String>,
 }
 
 const fn formato_a_str(f: FormatPreference) -> &'static str {
@@ -147,10 +155,17 @@ fn formato_desde_str(s: &str) -> Result<FormatPreference, localify_core::error::
 
 impl From<DownloadSettings> for DownloadSettingsDto {
     fn from(d: DownloadSettings) -> Self {
+        let (cookies_browser, cookies_file) = match d.cookies {
+            CookieSource::Ninguna => (None, None),
+            CookieSource::Navegador(n) => (Some(n), None),
+            CookieSource::Fichero(p) => (None, Some(p.to_string_lossy().into_owned())),
+        };
         Self {
             preferred_format: formato_a_str(d.preferred_format).to_owned(),
             max_concurrent: d.max_concurrent,
             max_retries: d.max_retries,
+            cookies_browser,
+            cookies_file,
         }
     }
 }
@@ -159,10 +174,33 @@ impl TryFrom<DownloadSettingsDto> for DownloadSettings {
     type Error = localify_core::error::CoreError;
 
     fn try_from(d: DownloadSettingsDto) -> Result<Self, Self::Error> {
+        // Se valida aquí y no al usarlas: un navegador que yt-dlp no conoce hace
+        // fallar **todas** las descargas, y el error que yt-dlp devuelve no dice
+        // que la culpa sea de un ajuste. Mejor rechazarlo cuando se guarda, que
+        // es cuando el usuario sigue mirando la pantalla que lo causó.
+        let cookies = match (d.cookies_browser, d.cookies_file) {
+            (None, None) => CookieSource::Ninguna,
+            (Some(n), None) => {
+                if !NAVEGADORES.contains(&n.as_str()) {
+                    return Err(localify_core::error::CoreError::invalid(format!(
+                        "yt-dlp no sabe leer las cookies de '{n}'"
+                    )));
+                }
+                CookieSource::Navegador(n)
+            }
+            (None, Some(f)) => CookieSource::Fichero(std::path::PathBuf::from(f)),
+            (Some(_), Some(_)) => {
+                return Err(localify_core::error::CoreError::invalid(
+                    "las cookies salen del navegador o de un fichero, no de los dos",
+                ));
+            }
+        };
+
         Ok(Self {
             preferred_format: formato_desde_str(&d.preferred_format)?,
             max_concurrent: d.max_concurrent,
             max_retries: d.max_retries,
+            cookies,
         })
     }
 }
@@ -461,5 +499,105 @@ mod tests {
         let json = serde_json::to_value(ProviderStatusDto::from(ProviderStatus::NotConfigured))
             .expect("serializa");
         assert_eq!(json["state"], "notConfigured");
+    }
+}
+
+/// Resultado de una comprobación de Ajustes.
+///
+/// El mensaje va como clave i18n y el detalle como texto crudo: el detalle es la
+/// salida de yt-dlp, que es de otro programa y no hay catálogo que la traduzca.
+/// La alternativa —tragársela— dejaría al usuario con «no funciona» y sin la
+/// línea que dice por qué.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "types.gen.ts")]
+#[serde(rename_all = "camelCase")]
+pub struct PruebaDto {
+    pub ok: bool,
+    pub message_key: String,
+    pub detail: String,
+}
+
+impl PruebaDto {
+    #[must_use]
+    pub fn ok(clave: &str) -> Self {
+        Self {
+            ok: true,
+            message_key: clave.to_owned(),
+            detail: String::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn detalle(clave: &str, detalle: String) -> Self {
+        Self {
+            ok: true,
+            message_key: clave.to_owned(),
+            detail: detalle,
+        }
+    }
+
+    #[must_use]
+    pub fn fallo(clave: &str, detalle: String) -> Self {
+        Self {
+            ok: false,
+            message_key: clave.to_owned(),
+            detail: detalle,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_cookies {
+    use super::*;
+
+    fn dto(navegador: Option<&str>, fichero: Option<&str>) -> DownloadSettingsDto {
+        DownloadSettingsDto {
+            preferred_format: "opus".into(),
+            max_concurrent: 2,
+            max_retries: 3,
+            cookies_browser: navegador.map(str::to_owned),
+            cookies_file: fichero.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn un_navegador_que_yt_dlp_no_conoce_se_rechaza_al_guardar() {
+        // Con él, **todas** las descargas fallarían, y el error de yt-dlp no
+        // dice que la culpa sea de un ajuste. Se rechaza mientras el usuario
+        // sigue mirando la pantalla que lo causó.
+        let e = DownloadSettings::try_from(dto(Some("netscape"), None))
+            .expect_err("no es un navegador que yt-dlp sepa leer");
+        assert_eq!(e.code(), "INVALID");
+    }
+
+    #[test]
+    fn el_navegador_y_el_fichero_son_excluyentes() {
+        let e = DownloadSettings::try_from(dto(Some("firefox"), Some("c.txt")))
+            .expect_err("son dos orígenes para lo mismo");
+        assert_eq!(e.code(), "INVALID");
+    }
+
+    #[test]
+    fn los_dos_origenes_hacen_ida_y_vuelta() {
+        for (nav, fich, esperado) in [
+            (None, None, CookieSource::Ninguna),
+            (
+                Some("firefox"),
+                None,
+                CookieSource::Navegador("firefox".into()),
+            ),
+            (
+                None,
+                Some("c.txt"),
+                CookieSource::Fichero(std::path::PathBuf::from("c.txt")),
+            ),
+        ] {
+            let dominio = DownloadSettings::try_from(dto(nav, fich)).expect("válido");
+            assert_eq!(dominio.cookies, esperado);
+            // Y de vuelta: la pantalla tiene que poder repintar lo que guardó.
+            let vuelta = DownloadSettingsDto::from(dominio);
+            assert_eq!(vuelta.cookies_browser.as_deref(), nav);
+            assert_eq!(vuelta.cookies_file.as_deref(), fich);
+        }
     }
 }

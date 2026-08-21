@@ -5,8 +5,8 @@ use tauri::State;
 use crate::context::AppContext;
 use crate::dto::common::ApiError;
 use crate::dto::settings::{
-    AudioDeviceDto, EqProfileDto, EqProfileInputDto, LastfmAuthDto, ProviderStatusDto, SettingsDto,
-    SettingsPatchDto,
+    AudioDeviceDto, EqProfileDto, EqProfileInputDto, LastfmAuthDto, ProviderStatusDto, PruebaDto,
+    SettingsDto, SettingsPatchDto,
 };
 
 type Resultado<T> = Result<T, ApiError>;
@@ -267,4 +267,58 @@ pub async fn settings_change_library_path(
         .change_library_path(std::path::Path::new(path.trim()), move_existing)
         .await?
         .to_string())
+}
+
+/// Selector nativo para el fichero de cookies.
+///
+/// Filtrado a `.txt` porque el formato Netscape que yt-dlp lee es texto plano,
+/// y es lo que exportan las extensiones de navegador que la gente usa para
+/// esto.
+#[tauri::command]
+pub async fn settings_pick_cookies(app: tauri::AppHandle) -> Resultado<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("cookies.txt", &["txt"])
+        .pick_file(move |ruta| {
+            let _ = tx.send(ruta);
+        });
+
+    let elegida = rx.await.map_err(|_| {
+        localify_core::error::CoreError::internal("el selector de ficheros se cerró sin responder")
+    })?;
+
+    Ok(elegida.map(|r| r.to_string()))
+}
+
+/// Comprueba que las cookies configuradas sirven de verdad.
+///
+/// ## Por qué hace falta un botón
+///
+/// Elegir un navegador en un desplegable no garantiza nada: en Windows, Chrome y
+/// sus derivados cifran las cookies con App-Bound Encryption desde la versión
+/// 127 y yt-dlp no siempre puede descifrarlas; un perfil puede estar bloqueado
+/// porque el navegador está abierto; y un `cookies.txt` exportado hace meses
+/// tiene la sesión caducada.
+///
+/// Sin esta comprobación, el usuario configura algo, cierra Ajustes y se entera
+/// de que no funcionaba tres canciones después, cuando el fallo ya no se parece
+/// a lo que tocó.
+///
+/// Se pide la ficha de un vídeo real sin descargar nada. Es la misma operación
+/// que hace el emparejador, así que si esto pasa, la descarga también.
+#[tauri::command]
+pub async fn settings_test_cookies(ctx: State<'_, AppContext>) -> Resultado<PruebaDto> {
+    Ok(ctx.diagnostico.probar_cookies().await)
+}
+
+/// Fuerza una comprobación de versión de yt-dlp.
+///
+/// Ya se hace sola al arrancar; esto existe para cuando las descargas empiezan a
+/// fallar **ahora** y esperar al siguiente arranque no es una respuesta.
+#[tauri::command]
+pub async fn settings_update_ytdlp(ctx: State<'_, AppContext>) -> Resultado<PruebaDto> {
+    Ok(ctx.diagnostico.actualizar_ytdlp().await)
 }

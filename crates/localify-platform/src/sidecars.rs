@@ -1,7 +1,6 @@
-//! Localización de los binarios externos (yt-dlp, FFmpeg).
+//! Localización y actualización de los binarios externos (yt-dlp, FFmpeg).
 //!
-//! No se empaquetan con la aplicación: se descargan en la primera ejecución.
-//! Dos razones, ambas de peso.
+//! No se empaquetan con la aplicación. Dos razones, ambas de peso.
 //!
 //! 1. **yt-dlp se rompe cuando YouTube cambia**, cada pocas semanas. Poder
 //!    actualizarlo sin publicar una versión de Localify es la diferencia entre
@@ -9,14 +8,36 @@
 //! 2. Respeta las licencias de ambos proyectos y mantiene el instalador
 //!    pequeño.
 //!
+//! Instalarlos la primera vez lo hace `scripts/fetch-sidecars.ps1`. Mantener
+//! yt-dlp al día lo hace la propia aplicación, en una tarea de fondo al
+//! arrancar: ver [`actualizar_yt_dlp`]. Durante mucho tiempo ese segundo punto
+//! fue solo una intención escrita en este comentario —había un puerto para ello
+//! y ningún implementador—, y el síntoma acabó siendo el previsto: descargas que
+//! empiezan a fallar sin motivo aparente.
+//!
 //! Orden de búsqueda: carpeta `bin/` de la aplicación → `PATH` del sistema. Lo
 //! propio antes que lo del sistema, para que una versión del sistema
 //! desactualizada no tenga prioridad sobre la que gestionamos.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use localify_core::error::CoreResult;
 use localify_core::ports::youtube::SidecarStatus;
+
+/// Lanza el proceso sin ventana de consola.
+///
+/// Sin esto, cada invocación hace parpadear una consola negra sobre la ventana.
+/// Es la misma política que en el ejecutor de yt-dlp, y hay que repetirla porque
+/// son procesos distintos.
+#[allow(unused_variables, reason = "fuera de Windows no hay nada que hacer")]
+fn sin_consola(cmd: &mut tokio::process::Command) {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+}
 
 /// Binarios que necesita Localify.
 pub const SIDECARS: [&str; 2] = ["yt-dlp", "ffmpeg"];
@@ -47,6 +68,15 @@ impl SidecarLocator {
         }
 
         buscar_en_path(&con_extension)
+    }
+
+    /// `true` si el binario es el que gestionamos nosotros.
+    ///
+    /// Lo que viene del `PATH` es de otro —un gestor de paquetes, otra
+    /// aplicación— y no se toca: ver [`actualizar_yt_dlp`].
+    #[must_use]
+    pub fn es_propio(&self, ruta: &Path) -> bool {
+        ruta.parent() == Some(self.binaries_dir.as_path())
     }
 
     /// Estado de todos los sidecars, con su versión si se pueden ejecutar.
@@ -99,15 +129,7 @@ fn buscar_en_path(nombre_fichero: &str) -> Option<PathBuf> {
 async fn leer_version(path: &Path, nombre: &str) -> Option<String> {
     let mut cmd = tokio::process::Command::new(path);
     cmd.arg("--version").kill_on_drop(true);
-
-    #[cfg(windows)]
-    {
-        // Sin esto, abrir Ajustes hace parpadear dos consolas negras sobre la
-        // ventana: una por binario. Es la misma política que en el ejecutor de
-        // yt-dlp, y hay que repetirla porque son procesos distintos.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    sin_consola(&mut cmd);
 
     let salida = cmd.output().await.ok()?;
 
@@ -129,6 +151,83 @@ async fn leer_version(path: &Path, nombre: &str) -> Option<String> {
             .to_owned(),
         _ => primera.to_owned(),
     })
+}
+
+/// Resultado de intentar actualizar yt-dlp.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Actualizacion {
+    /// Ya estaba en la última versión.
+    AlDia(String),
+    /// Se instaló una versión nueva.
+    Actualizado { antes: String, ahora: String },
+    /// No se pudo comprobar. No es un fallo de la aplicación: sin red, o con
+    /// GitHub caído, lo correcto es seguir con la versión que haya.
+    NoSePudo(String),
+    /// El binario no es nuestro y no se toca. Ver [`actualizar_yt_dlp`].
+    NoEsNuestro,
+}
+
+/// Pone yt-dlp al día usando su propio actualizador.
+///
+/// ## Por qué hace falta
+///
+/// yt-dlp se rompe cuando YouTube cambia, cada pocas semanas, y hasta ahora
+/// nadie lo actualizaba: el binario se descargaba a mano con
+/// `scripts/fetch-sidecars.ps1` y se quedaba con la versión de ese día. El
+/// resultado, meses después, es que las descargas empiezan a fallar sin motivo
+/// aparente y sin nada que el usuario pueda hacer.
+///
+/// ## Por qué `--update` y no descargarlo nosotros
+///
+/// Porque yt-dlp ya sabe hacerlo: comprueba la última publicación, verifica lo
+/// que baja y se sustituye a sí mismo, que en Windows no es trivial —el fichero
+/// está en uso—. Reimplementarlo sería escribir peor lo que ya funciona.
+///
+/// ## Solo si el binario es nuestro
+///
+/// Si yt-dlp viene del `PATH` del sistema, es de otro: puede haberlo instalado
+/// el gestor de paquetes, estar compartido con otras aplicaciones o no ser
+/// escribible. Actualizar eso es meterse donde no nos llaman, y además
+/// `--update` fallaría con un mensaje confuso.
+///
+/// # Errors
+/// No falla: todo lo que puede salir mal se devuelve como [`Actualizacion`].
+pub async fn actualizar_yt_dlp(locator: &SidecarLocator, tope: Duration) -> Actualizacion {
+    let Some(ruta) = locator.localizar("yt-dlp") else {
+        return Actualizacion::NoSePudo("no está instalado".to_owned());
+    };
+    if !locator.es_propio(&ruta) {
+        return Actualizacion::NoEsNuestro;
+    }
+
+    let antes = leer_version(&ruta, "yt-dlp").await.unwrap_or_default();
+
+    let mut cmd = tokio::process::Command::new(&ruta);
+    cmd.arg("--update").kill_on_drop(true);
+    sin_consola(&mut cmd);
+
+    // Con tope: sin red, yt-dlp puede quedarse esperando a GitHub, y esta tarea
+    // vive durante toda la sesión.
+    let salida = match tokio::time::timeout(tope, cmd.output()).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => return Actualizacion::NoSePudo(e.to_string()),
+        Err(_) => return Actualizacion::NoSePudo("se agotó la espera".to_owned()),
+    };
+
+    if !salida.status.success() {
+        // Un fallo aquí es normal y no es nuestro: sin red, sin permisos de
+        // escritura, GitHub limitando peticiones. Se informa y se sigue con la
+        // versión que haya, que es exactamente lo que hacía antes.
+        let motivo = String::from_utf8_lossy(&salida.stderr).trim().to_owned();
+        return Actualizacion::NoSePudo(motivo);
+    }
+
+    let ahora = leer_version(&ruta, "yt-dlp").await.unwrap_or_default();
+    if ahora == antes {
+        Actualizacion::AlDia(ahora)
+    } else {
+        Actualizacion::Actualizado { antes, ahora }
+    }
 }
 
 #[cfg(test)]
