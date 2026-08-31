@@ -209,6 +209,22 @@ sudo apt install build-essential curl wget file pkg-config libssl-dev \
 cargo build --release -p localify-app
 ```
 
+For a `.deb`, from `crates/localify-app`:
+
+```bash
+cargo install tauri-cli --version "^2" --locked
+cargo tauri build --bundles deb
+```
+
+It installs the binary, a `.desktop` entry and icons at four sizes — **not the
+sidecars**. yt-dlp and FFmpeg still come from `fetch-sidecars.sh`, same as on
+Windows, so a fresh install logs `no se pudo actualizar yt-dlp: no está
+instalado` until you run it.
+
+`deb.depends` lists only what Tauri doesn't add by itself, and ALSA goes as
+`libasound2t64 | libasound2`: the `t64` name only exists on Ubuntu 24.04 and
+later, and without the alternative the package won't install on Debian 12.
+
 Four things differ from Windows, and each is `cfg`-gated in `localify-platform`
 or in the Discord transport:
 
