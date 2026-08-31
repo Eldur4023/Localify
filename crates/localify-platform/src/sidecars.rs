@@ -254,18 +254,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Una carpeta que no existe, en el formato del sistema.
+    fn carpeta_inexistente() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\ruta\que\no\existe")
+        } else {
+            PathBuf::from("/ruta/que/no/existe")
+        }
+    }
+
     #[test]
     fn un_binario_inexistente_devuelve_none() {
-        let locator = SidecarLocator::new(PathBuf::from(r"C:\ruta\que\no\existe"));
+        let locator = SidecarLocator::new(carpeta_inexistente());
         assert_eq!(locator.localizar("no-existe-este-binario-jamas"), None);
     }
 
     #[tokio::test]
-    async fn el_estado_incluye_todos_los_sidecars_aunque_falten() {
-        let locator = SidecarLocator::new(PathBuf::from(r"C:\ruta\que\no\existe"));
-        let estado = locator.estado().await.expect("no debe fallar");
+    async fn el_estado_incluye_todos_los_sidecars_falten_o_no() {
+        // Lo que se comprueba es la **forma** del informe, no qué hay instalado.
+        //
+        // Antes se exigía que faltaran todos, y eso hacía que el test dependiera
+        // del `PATH` de quien lo ejecuta: en una máquina con FFmpeg instalado
+        // —que son unas cuantas— fallaba sin que nada estuviera roto. Es el mismo
+        // error que ya se corrigió en el test de instancia única.
+        let locator = SidecarLocator::new(carpeta_inexistente());
+        let estado = locator.estado().await.expect("no debe fallar nunca");
+
         assert_eq!(estado.len(), SIDECARS.len());
-        // Sin binarios, la app debe poder arrancar igualmente.
-        assert!(estado.iter().all(|s| !s.available));
+        for s in &estado {
+            // La invariante de verdad: `available` y `path` cuentan lo mismo. Si
+            // discreparan, la aplicación intentaría ejecutar un binario que no
+            // está, o descartaría uno que sí.
+            assert_eq!(
+                s.available,
+                s.path.is_some(),
+                "'{}' dice available={} con path={:?}",
+                s.name,
+                s.available,
+                s.path
+            );
+        }
     }
 }

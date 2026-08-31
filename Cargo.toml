@@ -17,7 +17,9 @@ members = [
 [workspace.package]
 version = "1.0.0"
 edition = "2024"
-rust-version = "1.85"
+# `File::try_lock`, que sostiene la instancia única fuera de Windows, se
+# estabilizó en 1.89.
+rust-version = "1.89"
 license = "GPL-3.0-only"
 repository = "https://github.com/Eldur4023/Localify"
 authors = ["Localify contributors"]
@@ -96,6 +98,10 @@ sha2 = "0.10"
 # tiene nada que ver con seguridad: es el formato que el servicio exige.
 md-5 = "0.11"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Llavero del escritorio (Secret Service en Linux, Keychain en macOS). Solo se
+# compila fuera de Windows: alli los secretos van a DPAPI.
+libc = "0.2"
+keyring = { version = "3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
 
 [workspace.dependencies.windows]
 version = "0.62"

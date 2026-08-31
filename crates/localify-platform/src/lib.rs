@@ -36,6 +36,6 @@ pub use fs::RealFileSystem;
 pub use locale::SystemLocale;
 pub use media::{SinIntegracion, integracion as integracion_multimedia};
 pub use paths::{CoverSize, LocalifyPaths};
-pub use secrets::DpapiSecretStore;
+pub use secrets::AlmacenDeSecretos;
 pub use sidecars::{Actualizacion, SIDECARS, SidecarLocator, actualizar_yt_dlp};
 pub use single_instance::{InstanceGuard, adquirir as adquirir_instancia};

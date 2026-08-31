@@ -234,11 +234,55 @@ async fn espacio_disponible(path: &Path) -> CoreResult<u64> {
     )))
 }
 
+/// Espacio libre para el usuario, vía `statvfs`.
+///
+/// Se usa `f_bavail` y no `f_bfree`: el segundo cuenta también los bloques
+/// reservados para root, que en ext4 son el 5 % por defecto. Con él, mover la
+/// biblioteca a un disco casi lleno pasaría la comprobación y fallaría a mitad
+/// de la copia.
+///
+/// Devolvía `u64::MAX` —«cabe siempre»— hasta que se portó a Linux. Un stub así
+/// no es neutral: convierte la comprobación previa de `change_library_path` en
+/// una que siempre dice que sí.
 #[cfg(not(windows))]
-async fn espacio_disponible(_path: &Path) -> CoreResult<u64> {
-    // Se implementará al portar (statvfs). Devolver el máximo hace que las
-    // comprobaciones de espacio nunca bloqueen en plataformas sin soporte.
-    Ok(u64::MAX)
+#[allow(
+    clippy::unused_async,
+    reason = "la llamada a statvfs es síncrona, pero la firma debe coincidir con la del resto de plataformas"
+)]
+async fn espacio_disponible(path: &Path) -> CoreResult<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let ruta = CString::new(path.as_os_str().as_bytes())
+        .map_err(|e| CoreError::invalid(format!("ruta no válida: {e}")))?;
+
+    let mut datos = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+
+    // SAFETY: `ruta` es un puntero a una cadena C válida y viva durante la
+    // llamada, y `datos` apunta a memoria alineada del tamaño que la API espera
+    // rellenar. Solo se lee tras comprobar que devolvió 0.
+    let resultado = unsafe { libc::statvfs(ruta.as_ptr(), datos.as_mut_ptr()) };
+    if resultado != 0 {
+        return Err(CoreError::storage(format!(
+            "no se pudo consultar el espacio de '{}': {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    // SAFETY: `statvfs` devolvió 0, así que la estructura está inicializada.
+    let datos = unsafe { datos.assume_init() };
+
+    // `f_frsize` es el tamaño de bloque real; `f_bsize` es el "preferido" y no
+    // tiene por qué coincidir.
+    // `u64::from` y no `as`: los dos campos son `u64` en x86-64, pero `u32` en
+    // arquitecturas de 32 bits, donde `as` sería una conversión con truncado
+    // silencioso esperando a que alguien compile para armv7.
+    #[allow(
+        clippy::useless_conversion,
+        reason = "aquí no convierte nada, pero en 32 bits sí: es lo que hace que este cálculo valga en las dos"
+    )]
+    Ok(u64::from(datos.f_bavail).saturating_mul(u64::from(datos.f_frsize)))
 }
 
 #[cfg(test)]

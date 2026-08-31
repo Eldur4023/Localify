@@ -96,11 +96,11 @@ impl EstadoDescarga {
     /// traiga una cifra menor no debe hacer retroceder al lector, que quizá ya
     /// haya leído más allá.
     pub fn avanzar(&self, bytes: u64) {
-        if let Ok(mut i) = self.interior.lock() {
-            if bytes > i.bytes {
-                i.bytes = bytes;
-                self.senal.notify_all();
-            }
+        if let Ok(mut i) = self.interior.lock()
+            && bytes > i.bytes
+        {
+            i.bytes = bytes;
+            self.senal.notify_all();
         }
     }
 

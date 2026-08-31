@@ -365,8 +365,9 @@ fn construir_contexto(
         }
         info!(?estado, "base de datos lista");
 
-        let secretos: Arc<dyn localify_core::ports::platform::SecretStore> =
-            Arc::new(localify_platform::DpapiSecretStore::new(paths.config_dir()));
+        let secretos: Arc<dyn localify_core::ports::platform::SecretStore> = Arc::new(
+            localify_platform::AlmacenDeSecretos::new(paths.config_dir()),
+        );
 
         crate::context::AppContext::real(
             bus.clone(),

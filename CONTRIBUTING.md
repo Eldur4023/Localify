@@ -45,7 +45,8 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-Rust stable ≥ 1.85. Node is **optional** and only used for `tsc --noEmit`.
+Rust stable ≥ 1.89 (`File::try_lock`, which backs single-instance off Windows).
+Node is **optional** and only used for `tsc --noEmit`.
 
 ### The frontend has no Node and no bundler
 
@@ -80,8 +81,10 @@ disk already.
 library folder ([ADR-018](docs/architecture/08-decisions.md)) and resolved in
 Rust. Covers are addressed by identifier through the `cover://` scheme.
 
-**Secrets go to the Windows secret store (DPAPI).** Never SQLite, never the
-bridge, never the logs. There's a test that checks the last part.
+**Secrets go to the secret store the system already has** — DPAPI on Windows,
+the Secret Service on Linux. Never SQLite, never the bridge, never the logs.
+There is a test that checks the last part, and another that checks no file is
+written on Linux: a plaintext fallback is what the placeholder used to do.
 
 **The backend emits i18n keys; the frontend translates them**
 ([ADR-012](docs/architecture/08-decisions.md)). `tests/i18n.rs` enforces
@@ -193,3 +196,34 @@ the replies instead of discarding them.
    the i18n test will tell you if you didn't.
 4. If you fixed a bug, add the test that fails without the fix, and say in the
    test *why* it exists.
+
+## Building on Linux
+
+The `linux` branch carries the port. Everything below is on that branch.
+
+```bash
+sudo apt install build-essential curl wget file pkg-config libssl-dev \
+  libwebkit2gtk-4.1-dev libxdo-dev libayatana-appindicator3-dev \
+  librsvg2-dev libasound2-dev libsecret-1-dev
+./scripts/fetch-sidecars.sh
+cargo build --release -p localify-app
+```
+
+Four things differ from Windows, and each is `cfg`-gated in `localify-platform`
+or in the Discord transport:
+
+| | Windows | Linux |
+|---|---|---|
+| Secrets | DPAPI over `secrets.bin` | Secret Service (gnome-keyring, KWallet) |
+| Single instance | named mutex | `flock` on `$XDG_RUNTIME_DIR/localify.lock` |
+| Discord IPC | `\.\pipe\discord-ipc-N` | `$XDG_RUNTIME_DIR/discord-ipc-N`, plus the Flatpak and snap subdirectories |
+| Free space | `GetDiskFreeSpaceExW` | `statvfs`, using `f_bavail` |
+
+**Without a Secret Service running, saving credentials fails loudly.** That is
+deliberate: the alternative is writing the Spotify secret to disk in the clear,
+which is what the placeholder used to do. Music still plays — it is the only
+part that doesn't depend on the keyring.
+
+**The system media panel (SMTC) is Windows-only.** On Linux the integration is
+inert, so media keys don't control playback. MPRIS would be the equivalent and
+isn't written yet; nothing else is affected.

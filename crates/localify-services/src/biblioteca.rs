@@ -392,7 +392,7 @@ async fn borrar_miniaturas(deps: &Arc<Dependencias>) {
 }
 
 fn avisar(deps: &Arc<Dependencias>, scan_id: Uuid, hechos: u32) {
-    if hechos % CADA_CUANTOS_AVISA == 0 {
+    if hechos.is_multiple_of(CADA_CUANTOS_AVISA) {
         deps.bus.publish(DomainEvent::ScanProgress {
             scan_id,
             done: hechos,

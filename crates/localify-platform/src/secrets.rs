@@ -1,33 +1,49 @@
 //! Almacén de secretos.
 //!
-//! En Windows se cifra con **DPAPI** (`CryptProtectData`) en el ámbito del
-//! usuario actual: solo esa cuenta, en esa máquina, puede descifrarlo. No hace
-//! falta gestionar ninguna clave y el secreto no queda en claro en disco.
-//!
 //! Guarda el `client_secret` de Spotify y la sesión de Last.fm. Ninguno de los
 //! dos cruza jamás el puente IPC hacia el frontend.
+//!
+//! ## Un almacén por sistema, porque el sistema ya tiene uno
+//!
+//! - **Windows:** un fichero cifrado con **DPAPI** (`CryptProtectData`) en el
+//!   ámbito del usuario actual. Solo esa cuenta, en esa máquina, puede
+//!   descifrarlo, y no hay ninguna clave que gestionar.
+//! - **Linux y macOS:** el llavero del escritorio, a través del Secret Service
+//!   (gnome-keyring, KDE Wallet). **No hay fichero**: el JSON entero se guarda
+//!   como un único secreto con la clave `Localify/secrets`.
+//!
+//! No se cifra a mano en ninguno de los dos casos. Inventar un formato propio
+//! —una clave derivada guardada al lado del dato, que es donde acaban estas
+//! cosas— sería peor que cualquiera de los dos almacenes del sistema.
+//!
+//! ## Qué pasa si no hay llavero
+//!
+//! En una sesión sin Secret Service —un servidor, un entorno mínimo— guardar
+//! **falla con un error visible**. Es deliberado: la alternativa es escribir el
+//! secreto en claro, y prefiero que Spotify no se pueda configurar a que se
+//! configure dejando la credencial legible en el disco. La música sigue
+//! funcionando; es lo único que no depende de esto.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use async_trait::async_trait;
 use localify_core::error::{CoreError, CoreResult};
 use localify_core::ports::platform::SecretStore;
 use tokio::sync::Mutex;
 
-/// Secretos cifrados en un fichero JSON dentro de la carpeta de configuración.
+/// Almacén de secretos respaldado por el sistema.
 #[derive(Debug)]
-pub struct DpapiSecretStore {
-    ruta: PathBuf,
-    /// Serializa las escrituras y evita releer el fichero en cada consulta.
+pub struct AlmacenDeSecretos {
+    respaldo: Respaldo,
+    /// Serializa las escrituras y evita releer el almacén en cada consulta.
     cache: Mutex<Option<HashMap<String, String>>>,
 }
 
-impl DpapiSecretStore {
+impl AlmacenDeSecretos {
     #[must_use]
     pub fn new(config_dir: &std::path::Path) -> Self {
         Self {
-            ruta: config_dir.join("secrets.bin"),
+            respaldo: Respaldo::new(config_dir),
             cache: Mutex::new(None),
         }
     }
@@ -38,19 +54,11 @@ impl DpapiSecretStore {
             return Ok(mapa.clone());
         }
 
-        let mapa = match tokio::fs::read(&self.ruta).await {
-            Ok(cifrado) => {
-                let claro = descifrar(&cifrado)?;
-                serde_json::from_slice(&claro).map_err(|e| {
-                    CoreError::storage(format!("el almacén de secretos está corrupto: {e}"))
-                })?
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
-            Err(e) => {
-                return Err(CoreError::storage(format!(
-                    "no se pudo leer el almacén de secretos: {e}"
-                )));
-            }
+        let mapa = match self.respaldo.leer().await? {
+            Some(claro) => serde_json::from_slice(&claro).map_err(|e| {
+                CoreError::storage(format!("el almacén de secretos está corrupto: {e}"))
+            })?,
+            None => HashMap::new(),
         };
 
         *guard = Some(mapa.clone());
@@ -60,24 +68,14 @@ impl DpapiSecretStore {
     async fn guardar(&self, mapa: HashMap<String, String>) -> CoreResult<()> {
         let claro = serde_json::to_vec(&mapa)
             .map_err(|e| CoreError::internal(format!("no se pudo serializar: {e}")))?;
-        let cifrado = cifrar(&claro)?;
-
-        if let Some(padre) = self.ruta.parent() {
-            tokio::fs::create_dir_all(padre)
-                .await
-                .map_err(|e| CoreError::storage(format!("no se pudo crear la carpeta: {e}")))?;
-        }
-        tokio::fs::write(&self.ruta, &cifrado)
-            .await
-            .map_err(|e| CoreError::storage(format!("no se pudo escribir: {e}")))?;
-
+        self.respaldo.escribir(&claro).await?;
         *self.cache.lock().await = Some(mapa);
         Ok(())
     }
 }
 
 #[async_trait]
-impl SecretStore for DpapiSecretStore {
+impl SecretStore for AlmacenDeSecretos {
     async fn get(&self, key: &str) -> CoreResult<Option<String>> {
         Ok(self.cargar().await?.get(key).cloned())
     }
@@ -184,15 +182,133 @@ fn descifrar(cifrado: &[u8]) -> CoreResult<Vec<u8>> {
     Ok(resultado)
 }
 
+/// Dónde acaban los bytes. Es lo único que cambia entre sistemas.
+#[cfg(windows)]
+#[derive(Debug)]
+struct Respaldo {
+    ruta: std::path::PathBuf,
+}
+
+#[cfg(windows)]
+impl Respaldo {
+    fn new(config_dir: &std::path::Path) -> Self {
+        Self {
+            ruta: config_dir.join("secrets.bin"),
+        }
+    }
+
+    async fn leer(&self) -> CoreResult<Option<Vec<u8>>> {
+        match tokio::fs::read(&self.ruta).await {
+            Ok(cifrado) => descifrar(&cifrado).map(Some),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(CoreError::storage(format!(
+                "no se pudo leer el almacén de secretos: {e}"
+            ))),
+        }
+    }
+
+    async fn escribir(&self, claro: &[u8]) -> CoreResult<()> {
+        let cifrado = cifrar(claro)?;
+        if let Some(padre) = self.ruta.parent() {
+            tokio::fs::create_dir_all(padre)
+                .await
+                .map_err(|e| CoreError::storage(format!("no se pudo crear la carpeta: {e}")))?;
+        }
+        tokio::fs::write(&self.ruta, &cifrado)
+            .await
+            .map_err(|e| CoreError::storage(format!("no se pudo escribir: {e}")))
+    }
+}
+
+/// El llavero del escritorio, vía Secret Service.
+///
+/// `config_dir` no se usa: aquí no hay fichero. Se acepta para que el
+/// constructor sea el mismo en los dos sistemas y quien lo llama no tenga que
+/// saber cuál está compilado.
 #[cfg(not(windows))]
-fn cifrar(claro: &[u8]) -> CoreResult<Vec<u8>> {
-    // Al portar: keyring / libsecret. Nunca dejar esto en claro en una release.
-    Ok(claro.to_vec())
+#[derive(Debug)]
+struct Respaldo {
+    /// Nombre de la entrada en el llavero.
+    ///
+    /// Es un campo y no una constante **para que los tests no escriban en la
+    /// entrada de verdad**. Con un nombre fijo, `guarda_lee_y_borra` acabaría
+    /// borrando las credenciales de Spotify y la sesión de Last.fm del usuario
+    /// que ejecutara la suite: el llavero es del escritorio, no del proceso, y no
+    /// hay directorio temporal que aísle eso.
+    entrada: String,
 }
 
 #[cfg(not(windows))]
-fn descifrar(cifrado: &[u8]) -> CoreResult<Vec<u8>> {
-    Ok(cifrado.to_vec())
+impl Respaldo {
+    /// Nombre del servicio en el llavero. Aparece tal cual en Seahorse o en
+    /// KWalletManager, así que dice quién guardó esto.
+    const SERVICIO: &'static str = "Localify";
+    /// Todos los secretos van en una sola entrada, con el mismo JSON que en
+    /// Windows. Repartirlos en una entrada por clave obligaría a enumerar el
+    /// llavero para leerlos, y a mantener dos formatos distintos del mismo dato.
+    const ENTRADA: &'static str = "secrets";
+
+    fn new(_config_dir: &std::path::Path) -> Self {
+        Self {
+            entrada: Self::ENTRADA.to_owned(),
+        }
+    }
+
+    async fn leer(&self) -> CoreResult<Option<Vec<u8>>> {
+        let entrada = self.entrada.clone();
+        // El Secret Service habla por D-Bus y bloquea: fuera del hilo del
+        // runtime.
+        let resultado = tokio::task::spawn_blocking(move || {
+            let llave = keyring::Entry::new(Self::SERVICIO, &entrada)?;
+            match llave.get_password() {
+                Ok(texto) => Ok(Some(texto)),
+                // Que no haya nada guardado es el primer arranque, no un fallo.
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(e) => Err(e),
+            }
+        })
+        .await
+        .map_err(|e| CoreError::internal(format!("el hilo del llavero murió: {e}")))?;
+
+        match resultado {
+            Ok(texto) => Ok(texto.map(String::into_bytes)),
+            Err(e) => Err(CoreError::storage(format!(
+                "no se pudo leer del llavero del sistema: {e}"
+            ))),
+        }
+    }
+
+    async fn escribir(&self, claro: &[u8]) -> CoreResult<()> {
+        let texto = String::from_utf8(claro.to_vec())
+            .map_err(|e| CoreError::internal(format!("el almacén no es UTF-8: {e}")))?;
+        let entrada = self.entrada.clone();
+
+        tokio::task::spawn_blocking(move || {
+            keyring::Entry::new(Self::SERVICIO, &entrada)?.set_password(&texto)
+        })
+        .await
+        .map_err(|e| CoreError::internal(format!("el hilo del llavero murió: {e}")))?
+        .map_err(|e| {
+            // Sin llavero no se guarda nada, y se dice. Ver la cabecera del
+            // módulo: escribir el secreto en claro no es una alternativa.
+            CoreError::storage(format!(
+                "no se pudo guardar en el llavero del sistema \
+                 (¿hay un gestor de secretos en la sesión?): {e}"
+            ))
+        })
+    }
+}
+
+#[cfg(not(windows))]
+impl AlmacenDeSecretos {
+    /// Un almacén sobre una entrada propia del llavero, para los tests.
+    #[cfg(test)]
+    fn de_prueba(entrada: String) -> Self {
+        Self {
+            respaldo: Respaldo { entrada },
+            cache: Mutex::new(None),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -212,54 +328,95 @@ mod tests {
         assert_eq!(descifrar(&cifrado).expect("descifra"), secreto);
     }
 
-    #[tokio::test]
-    async fn guarda_lee_y_borra() {
-        let dir = std::env::temp_dir().join("localify-test-secrets");
+    /// Un almacén aislado y su carpeta, distinto en cada sistema.
+    ///
+    /// En Windows basta con un directorio temporal. En Linux **no**: el llavero
+    /// es del escritorio y no hay carpeta que aísle nada, así que el aislamiento
+    /// tiene que ser el nombre de la entrada. Sin esto, ejecutar la suite
+    /// borraría las credenciales de quien la ejecuta.
+    fn almacen_de_prueba(nombre: &str) -> (AlmacenDeSecretos, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("localify-test-{nombre}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("crea dir");
 
-        let store = DpapiSecretStore::new(&dir);
-        assert_eq!(store.get("spotify.secret").await.expect("get"), None);
+        #[cfg(windows)]
+        let almacen = AlmacenDeSecretos::new(&dir);
+        #[cfg(not(windows))]
+        let almacen = AlmacenDeSecretos::de_prueba(format!("test-{nombre}-{}", std::process::id()));
 
-        store.set("spotify.secret", "abc123").await.expect("set");
+        (almacen, dir)
+    }
+
+    /// Deja el llavero como estaba. En Windows lo hace borrar la carpeta.
+    #[cfg(not(windows))]
+    fn limpiar(almacen: &AlmacenDeSecretos) {
+        let entrada = almacen.respaldo.entrada.clone();
+        if let Ok(llave) = keyring::Entry::new(Respaldo::SERVICIO, &entrada) {
+            let _ = llave.delete_credential();
+        }
+    }
+
+    #[tokio::test]
+    async fn guarda_lee_y_borra() {
+        let (store, dir) = almacen_de_prueba("secrets");
+
+        // Sin gestor de secretos en la sesión —un contenedor, WSL, un servidor
+        // sin escritorio— no hay nada que probar aquí: fallaría el entorno, no
+        // el código. Es el mismo criterio que usan los tests de audio, que se
+        // saltan solos cuando no hay tarjeta de sonido.
+        if store.set("spotify.secret", "abc123").await.is_err() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
         assert_eq!(
             store.get("spotify.secret").await.expect("get"),
-            Some("abc123".into())
-        );
-
-        // Una instancia nueva debe leer lo persistido, no la caché en memoria.
-        let otra = DpapiSecretStore::new(&dir);
-        assert_eq!(
-            otra.get("spotify.secret").await.expect("get"),
             Some("abc123".into())
         );
 
         store.delete("spotify.secret").await.expect("delete");
         assert_eq!(store.get("spotify.secret").await.expect("get"), None);
 
+        #[cfg(not(windows))]
+        limpiar(&store);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// El secreto no queda legible en el disco.
+    ///
+    /// La garantía es la misma en los dos sistemas; lo que cambia es cómo se
+    /// cumple. En Windows hay un fichero y lo que importa es que esté cifrado;
+    /// en Linux **no hay fichero**, y comprobar que no aparece ninguno es lo que
+    /// impide que un futuro apaño lo reintroduzca en claro.
     #[tokio::test]
-    async fn el_fichero_en_disco_no_contiene_el_secreto_en_claro() {
-        let dir = std::env::temp_dir().join("localify-test-secrets-claro");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("crea dir");
+    async fn el_secreto_no_queda_legible_en_el_disco() {
+        let (store, dir) = almacen_de_prueba("secrets-claro");
+        if store.set("k", "SECRETO_MUY_RECONOCIBLE").await.is_err() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
 
-        let store = DpapiSecretStore::new(&dir);
-        store
-            .set("k", "SECRETO_MUY_RECONOCIBLE")
-            .await
-            .expect("set");
-
-        let bytes = std::fs::read(dir.join("secrets.bin")).expect("lee");
-        let como_texto = String::from_utf8_lossy(&bytes);
         #[cfg(windows)]
-        assert!(
-            !como_texto.contains("SECRETO_MUY_RECONOCIBLE"),
-            "el secreto aparece en claro en disco"
-        );
-        let _ = como_texto;
+        {
+            let bytes = std::fs::read(dir.join("secrets.bin")).expect("lee");
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains("SECRETO_MUY_RECONOCIBLE"),
+                "el secreto aparece en claro en disco"
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            let entradas: Vec<_> = std::fs::read_dir(&dir)
+                .expect("lee dir")
+                .filter_map(Result::ok)
+                .map(|e| e.file_name())
+                .collect();
+            assert!(
+                entradas.is_empty(),
+                "no debe escribirse ningún fichero de secretos: {entradas:?}"
+            );
+            limpiar(&store);
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

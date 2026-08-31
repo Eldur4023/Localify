@@ -30,14 +30,30 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
-    "icon": ["icons/icon.ico"],
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
     "category": "Music",
     "shortDescription": "Reproductor de musica local con la experiencia de Spotify",
     "longDescription": "Localify es un reproductor de musica local. Spotify aporta el descubrimiento y los metadatos; el audio se obtiene de forma transparente y queda en tu disco, en formato estandar.",
     "windows": {
       "nsis": {
         "installMode": "currentUser"
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "libasound2t64",
+          "libsecret-1-0"
+        ]
       }
     }
   }

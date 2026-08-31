@@ -82,7 +82,7 @@ fn generar(indice: usize) -> Track {
         duration: DurationMs::new(120_000 + (indice as u32 % 180_000)),
         track_number: Some((indice % 12 + 1) as u16),
         disc_number: Some(1),
-        explicit: indice % 7 == 0,
+        explicit: indice.is_multiple_of(7),
         isrc: Some(format!("ES{indice:010}")),
         release_date: None,
         popularity: Some((indice % 100) as u8),

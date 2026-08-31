@@ -21,5 +21,13 @@ tracing = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
 
+# El llavero del escritorio (Secret Service). Solo fuera de Windows: alli el
+# almacen es DPAPI y no hace falta ninguna dependencia.
+[target.'cfg(not(windows))'.dependencies]
+keyring = { workspace = true }
+# `statvfs`, para el espacio libre en disco: la biblioteca estandar no expone
+# nada equivalente.
+libc = { workspace = true }
+
 [lints]
 workspace = true

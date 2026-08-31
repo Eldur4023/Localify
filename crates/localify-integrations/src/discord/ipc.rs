@@ -1,4 +1,13 @@
-//! Protocolo IPC de Discord sobre named pipes de Windows.
+//! Protocolo IPC de Discord.
+//!
+//! ## Un protocolo, dos transportes
+//!
+//! Las tramas son idénticas en todas las plataformas; lo que cambia es por dónde
+//! viajan. En Windows, Discord escucha en un named pipe (`\\.\pipe\discord-ipc-N`);
+//! en Linux y macOS, en un socket de dominio Unix dentro del directorio de
+//! ejecución del usuario. Los dos extremos implementan `AsyncRead + AsyncWrite`,
+//! así que todo lo de debajo —saludo, tramas, PING/PONG, tiempos de espera— es
+//! exactamente el mismo código: solo se elige el transporte al abrir.
 //!
 //! ## Por qué escrito a mano y no con una biblioteca
 //!
@@ -18,8 +27,73 @@
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 use tracing::debug;
+
+/// Cómo se llega hasta Discord en esta plataforma.
+///
+/// Es lo único que cambia entre sistemas. El resto del módulo no sabe si detrás
+/// hay una tubería con nombre o un socket.
+#[cfg(windows)]
+mod transporte {
+    pub(super) type Tuberia = tokio::net::windows::named_pipe::NamedPipeClient;
+
+    /// Discord abre `discord-ipc-0`; si hay varios clientes —estable, PTB,
+    /// Canary— numera hasta el 9.
+    pub(super) fn candidatos() -> Vec<String> {
+        (0..super::TUBERIAS)
+            .map(|n| format!(r"\\.\pipe\discord-ipc-{n}"))
+            .collect()
+    }
+
+    #[allow(
+        clippy::unused_async,
+        reason = "abrir una tubería con nombre es síncrono, pero conectar un socket no lo es: la firma tiene que ser la misma en los dos transportes"
+    )]
+    pub(super) async fn abrir(ruta: &str) -> std::io::Result<Tuberia> {
+        tokio::net::windows::named_pipe::ClientOptions::new().open(ruta)
+    }
+}
+
+#[cfg(unix)]
+mod transporte {
+    pub(super) type Tuberia = tokio::net::UnixStream;
+
+    /// Dónde buscar el socket.
+    ///
+    /// La ruta canónica es `$XDG_RUNTIME_DIR/discord-ipc-N`, pero Discord se
+    /// instala de tres formas más y cada envoltorio mete el socket en su propio
+    /// subdirectorio: Flatpak bajo `app/com.discordapp.Discord`, snap bajo
+    /// `snap.discord`. Sin probarlos, la integración simplemente no aparece para
+    /// quien lo instaló del centro de software, que en Linux es la mayoría.
+    ///
+    /// Si no hay `XDG_RUNTIME_DIR` se cae a `TMPDIR` y luego a `/tmp`, que es
+    /// donde lo dejaban las versiones antiguas.
+    pub(super) fn candidatos() -> Vec<String> {
+        let base = std::env::var("XDG_RUNTIME_DIR")
+            .or_else(|_| std::env::var("TMPDIR"))
+            .unwrap_or_else(|_| "/tmp".to_owned());
+
+        let subdirectorios = [
+            "",
+            "app/com.discordapp.Discord/",
+            "app/com.discordapp.DiscordCanary/",
+            "snap.discord/",
+            "snap.discord-canary/",
+        ];
+
+        subdirectorios
+            .iter()
+            .flat_map(|sub| {
+                let base = base.clone();
+                (0..super::TUBERIAS).map(move |n| format!("{base}/{sub}discord-ipc-{n}"))
+            })
+            .collect()
+    }
+
+    pub(super) async fn abrir(ruta: &str) -> std::io::Result<Tuberia> {
+        Tuberia::connect(ruta).await
+    }
+}
 
 /// Discord abre `discord-ipc-0`; si hay varios clientes —estable, PTB, Canary—
 /// numera hasta el 9. Se prueban todos porque cuál toca depende de cuál se abrió
@@ -55,7 +129,7 @@ const VERSION: u8 = 1;
 const RESPUESTA: Duration = Duration::from_secs(5);
 
 pub struct ConexionDiscord {
-    tuberia: NamedPipeClient,
+    tuberia: transporte::Tuberia,
 }
 
 impl std::fmt::Debug for ConexionDiscord {
@@ -67,9 +141,8 @@ impl std::fmt::Debug for ConexionDiscord {
 impl ConexionDiscord {
     /// Se conecta y saluda. `None` si Discord no está escuchando.
     pub async fn conectar(client_id: &str) -> Option<Self> {
-        for n in 0..TUBERIAS {
-            let ruta = format!(r"\\.\pipe\discord-ipc-{n}");
-            let Ok(tuberia) = ClientOptions::new().open(&ruta) else {
+        for ruta in transporte::candidatos() {
+            let Ok(tuberia) = transporte::abrir(&ruta).await else {
                 continue;
             };
 

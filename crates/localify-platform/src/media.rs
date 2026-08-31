@@ -27,6 +27,8 @@
 //! [`SinIntegracion`] no hace nada y la aplicación funciona igual. Portar a
 //! Linux es escribir MPRIS aquí al lado, sin tocar una línea de negocio.
 
+// Solo los usa `Manejador`, que es de SMTC y por tanto de Windows.
+#[cfg(windows)]
 use std::sync::{Arc, Mutex};
 
 use localify_core::domain::audio::DurationMs;
@@ -59,6 +61,10 @@ impl SystemMediaIntegration for SinIntegracion {
 }
 
 /// El receptor de las órdenes del sistema, compartido con el callback de COM.
+///
+/// Solo en Windows: el panel multimedia es SMTC, y fuera de ahí la integración
+/// es [`SinIntegracion`], que no recibe órdenes de nadie.
+#[cfg(windows)]
 type Manejador = Arc<Mutex<Option<Box<dyn Fn(MediaCommand) + Send + Sync>>>>;
 
 #[cfg(windows)]

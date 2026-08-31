@@ -13,6 +13,14 @@ use localify_core::error::{CoreError, CoreResult};
 pub struct InstanceGuard {
     #[cfg(windows)]
     handle: windows::Win32::Foundation::HANDLE,
+    /// El fichero con el candado puesto.
+    ///
+    /// No se lee nunca a propósito: existe para mantener el descriptor abierto,
+    /// porque cerrarlo es exactamente lo que suelta el bloqueo. Es lo mismo que
+    /// hace el `handle` de Windows, solo que allí sí hay que cerrarlo a mano.
+    #[cfg(not(windows))]
+    #[allow(dead_code, reason = "es una guarda RAII: su valor es existir")]
+    fichero: std::fs::File,
 }
 
 // SAFETY: un HANDLE de mutex de Windows puede usarse desde cualquier hilo; el
@@ -67,10 +75,56 @@ fn adquirir_con_nombre(nombre_mutex: &str) -> CoreResult<InstanceGuard> {
     Ok(InstanceGuard { handle })
 }
 
+/// Intenta adquirir el bloqueo de instancia única.
+///
+/// ## Por qué un candado de fichero y no un fichero con el PID
+///
+/// La cabecera del módulo lo dice para Windows y vale igual aquí: lo que hace
+/// falta es que el candado **se suelte solo** si el proceso muere de forma
+/// abrupta. Un fichero con el PID dentro no cumple eso —queda huérfano tras un
+/// cierre forzado, y hay que decidir si el PID que contiene sigue vivo, que es
+/// una carrera— mientras que un candado de fichero lo libera el núcleo al cerrar
+/// el descriptor, pase lo que pase.
+///
+/// El fichero vive en el directorio de ejecución del usuario, que es efímero por
+/// definición, y no en la carpeta de configuración: ahí sobreviviría a un
+/// reinicio sin significar nada.
+///
+/// # Errors
+/// Si ya hay otra instancia, o si el fichero de bloqueo no se puede abrir.
 #[cfg(not(windows))]
 pub fn adquirir() -> CoreResult<InstanceGuard> {
-    // Al portar se implementará con un socket de dominio Unix o un flock.
-    Ok(InstanceGuard {})
+    let base = std::env::var("XDG_RUNTIME_DIR")
+        .or_else(|_| std::env::var("TMPDIR"))
+        .unwrap_or_else(|_| "/tmp".to_owned());
+    adquirir_en(&std::path::Path::new(&base).join("localify.lock"))
+}
+
+/// El mecanismo, sobre una ruta cualquiera.
+///
+/// Separado de [`adquirir`] por el mismo motivo que `adquirir_con_nombre` en
+/// Windows: sin esto, el test competiría con la aplicación instalada y pasaría o
+/// fallaría según estuviera Localify abierto.
+#[cfg(not(windows))]
+fn adquirir_en(ruta: &std::path::Path) -> CoreResult<InstanceGuard> {
+    let fichero = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(ruta)
+        .map_err(|e| {
+            CoreError::storage(format!(
+                "no se pudo abrir el fichero de bloqueo {}: {e}",
+                ruta.display()
+            ))
+        })?;
+
+    fichero
+        .try_lock()
+        .map_err(|_| CoreError::conflict("ya hay una instancia de Localify en ejecución"))?;
+
+    Ok(InstanceGuard { fichero })
 }
 
 #[cfg(windows)]
@@ -84,9 +138,8 @@ impl Drop for InstanceGuard {
     }
 }
 
-#[cfg(not(windows))]
-#[derive(Debug)]
-pub struct InstanceGuard;
+// Fuera de Windows el guard es el propio fichero abierto: al soltarse se cierra
+// el descriptor y el núcleo libera el candado. No hace falta un `Drop` propio.
 
 #[cfg(test)]
 mod tests {
@@ -124,5 +177,30 @@ mod tests {
             tercera.is_ok(),
             "el mutex debe liberarse al soltar el guard"
         );
+    }
+
+    /// El mismo contrato que en Windows, con el mecanismo de Linux.
+    ///
+    /// Importa que sea *el mismo test*: lo que la aplicación necesita —una sola
+    /// instancia, y el candado libre en cuanto la primera muere— no depende del
+    /// sistema, y tenerlo comprobado en uno solo dejaría la mitad de las
+    /// plataformas a base de confianza.
+    #[cfg(not(windows))]
+    #[test]
+    fn la_segunda_adquisicion_en_el_mismo_proceso_es_rechazada() {
+        let ruta = std::env::temp_dir().join(format!("localify-test-{}.lock", std::process::id()));
+
+        let primera = adquirir_en(&ruta).expect("la primera instancia debe poder arrancar");
+        assert!(
+            adquirir_en(&ruta).is_err(),
+            "una segunda instancia no debería poder arrancar"
+        );
+        drop(primera);
+
+        assert!(
+            adquirir_en(&ruta).is_ok(),
+            "el candado debe liberarse al soltar el guard"
+        );
+        let _ = std::fs::remove_file(&ruta);
     }
 }
