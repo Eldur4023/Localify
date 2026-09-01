@@ -87,11 +87,12 @@ genres, your playlists, what you haven't played in months. It asks the catalogue
 but nothing about your listening ever leaves the machine, and there's no
 recommendation service to send it to.
 
-**Integrations** · Windows media panel with cover art · media keys · Discord
-Rich Presence showing what's playing · Last.fm scrobbling with a **persistent
-queue**, so going offline doesn't cost you a single scrobble.
+**Integrations** · System media panel with cover art and media keys (SMTC on
+Windows, MPRIS on Linux) · Discord Rich Presence showing what's playing.
 
-**Also** · Synced lyrics where they exist · English and Spanish · dark theme.
+**Also** · Synced lyrics where they exist · English and Spanish · dark theme ·
+a once-per-launch check against GitHub for a newer release, which only ever
+asks — it never downloads or replaces anything on its own.
 
 ---
 
@@ -111,8 +112,6 @@ move what you already have.
 one-minute job in Discord's developer portal. One isn't bundled on purpose: it
 would belong to whoever compiled the binary, and everybody would show up under
 the same stranger's application.
-
-**Last.fm** *(optional)* — your own API account, for the same reason.
 
 **Storage** — rescan the library, or delete everything downloaded and start
 clean. Your playlists and liked songs survive that; each song downloads again

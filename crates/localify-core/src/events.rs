@@ -107,12 +107,10 @@ pub enum DomainEvent {
     /// La pista terminó. `completed` distingue una escucha real de un salto,
     /// y es lo que alimenta el historial y las recomendaciones.
     ///
-    /// `ms_played` va además de `completed` porque el scrobbling **no usa la
-    /// misma regla**: aquí una escucha cuenta como completa al 90 %, y Last.fm
-    /// scrobblea al 50 % o a los cuatro minutos, lo que llegue antes. Sin el
-    /// tiempo en bruto, quien scrobblea solo puede elegir entre usar el 90 % de
-    /// otro —y perder scrobbles legítimos— o volver a medir por su cuenta algo
-    /// que el reproductor ya sabe.
+    /// `ms_played` va además de `completed` porque es el dato en bruto: el
+    /// umbral del 90 % que decide `completed` es una regla de este proyecto,
+    /// y guardar los milisegundos reales permite recalcularla —o aplicar
+    /// otra distinta— sin haber perdido información.
     #[serde(rename_all = "camelCase")]
     TrackFinished {
         track_id: TrackId,
@@ -203,6 +201,15 @@ pub enum DomainEvent {
     },
     #[serde(rename_all = "camelCase")]
     LibraryPathChanged { path: String },
+    /// Hay una versión publicada más nueva que la instalada.
+    ///
+    /// No lleva la URL del release: el frontend nunca debe poder devolver a
+    /// Rust una URL para que la abra en el navegador (mismo motivo que
+    /// `settings_open_external`, ver su comentario). Solo pide el número para
+    /// enseñarlo, y confirma con un comando sin argumentos que Rust resuelve
+    /// contra lo último que encontró la comprobación de fondo.
+    #[serde(rename_all = "camelCase")]
+    UpdateAvailable { version: String },
     /// Aviso in-app. Discreto: Localify nunca notifica descargas.
     #[serde(rename_all = "camelCase")]
     Toast {
@@ -254,6 +261,7 @@ impl DomainEvent {
             Self::ProviderStatusChanged { .. } => "providerStatusChanged",
             Self::LibraryMoveProgress { .. } => "libraryMoveProgress",
             Self::LibraryPathChanged { .. } => "libraryPathChanged",
+            Self::UpdateAvailable { .. } => "updateAvailable",
             Self::Toast { .. } => "toast",
         }
     }

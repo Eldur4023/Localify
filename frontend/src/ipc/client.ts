@@ -20,7 +20,6 @@ import type {
   AudioDeviceDto,
   EqProfileDto,
   HomeSectionDto,
-  LastfmAuthDto,
   LibraryStatsDto,
   LyricsDto,
   PageDto,
@@ -276,22 +275,7 @@ export const settings = {
    * backend. Así el frontend no puede mandar cualquier cosa al manejador de
    * protocolos del sistema.
    */
-  openExternal: (destino: "lastfm_api" | "discord_apps") =>
-    invoke<void>("settings_open_external", { destino }),
-  setLastfmCredentials: (apiKey: string, apiSecret: string) =>
-    invoke<SettingsDto>("settings_set_lastfm_credentials", { apiKey, apiSecret }),
-  /**
-   * Primer paso de la autenticación: devuelve la URL que hay que abrir.
-   *
-   * El token vuelve al frontend porque el segundo paso lo necesita. No es un
-   * secreto: caduca en una hora y solo vale para esta autorización.
-   */
-  lastfmBeginAuth: () => invoke<LastfmAuthDto>("settings_lastfm_begin_auth"),
-  lastfmCompleteAuth: (token: string) =>
-    invoke<SettingsDto>("settings_lastfm_complete_auth", { token }),
-  lastfmDisconnect: () => invoke<SettingsDto>("settings_lastfm_disconnect"),
-  /** Escuchas pendientes de enviar. Empuja la cola de paso. */
-  lastfmPending: () => invoke<number>("settings_lastfm_pending"),
+  openExternal: (destino: "discord_apps") => invoke<void>("settings_open_external", { destino }),
   /**
    * Aplica un ecualizador **sin guardarlo**.
    *
@@ -328,4 +312,14 @@ export const settings = {
 
 export const system = {
   apiVersion: () => invoke<string>("api_version"),
+};
+
+export const updates = {
+  /**
+   * Abre en el navegador la página del release que se detectó disponible.
+   *
+   * No se le pasa ninguna URL: la decide Rust con lo último que encontró la
+   * comprobación de fondo. Mismo motivo que `settings.openExternal`.
+   */
+  openReleasePage: () => invoke<void>("updates_open_release_page"),
 };

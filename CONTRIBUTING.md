@@ -20,7 +20,7 @@ localify-ytdlp         audio acquisition, matching, tagging
 localify-ytmusic       InnerTube catalogue
 localify-musicbrainz   MusicBrainz catalogue + Cover Art Archive
 localify-spotify       Spotify catalogue + public playlist reader
-localify-integrations  Discord, Last.fm, lyrics, image fetching
+localify-integrations  Discord, lyrics, image fetching, update checks
 localify-platform      paths, filesystem, secret store, browser
 localify-app           Tauri commands, DTOs, wiring
 ```
@@ -302,12 +302,9 @@ or in the Discord transport:
 | Single instance | named mutex | `flock` on `$XDG_RUNTIME_DIR/localify.lock` |
 | Discord IPC | `\.\pipe\discord-ipc-N` | `$XDG_RUNTIME_DIR/discord-ipc-N`, plus the Flatpak and snap subdirectories |
 | Free space | `GetDiskFreeSpaceExW` | `statvfs`, using `f_bavail` |
+| System media panel | SMTC | MPRIS (`org.mpris.MediaPlayer2`, over D-Bus) |
 
 **Without a Secret Service running, saving credentials fails loudly.** That is
 deliberate: the alternative is writing the Spotify secret to disk in the clear,
 which is what the placeholder used to do. Music still plays — it is the only
 part that doesn't depend on the keyring.
-
-**The system media panel (SMTC) is Windows-only.** On Linux the integration is
-inert, so media keys don't control playback. MPRIS would be the equivalent and
-isn't written yet; nothing else is affected.

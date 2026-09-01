@@ -47,15 +47,6 @@ pub struct AppContext {
     ///
     /// `None` en modo degradado: sin base de datos no hay nada que mantener.
     pub mantenimiento: Option<Arc<dyn MaintenanceRepository>>,
-    /// Credenciales y cola de Last.fm.
-    ///
-    /// No es un servicio de dominio y por eso no está detrás de un `dyn Trait`:
-    /// es una integración opcional que solo tocan sus propios comandos y su
-    /// tarea de fondo. Ponerle un puerto sería inventar una abstracción para un
-    /// único implementador.
-    ///
-    /// `None` en modo degradado: la cola de scrobbles vive en la base de datos.
-    pub lastfm: Option<Arc<localify_integrations::GestorLastfm>>,
     /// De donde Discord saca la carátula de lo que suena.
     ///
     /// Está aquí por el mismo motivo que `mantenimiento`: no lo usa ningún
@@ -64,6 +55,14 @@ pub struct AppContext {
     pub para_discord: Option<PiezasDeDiscord>,
     /// Las dos comprobaciones de Ajustes que tocan a yt-dlp directamente.
     pub diagnostico: Arc<Diagnostico>,
+    /// URL del release que encontró la comprobación de autoactualización, si
+    /// hay alguna pendiente de que el usuario confirme.
+    ///
+    /// Vive aquí y no solo en el evento `UpdateAvailable` porque el "sí,
+    /// actualizar" llega en un comando aparte, después de que la pantalla se
+    /// haya repintado varias veces: hace falta un sitio donde seguir sabiendo
+    /// qué URL abrir sin que el frontend tenga que devolverla.
+    pub actualizacion_disponible: Arc<std::sync::Mutex<Option<String>>>,
     pub bus: EventBus,
 }
 
@@ -349,7 +348,6 @@ impl AppContext {
         )
         .await;
         let lyrics = letras(&infra, &tracks);
-        let lastfm = scrobbler(&infra, &tracks, &settings);
 
         Ok(Self {
             library,
@@ -364,13 +362,13 @@ impl AppContext {
             metadata,
             notifications: Arc::new(AvisosPorBus(Arc::clone(&publicador))),
             mantenimiento: Some(mantenimiento(&infra)),
-            lastfm: Some(lastfm),
             para_discord: Some(PiezasDeDiscord {
                 albums,
                 tracks: Arc::clone(&tracks),
                 provider: Arc::clone(&provider),
             }),
             diagnostico: Diagnostico::real(&infra, ejecutor_ytdlp, cookies),
+            actualizacion_disponible: Arc::new(std::sync::Mutex::new(None)),
             bus,
         })
     }
@@ -410,9 +408,9 @@ impl AppContext {
             metadata: inerte as _,
             notifications: Arc::new(AvisosPorBus(publicador)),
             mantenimiento: None,
-            lastfm: None,
             para_discord: None,
             diagnostico: Diagnostico::inerte(),
+            actualizacion_disponible: Arc::new(std::sync::Mutex::new(None)),
             bus,
         }
     }
@@ -480,25 +478,6 @@ fn metadatos(
             localify_db::repositories::SqliteYoutubeMatchRepository::new(infra.pool.clone()),
         )),
     )
-}
-
-/// Last.fm: la cola vive en la base de datos y las credenciales —clave, secreto
-/// y sesión— en el almacén del sistema.
-fn scrobbler(
-    infra: &Infraestructura,
-    tracks: &Arc<dyn localify_core::ports::database::TrackRepository>,
-    settings: &Arc<dyn SettingsService>,
-) -> Arc<localify_integrations::GestorLastfm> {
-    Arc::new(localify_integrations::GestorLastfm::nuevo(
-        localify_integrations::DependenciasLastfm {
-            cola: Arc::new(localify_db::repositories::SqliteScrobbleRepository::new(
-                infra.pool.clone(),
-            )),
-            tracks: Arc::clone(tracks),
-            secretos: Arc::clone(&infra.secretos),
-            ajustes: Arc::clone(settings),
-        },
-    ))
 }
 
 /// Construye los dos catálogos y el conmutador que los une.

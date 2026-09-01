@@ -56,7 +56,6 @@ erDiagram
     TRACKS       ||--o{ PLAYLIST_ITEMS  : "incluida en"
     PLAYLISTS    ||--o{ PLAYLIST_ITEMS  : "contiene"
     TRACKS       ||--o{ DOWNLOAD_JOBS   : "descarga"
-    TRACKS       ||--o{ SCROBBLE_QUEUE  : "pendiente"
 ```
 
 ---
@@ -335,13 +334,6 @@ CREATE TABLE lyrics (
     fetched_at  INTEGER NOT NULL DEFAULT (unixepoch())
 ) STRICT;
 
-CREATE TABLE scrobble_queue (
-    id          INTEGER PRIMARY KEY,
-    track_id    TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
-    timestamp   INTEGER NOT NULL,
-    attempts    INTEGER NOT NULL DEFAULT 0,
-    last_error  TEXT
-) STRICT;
 ```
 
 ---

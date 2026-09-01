@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use localify_core::events::EventPublisher;
 use localify_core::ports::platform::AppPaths;
 use localify_platform::{LocalifyPaths, adquirir_instancia};
 use tracing::{debug, error, info, warn};
@@ -60,12 +61,13 @@ pub fn run() {
     let metadata_smtc = Arc::clone(&contexto.metadata);
     let contexto_portadas = contexto.clone();
     let mantenimiento = contexto.mantenimiento.clone();
-    let lastfm = contexto.lastfm.clone();
     let ajustes_integraciones = Arc::clone(&contexto.settings);
     let playback_discord = Arc::clone(&contexto.playback);
     let metadata_discord = Arc::clone(&contexto.metadata);
     let piezas_discord = contexto.para_discord.clone();
     let binarios_ytdlp = paths.binaries_dir();
+    let actualizacion_disponible = Arc::clone(&contexto.actualizacion_disponible);
+    let eventos_actualizacion: Arc<dyn EventPublisher> = Arc::new(bus.clone());
 
     let builder = crate::registrar_comandos!(tauri::Builder::default())
         // Las portadas se sirven por su propio esquema en vez de por el
@@ -93,11 +95,19 @@ pub fn run() {
             // El puente traduce eventos del dominio y los emite al WebView.
             crate::bridge::arrancar(app.handle().clone(), &bus);
 
-            // El panel multimedia se ata a la ventana, así que solo se puede
-            // pedir una vez existe. Si el sistema no lo concede, la integración
-            // se queda inerte y la reproducción funciona igual.
-            if let Some(hwnd) = hwnd_principal(app) {
-                crate::multimedia::arrancar(hwnd, playback, metadata_smtc, &bus);
+            // El panel multimedia se ata a la ventana en Windows, así que ahí
+            // solo se puede pedir una vez existe; en Linux, MPRIS no depende
+            // de ninguna ventana y arranca siempre. Si el sistema no lo
+            // concede, la integración se queda inerte y la reproducción
+            // funciona igual.
+            let hwnd = hwnd_principal(app);
+            if hwnd.is_some() || !cfg!(windows) {
+                tauri::async_runtime::spawn(crate::multimedia::arrancar(
+                    hwnd.unwrap_or(0),
+                    playback,
+                    metadata_smtc,
+                    bus.clone(),
+                ));
             } else {
                 warn!("sin ventana principal: no hay panel multimedia");
             }
@@ -124,18 +134,22 @@ pub fn run() {
             // que ya está en marcha.
             tauri::async_runtime::spawn(poner_al_dia(binarios_ytdlp));
 
-            // Las dos integraciones se enganchan al bus y no se les vuelve a
-            // hablar. Arrancan aunque estén desactivadas: cada una comprueba su
-            // ajuste al recibir un evento, así que encenderlas surte efecto en
-            // la siguiente canción y no al reiniciar. La alternativa —arrancar y
-            // parar tareas al tocar el interruptor— sería estado que mantener a
-            // cambio de ahorrar una tarea dormida.
-            if let Some(gestor) = lastfm {
-                tauri::async_runtime::spawn(localify_integrations::lastfm::atender(
-                    gestor,
-                    bus.subscribe(),
-                ));
-            }
+            // Aviso de nuevas versiones. Una comprobación por arranque, igual
+            // que yt-dlp: comprobar tarda un segundo y no vale la pena
+            // mantener una tarea despierta para volver a preguntar algo que
+            // no cambia en el rato que dura una sesión.
+            tauri::async_runtime::spawn(comprobar_actualizaciones(
+                eventos_actualizacion,
+                actualizacion_disponible,
+            ));
+
+            // Se engancha al bus y no se le vuelve a hablar. Arranca aunque esté
+            // desactivada: comprueba su ajuste al recibir un evento, así que
+            // encenderla surte efecto en la siguiente canción y no al reiniciar.
+            // La alternativa —arrancar y parar la tarea al tocar el
+            // interruptor— sería estado que mantener a cambio de ahorrar una
+            // tarea dormida.
+            //
             // Sin catálogo no arranca: en modo degradado no hay biblioteca que
             // anunciar, así que la tarea solo serviría para dormir.
             if let Some(piezas) = piezas_discord {
@@ -326,8 +340,9 @@ fn abrir_devtools(_app: &tauri::App) {}
 /// Identificador nativo de la ventana principal.
 ///
 /// El panel multimedia de Windows se ata a un `HWND`; sin él no hay
-/// integración posible. Fuera de Windows no existe el concepto y se devuelve
-/// `None`, que la integración traduce a "no hacer nada".
+/// integración posible. MPRIS, en Linux, no se ata a ninguna ventana, así que
+/// fuera de Windows esto siempre es `None` y el arranque del panel no
+/// depende de él.
 fn hwnd_principal(app: &tauri::App) -> Option<isize> {
     #[cfg(windows)]
     {
@@ -410,4 +425,25 @@ async fn poner_al_dia(binarios: std::path::PathBuf) {
         // que haya, que es lo que se hacía siempre hasta ahora.
         Actualizacion::NoSePudo(motivo) => warn!(%motivo, "no se pudo actualizar yt-dlp"),
     }
+}
+
+/// Comprueba una vez si hay una versión de Localify más nueva publicada.
+///
+/// Sin cliente HTTP no hay comprobación posible —pasa, por ejemplo, sin
+/// entropía para TLS— y no es un motivo para que el arranque falle: se
+/// registra y se sigue sin avisar de nada.
+async fn comprobar_actualizaciones(
+    eventos: Arc<dyn EventPublisher>,
+    url_pendiente: Arc<std::sync::Mutex<Option<String>>>,
+) {
+    let Ok(http) = localify_integrations::autoupdate::cliente() else {
+        warn!("sin cliente HTTP: no se comprobaron actualizaciones");
+        return;
+    };
+    localify_integrations::autoupdate::vigilar(http, eventos, move |url| {
+        if let Ok(mut g) = url_pendiente.lock() {
+            *g = Some(url);
+        }
+    })
+    .await;
 }

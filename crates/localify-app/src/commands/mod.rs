@@ -13,6 +13,7 @@ pub mod player;
 pub mod playlist;
 pub mod search;
 pub mod settings;
+pub mod updates;
 
 /// Registra todos los comandos en el constructor de Tauri.
 ///
@@ -88,11 +89,6 @@ macro_rules! registrar_comandos {
             $crate::commands::settings::settings_set_spotify_credentials,
             $crate::commands::settings::settings_test_spotify,
             $crate::commands::settings::settings_open_external,
-            $crate::commands::settings::settings_set_lastfm_credentials,
-            $crate::commands::settings::settings_lastfm_begin_auth,
-            $crate::commands::settings::settings_lastfm_complete_auth,
-            $crate::commands::settings::settings_lastfm_disconnect,
-            $crate::commands::settings::settings_lastfm_pending,
             $crate::commands::settings::settings_change_library_path,
             $crate::commands::settings::settings_pick_folder,
             $crate::commands::settings::settings_pick_cookies,
@@ -100,6 +96,8 @@ macro_rules! registrar_comandos {
             $crate::commands::settings::settings_update_ytdlp,
             $crate::commands::settings::settings_preview_eq,
             $crate::commands::settings::api_version,
+            // ── Autoactualización ───────────────────────────────────────────
+            $crate::commands::updates::updates_open_release_page,
         ])
     };
 }

@@ -57,16 +57,6 @@ pub trait SettingsService: Send + Sync + 'static {
     /// Comprueba las credenciales contra el proveedor.
     async fn test_spotify(&self) -> CoreResult<ProviderStatus>;
 
-    /// Anota el resultado de conectar —`Some(usuario)`— o desconectar
-    /// —`None`— de Last.fm.
-    ///
-    /// La sesión en sí la guarda quien habla con Last.fm; esto solo persiste el
-    /// nombre visible y **releé** el almacén del sistema para saber si la
-    /// aplicación está conectada. Que el estado se deduzca y no se pase como
-    /// parámetro es lo que impide que la pantalla diga "conectado" cuando el
-    /// guardado de la sesión falló.
-    async fn set_lastfm_session(&self, user: Option<String>) -> CoreResult<Settings>;
-
     /// Cambia la carpeta de biblioteca.
     ///
     /// No es un `patch` cualquiera: es una migración con progreso. Devuelve el

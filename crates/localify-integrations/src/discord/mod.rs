@@ -1,8 +1,8 @@
 //! Discord Rich Presence.
 //!
-//! Enseña en el perfil de Discord qué está sonando. Como el scrobbler, es un
-//! consumidor del bus: nadie depende de él y si Discord no está abierto no pasa
-//! absolutamente nada.
+//! Enseña en el perfil de Discord qué está sonando. Es un consumidor del bus:
+//! nadie depende de él y si Discord no está abierto no pasa absolutamente
+//! nada.
 //!
 //! ## El límite de frecuencia no se salta bajando el ritmo de los eventos
 //!
@@ -231,9 +231,8 @@ async fn portada_de(deps: &Dependencias, pista: &TrackRow) -> Option<String> {
         .and_then(|r| r.cover_url)
 }
 
-/// El bucle de Discord. **No se lanza sola**: la spawnea quien la llama, por el
-/// mismo motivo que en el scrobbler —el arranque de Localify ocurre fuera del
-/// runtime asíncrono—.
+/// El bucle de Discord. **No se lanza sola**: la spawnea quien la llama, porque
+/// el arranque de Localify ocurre fuera del runtime asíncrono.
 pub async fn atender(deps: Dependencias, mut eventos: broadcast::Receiver<DomainEvent>) {
     {
         let mut conexion: Option<ConexionDiscord> = None;

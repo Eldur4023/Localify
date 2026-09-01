@@ -112,7 +112,6 @@ const COMPUESTAS: &[&str] = &[
     "album.type.",
     // `pasos(["discord_step_1", …])` → `t(`settings.${clave}`)` en views/settings.ts
     "settings.discord_step_",
-    "settings.lastfm_step_",
 ];
 
 /// Ninguna clave sobra.

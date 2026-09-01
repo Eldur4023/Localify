@@ -1,7 +1,7 @@
 //! Almacén de secretos.
 //!
-//! Guarda el `client_secret` de Spotify y la sesión de Last.fm. Ninguno de los
-//! dos cruza jamás el puente IPC hacia el frontend.
+//! Guarda el `client_secret` de Spotify. No cruza jamás el puente IPC hacia
+//! el frontend.
 //!
 //! ## Un almacén por sistema, porque el sistema ya tiene uno
 //!
@@ -232,9 +232,9 @@ struct Respaldo {
     ///
     /// Es un campo y no una constante **para que los tests no escriban en la
     /// entrada de verdad**. Con un nombre fijo, `guarda_lee_y_borra` acabaría
-    /// borrando las credenciales de Spotify y la sesión de Last.fm del usuario
-    /// que ejecutara la suite: el llavero es del escritorio, no del proceso, y no
-    /// hay directorio temporal que aísle eso.
+    /// borrando las credenciales de Spotify del usuario que ejecutara la
+    /// suite: el llavero es del escritorio, no del proceso, y no hay
+    /// directorio temporal que aísle eso.
     entrada: String,
 }
 

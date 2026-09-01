@@ -77,7 +77,7 @@ flowchart TB
         YT["localify-ytdlp"]
         AUD["localify-audio"]
         PLAT["localify-platform (SMTC, taskbar)"]
-        INTG["localify-integrations (Discord, Last.fm)"]
+        INTG["localify-integrations (Discord, autoupdate)"]
     end
 
     UI --> STORE --> IPC
@@ -150,7 +150,7 @@ nombra un tipo concreto de infraestructura.
 | `localify-audio` | Motor de reproducción: decodificación, mezcla, crossfade, EQ, salida | core |
 | `localify-platform` | SMTC, thumbnail toolbar, rutas del SO, sidecars | core |
 | `localify-musicbrainz` | Cliente de MusicBrainz: búsqueda, ediciones, ISRC, Cover Art Archive | core |
-| `localify-integrations` | Discord RPC, Last.fm scrobbling, letras | core |
+| `localify-integrations` | Discord RPC, letras, aviso de nuevas versiones | core |
 | `localify-services` | Los 14 servicios de negocio | core |
 | `localify-app` | Comandos Tauri, DTOs, DI, ciclo de vida, bus de eventos | todos |
 
@@ -231,7 +231,6 @@ Contrato definido en `core::events::DomainEvent` (enum exhaustivo, serializable)
 ```
 Servicio ──publish──▶ tokio::sync::broadcast<DomainEvent> ──┬──▶ Puente Tauri ──emit──▶ WebView
                                                             ├──▶ Discord RPC
-                                                            ├──▶ Last.fm scrobbler
                                                             └──▶ SMTC (Windows)
 ```
 

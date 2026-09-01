@@ -48,8 +48,8 @@ pub trait AppPaths: Send + Sync + 'static {
 
 /// Almacén de secretos del sistema (DPAPI en Windows).
 ///
-/// El `client_secret` de Spotify y la sesión de Last.fm nunca se guardan en
-/// claro ni cruzan el puente IPC.
+/// El `client_secret` de Spotify nunca se guarda en claro ni cruza el puente
+/// IPC.
 #[async_trait]
 pub trait SecretStore: Send + Sync + 'static {
     async fn get(&self, key: &str) -> CoreResult<Option<String>>;
@@ -59,23 +59,16 @@ pub trait SecretStore: Send + Sync + 'static {
 
 /// Claves del almacén de secretos.
 ///
-/// Están aquí, y no en quien las escribe, porque casi todas tienen **dos**
-/// dueños: `localify-services` guarda la sesión de Last.fm y decide si la
-/// aplicación se considera conectada, y `localify-integrations` la lee para
-/// firmar. Con una constante en cada crate, cambiar el nombre en uno deja al
-/// otro leyendo una clave que ya no existe, y el síntoma —"aparece conectado
-/// pero no scrobblea"— no señala a ningún sitio.
+/// Están aquí, y no en quien las escribe, porque tienen **dos** dueños:
+/// `localify-services` las guarda y decide si la aplicación se considera
+/// conectada, y `localify-integrations` las lee para hablar con el servicio.
+/// Con una constante en cada crate, cambiar el nombre en uno deja al otro
+/// leyendo una clave que ya no existe, y el síntoma no señala a ningún sitio.
 pub mod claves {
     /// `client_id` de Spotify. No es secreto, pero acompaña al que sí lo es.
     pub const SPOTIFY_ID: &str = "spotify.client_id";
     /// `client_secret` de Spotify. **Nunca se lee para devolverlo.**
     pub const SPOTIFY_SECRETO: &str = "spotify.client_secret";
-    /// Clave de API de Last.fm.
-    pub const LASTFM_API_KEY: &str = "lastfm.api_key";
-    /// Secreto de la aplicación de Last.fm, con el que se firma cada llamada.
-    pub const LASTFM_API_SECRET: &str = "lastfm.api_secret";
-    /// Sesión concedida por el usuario. No caduca.
-    pub const LASTFM_SESION: &str = "lastfm.session_key";
 }
 
 /// Metadatos que el sistema muestra en su panel multimedia.

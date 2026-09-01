@@ -1,16 +1,14 @@
 //! Abrir una URL en el navegador del usuario.
 //!
-//! Hace falta para la autorización de Last.fm, que ocurre fuera de Localify por
-//! decisión del propio servicio: no acepta usuario y contraseña desde una
-//! aplicación de escritorio.
+//! Hace falta para las páginas de configuración externas —el portal de
+//! desarrolladores de Discord, por ejemplo— que ocurren fuera de Localify.
 //!
 //! ## Por qué no lo hace el frontend
 //!
 //! `window.open` dentro del WebView no lleva al navegador del sistema: o lo
 //! bloquea la política de la ventana, o abre la página **dentro** de Localify,
-//! que es peor —el usuario acabaría metiendo sus credenciales de Last.fm en una
-//! ventana sin barra de direcciones, que es exactamente la forma de una
-//! suplantación—.
+//! que es peor —una página de inicio de sesión ajena dentro de una ventana sin
+//! barra de direcciones es exactamente la forma de una suplantación—.
 //!
 //! ## Por qué `rundll32` y no `cmd /c start`
 //!

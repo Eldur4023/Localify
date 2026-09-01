@@ -111,6 +111,8 @@ pub enum LocalifyEvent {
     #[serde(rename_all = "camelCase")]
     LibraryPathChanged { path: String },
     #[serde(rename_all = "camelCase")]
+    UpdateAvailable { version: String },
+    #[serde(rename_all = "camelCase")]
     Toast {
         level: String,
         message_key: String,
@@ -288,6 +290,7 @@ impl From<DomainEvent> for LocalifyEvent {
                 total,
             },
             DomainEvent::LibraryPathChanged { path } => Self::LibraryPathChanged { path },
+            DomainEvent::UpdateAvailable { version } => Self::UpdateAvailable { version },
             DomainEvent::Toast {
                 level,
                 message_key,

@@ -29,5 +29,11 @@ keyring = { workspace = true }
 # nada equivalente.
 libc = { workspace = true }
 
+# MPRIS: el panel multimedia de Linux. Es sobre zbus (D-Bus asíncrono); se pide
+# el feature `tokio` para que use el runtime que ya tiene la aplicación en vez
+# de levantar su propio reactor.
+[target.'cfg(target_os = "linux")'.dependencies]
+mpris-server = { version = "0.10", default-features = false, features = ["tokio"] }
+
 [lints]
 workspace = true

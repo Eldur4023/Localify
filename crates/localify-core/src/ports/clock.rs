@@ -1,8 +1,8 @@
 //! Reloj inyectable.
 //!
 //! Que el tiempo sea una dependencia y no una llamada estática es lo que hace
-//! testeables las caducidades de caché, el backoff de reintentos y la regla de
-//! scrobbling, sin que la suite tarde minutos ni dependa del reloj real.
+//! testeables las caducidades de caché y el backoff de reintentos, sin que la
+//! suite tarde minutos ni dependa del reloj real.
 
 use chrono::{DateTime, Utc};
 

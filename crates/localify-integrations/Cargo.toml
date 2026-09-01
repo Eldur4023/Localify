@@ -1,6 +1,6 @@
 [package]
 name = "localify-integrations"
-description = "Integraciones opcionales: Discord Rich Presence, Last.fm y letras."
+description = "Integraciones opcionales: Discord Rich Presence y letras."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,8 +12,8 @@ authors.workspace = true
 localify-core = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
-md-5 = { workspace = true }
 reqwest = { workspace = true }
+semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

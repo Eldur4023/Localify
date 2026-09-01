@@ -597,7 +597,7 @@ hoy y hace cuatro meses —una ventana corta dejaría seca "lo que más escuchas
 
 ## Fase 11 — Configuración e integraciones
 
-**Objetivos.** Todo lo configurable, configurable. Discord y Last.fm.
+**Objetivos.** Todo lo configurable, configurable. Discord.
 
 **Dependencias.** Fase 10.
 
@@ -607,7 +607,6 @@ hoy y hace cuatro meses —una ventana corta dejaría seca "lo que más escuchas
 - Editor de ecualizador con visualización de la curva.
 - Selección de dispositivo de audio.
 - Discord Rich Presence.
-- Last.fm: autenticación, now-playing, scrobbling con cola persistente offline.
 - Letras vía LRCLIB con caché negativa.
 - Diagnóstico y acceso a logs.
 
@@ -628,12 +627,6 @@ hoy y hace cuatro meses —una ventana corta dejaría seca "lo que más escuchas
       aparezca en el perfil no está verificado en test**: haría falta un Discord
       abierto y una aplicación registrada. Lo que sí se comprueba es la forma de
       la actividad y que dos iguales no se reenvían.
-- [x] Un scrobble generado sin conexión se envía al recuperarla. Se sostiene en
-      dos piezas verificadas por separado: `desenlace` decide aplazar —y no
-      borrar— ante un fallo temporal, y el repositorio comprueba que
-      `mark_failed` deja la fila en la cola y cuenta el intento. La entrega
-      contra el servicio real no se prueba: exige credenciales de una
-      aplicación de Last.fm.
 - [ ] Las letras sincronizadas avanzan alineadas con el audio (± 200 ms).
       El análisis del LRC sí está verificado contra el servicio real
       (`lrclib_real.rs`, 38 líneas de *Creep* con la primera en 19,160 s); la

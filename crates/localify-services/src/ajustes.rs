@@ -61,8 +61,7 @@ const K_INTEGRACIONES: &str = "integrations";
 const K_UI: &str = "ui";
 
 use localify_core::ports::platform::claves::{
-    LASTFM_API_KEY, LASTFM_API_SECRET, LASTFM_SESION, SPOTIFY_ID as S_SPOTIFY_ID,
-    SPOTIFY_SECRETO as S_SPOTIFY_SECRETO,
+    SPOTIFY_ID as S_SPOTIFY_ID, SPOTIFY_SECRETO as S_SPOTIFY_SECRETO,
 };
 
 /// Margen sobre el tamaño de la biblioteca al comprobar espacio para migrar.
@@ -151,10 +150,6 @@ impl SettingsServiceImpl {
         }
 
         settings.spotify = leer_spotify(&deps.secretos).await;
-        // Lo mismo que con Spotify: el estado de conexión no se persiste, se
-        // deduce del almacén del sistema en cada arranque. Así no puede quedarse
-        // diciendo "conectado" después de que alguien borre la sesión por fuera.
-        settings.integrations.lastfm_connected = hay_sesion_lastfm(&deps.secretos).await;
 
         let servicio = Self {
             deps,
@@ -332,24 +327,6 @@ async fn leer_spotify(secretos: &Arc<dyn SecretStore>) -> SpotifySettings {
     }
 }
 
-/// Si hay clave de API, secreto **y** sesión: las tres hacen falta para
-/// scrobblear, y con dos de tres la interfaz estaría prometiendo algo que no va
-/// a pasar.
-async fn hay_sesion_lastfm(secretos: &Arc<dyn SecretStore>) -> bool {
-    for clave in [LASTFM_API_KEY, LASTFM_API_SECRET, LASTFM_SESION] {
-        let puesta = secretos
-            .get(clave)
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|v| !v.is_empty());
-        if !puesta {
-            return false;
-        }
-    }
-    true
-}
-
 #[async_trait]
 impl SettingsService for SettingsServiceImpl {
     async fn get(&self) -> Settings {
@@ -405,13 +382,7 @@ impl SettingsService for SettingsServiceImpl {
                 s.download = d;
             }
             if let Some(i) = patch.integrations {
-                // El patch viene del frontend y no puede decidir si hay sesión:
-                // se conserva lo que sabe el servicio. Sin esto, tocar el
-                // interruptor de Discord dejaría Last.fm "desconectado" en la
-                // pantalla hasta reiniciar.
-                let conectado = s.integrations.lastfm_connected;
                 s.integrations = i;
-                s.integrations.lastfm_connected = conectado;
             }
             if let Some(u) = patch.ui {
                 s.ui = u;
@@ -484,31 +455,6 @@ impl SettingsService for SettingsServiceImpl {
 
         info!("credenciales de Spotify guardadas en el almacén del sistema");
         Ok(estado)
-    }
-
-    async fn set_lastfm_session(&self, user: Option<String>) -> CoreResult<Settings> {
-        let conectado = hay_sesion_lastfm(&self.deps.secretos).await;
-
-        let seccion = {
-            let mut s = self
-                .actual
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            s.integrations.lastfm_user = user;
-            s.integrations.lastfm_connected = conectado;
-            s.integrations.clone()
-        };
-
-        // El nombre sí se persiste: es lo que la pantalla enseña al abrir, antes
-        // de que nadie haya hablado con Last.fm. `lastfm_connected` no viaja al
-        // JSON —lleva `serde(skip)`— así que esto guarda solo lo que debe.
-        self.guardar(K_INTEGRACIONES, &seccion).await?;
-
-        self.deps.eventos.publish(DomainEvent::SettingsChanged {
-            sections: vec![SettingsSection::Integrations],
-        });
-
-        Ok(self.instantanea())
     }
 
     async fn test_spotify(&self) -> CoreResult<ProviderStatus> {

@@ -343,15 +343,13 @@ interface Settings {
   spotify: { configured: boolean; clientId: string | null };  // el secret NUNCA sale
   integrations: {
     discordEnabled: boolean;
-    lastfmEnabled: boolean;
-    lastfmUser: string | null;
   };
   ui: { listDensity: "compact" | "comfortable"; startView: string };
 }
 ```
 
 El `clientSecret` **nunca** se devuelve al frontend. `settings_get` solo indica
-si está configurado. Igual con la sesión de Last.fm.
+si está configurado.
 
 ---
 
@@ -360,13 +358,16 @@ si está configurado. Igual con la sesión de Last.fm.
 | Comando | Argumentos | Devuelve |
 |---|---|---|
 | `integrations_discord_set` | `{ enabled }` | `void` |
-| `integrations_lastfm_start_auth` | — | `{ authUrl, token }` |
-| `integrations_lastfm_complete_auth` | `{ token }` | `{ user }` |
-| `integrations_lastfm_disconnect` | — | `void` |
 | `diagnostics_report` | — | `DiagnosticsReport` |
 | `diagnostics_open_logs` | — | `void` |
 | `sidecars_status` | — | `{ ytDlp: SidecarStatus; ffmpeg: SidecarStatus }` |
 | `sidecars_update` | — | `{ updated: string[] }` |
+| `updates_open_release_page` | — | `void` |
+
+`updates_open_release_page` no acepta ninguna URL desde el frontend: abre la
+que Rust guardó al comprobar contra los releases de GitHub (evento
+`updateAvailable`), nunca una que llegue como argumento. Mismo motivo que
+`settings_open_external`.
 
 ---
 
@@ -404,7 +405,8 @@ type LocalifyEvent =
   | { type: "searchRemoteReady";   queryId: number }
   // Sistema
   | { type: "settingsChanged";     sections: string[] }
-  | { type: "providerStatusChanged"; provider: "spotify" | "lastfm" | "discord"; status: string }
+  | { type: "providerStatusChanged"; provider: "spotify" | "discord"; status: string }
+  | { type: "updateAvailable";     version: string }
   | { type: "toast";               level: "info" | "warn" | "error"; messageKey: string;
                                    params?: Record<string, string> };
 ```

@@ -15,7 +15,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 # `File::try_lock`, que sostiene la instancia única fuera de Windows, se
 # estabilizó en 1.89.
@@ -47,6 +47,10 @@ async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 unicode-normalization = "0.1"
+# Compara el tag de un release de GitHub con la versión instalada. Una
+# comparación de cadenas ordenaría "1.10.0" por delante de "1.9.0"; el
+# autoupdate necesita la de verdad.
+semver = "1"
 
 # Asincronía
 tokio = { version = "1", features = [
@@ -94,9 +98,6 @@ ts-rs = "12"
 # Plataforma
 directories = "6"
 sha2 = "0.10"
-# La API de Last.fm firma cada petición con MD5. No es una decisión nuestra ni
-# tiene nada que ver con seguridad: es el formato que el servicio exige.
-md-5 = "0.11"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # Llavero del escritorio (Secret Service en Linux, Keychain en macOS). Solo se
 # compila fuera de Windows: alli los secretos van a DPAPI.

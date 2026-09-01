@@ -104,7 +104,7 @@ impl PlayStatus {
 }
 
 /// Por qué se avanzó de pista. Distinguirlo importa: solo un final natural
-/// cuenta como reproducción completa para el historial y el scrobbling.
+/// cuenta como reproducción completa para el historial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AdvanceReason {

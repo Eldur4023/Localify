@@ -14,7 +14,6 @@ pub mod library;
 pub mod lyrics;
 pub mod playlist;
 pub mod queue;
-pub mod scrobble;
 pub mod settings;
 pub mod track;
 pub mod versiones;
@@ -39,7 +38,6 @@ pub use queue::{
     AdvanceReason, ChangeSource, PlayStatus, PlaybackContext, PlayerState, QueueEntry,
     QueueSnapshot, RepeatMode,
 };
-pub use scrobble::{PendingScrobble, merece_scrobble};
 pub use settings::{
     AudioSettings, CookieSource, CookiesVigentes, DownloadSettings, FormatPreference,
     IntegrationSettings, Language, Settings, SettingsPatch, SettingsSection, SpotifySettings,

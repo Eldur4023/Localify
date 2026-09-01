@@ -17,7 +17,8 @@
  * consulta por clic para datos que casi nunca cambian.
  */
 
-import { iniciar } from "./ipc/events.js";
+import { updates } from "./ipc/client.js";
+import { alRecibirTipo, iniciar } from "./ipc/events.js";
 import { crearRouter, type Ruta, type Vista } from "./router.js";
 import { mountAnchoLateral } from "./shell/ancho-lateral.js";
 import { mountSidebar } from "./shell/sidebar.js";
@@ -34,7 +35,37 @@ import { mountPlaylistView } from "./views/playlist.js";
 import { mountSearchView } from "./views/search.js";
 import { mountSettingsView } from "./views/settings.js";
 import { alCambiarIdioma, t } from "./i18n/index.js";
+import { confirmar } from "./ui/dialogo.js";
 import { instalarCapturaDeErrores, mostrarError } from "./ui/error-overlay.js";
+
+/**
+ * Avisa de una versión nueva y abre el navegador si el usuario acepta.
+ *
+ * Va en `main.ts` y no en una vista porque el aviso puede llegar en
+ * cualquier pantalla, y el armazón —a diferencia de las vistas— nunca se
+ * desmonta.
+ */
+function vigilarActualizaciones(): void {
+  alRecibirTipo("updateAvailable", (evento) => {
+    void (async () => {
+      // No es destructivo: no hay nada que perder por aceptar de más, así
+      // que el foco puede arrancar en "actualizar" en vez de en "cancelar".
+      const aceptar = await confirmar(
+        t("update.title"),
+        t("update.accept"),
+        t("update.message", { version: evento.version }),
+        false,
+      );
+      if (!aceptar) return;
+
+      try {
+        await updates.openReleasePage();
+      } catch (e) {
+        mostrarError(t("error.internal"), String(e));
+      }
+    })();
+  });
+}
 
 /**
  * Quita el menú contextual del navegador donde no hay uno propio.
@@ -104,6 +135,7 @@ function main(): void {
   // Los eventos se enganchan antes que nada: una descarga que termine mientras
   // se monta la interfaz debe llegar igual.
   void iniciar();
+  vigilarActualizaciones();
 
   const router = crearRouter(
     vista,

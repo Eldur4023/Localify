@@ -12,7 +12,6 @@
 //! `localify-db` (ver ADR-004).
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 
 use crate::domain::album::{Album, AlbumFilter, AlbumRow};
 use crate::domain::artist::{Artist, ArtistRow};
@@ -24,7 +23,6 @@ use crate::domain::library::{AudioFileRecord, LibraryStats, PlayHistoryEntry, Sc
 use crate::domain::lyrics::Lyrics;
 use crate::domain::playlist::{Playlist, PlaylistEntry, PlaylistSummary};
 use crate::domain::queue::{PlaybackContext, RepeatMode};
-use crate::domain::scrobble::PendingScrobble;
 use crate::domain::track::{Track, TrackFilter, TrackRow, TrackSort};
 use crate::error::CoreResult;
 use crate::page::{Page, PageRequest};
@@ -126,47 +124,6 @@ pub trait HistoryRepository: Send + Sync + 'static {
     /// pantalla, y sobrevivir al borrado la convierte en un museo de lo que
     /// hubo.
     async fn clear(&self) -> CoreResult<u32>;
-}
-
-/// Cola persistente de scrobbles pendientes.
-///
-/// ## Por qué una tabla y no un `Vec` en memoria
-///
-/// La promesa del proyecto es que **no se pierde un scrobble por estar sin
-/// conexión**. Una cola en memoria la incumple en el caso más común de todos:
-/// se escucha música con el portátil desconectado, se cierra Localify y al
-/// abrirlo con red no queda nada que enviar.
-///
-/// Los reintentos no se cuentan para reintentar más despacio, sino para poder
-/// distinguir una fila que va a salir en cuanto haya red de una que lleva
-/// veinte intentos y algo pasa con ella. `last_error` es lo que se mira cuando
-/// alguien pregunta por qué.
-#[async_trait]
-pub trait ScrobbleRepository: Send + Sync + 'static {
-    /// Encola una escucha. `started_at` es cuándo **empezó** a sonar.
-    async fn enqueue(&self, track: &TrackId, started_at: DateTime<Utc>) -> CoreResult<()>;
-
-    /// Las más antiguas primero: Last.fm construye una línea temporal y
-    /// entregarlas desordenadas la deja desordenada.
-    async fn pending(&self, limit: u16) -> CoreResult<Vec<PendingScrobble>>;
-
-    /// Las quita de la cola. Se llama tanto al entregarlas como al descartar
-    /// las que el servicio rechaza por motivos que no van a cambiar.
-    async fn remove(&self, ids: &[i64]) -> CoreResult<()>;
-
-    /// Anota un intento fallido. La fila se queda para el siguiente.
-    async fn mark_failed(&self, ids: &[i64], error: &str) -> CoreResult<()>;
-
-    /// Descarta lo que ya no se puede entregar. Devuelve cuántas filas.
-    ///
-    /// No contradice la promesa de no perder scrobbles: **Last.fm rechaza los
-    /// anteriores a catorce días**, así que una fila más vieja que eso ya no se
-    /// puede entregar por más que se reintente. Guardarla para siempre sería
-    /// acumular basura y fingir que algún día va a salir.
-    async fn purge_older_than(&self, days: u16) -> CoreResult<u32>;
-
-    /// Cuántas esperan. Es lo que se enseña en Ajustes.
-    async fn count(&self) -> CoreResult<u64>;
 }
 
 #[async_trait]

@@ -296,7 +296,6 @@ mod tests {
             "playlists",
             "playlist_items",
             "scan_reports",
-            "scrobble_queue",
             "settings",
             "tracks",
             "tracks_fts",

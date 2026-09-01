@@ -29,6 +29,7 @@
 
 use std::sync::Arc;
 
+use localify_core::domain::audio::DurationMs;
 use localify_core::domain::queue::PlayStatus;
 use localify_core::events::DomainEvent;
 use localify_core::ports::platform::{MediaCommand, NowPlaying, SystemMediaIntegration};
@@ -42,18 +43,24 @@ use crate::bridge::EventBus;
 ///
 /// Si el sistema no concede el panel, todo esto se convierte en una
 /// implementación que no hace nada y la reproducción sigue igual.
-pub fn arrancar(
+///
+/// Es `async` porque MPRIS necesita abrir una conexión de D-Bus antes de
+/// poder publicar nada; `bus` se recibe por valor (clonarlo es barato, es un
+/// `broadcast::Sender`) porque esta función se lanza con
+/// `tauri::async_runtime::spawn`, cuyo futuro debe ser `'static`.
+pub async fn arrancar(
     hwnd: isize,
     playback: Arc<dyn PlaybackService>,
     metadata: Arc<dyn MetadataService>,
-    bus: &EventBus,
+    bus: EventBus,
 ) {
-    let sistema = localify_platform::integracion_multimedia(hwnd);
+    let sistema = localify_platform::integracion_multimedia(hwnd).await;
 
     // ── Del sistema hacia el reproductor ────────────────────────────────────
     let (tx, rx) = mpsc::unbounded_channel();
     sistema.set_command_handler(Box::new(move |orden| {
-        // Se encola y se vuelve: este código corre en un hilo de COM.
+        // Se encola y se vuelve: este código corre en un hilo de COM en
+        // Windows, y en la tarea de D-Bus de `mpris-server` en Linux.
         let _ = tx.send(orden);
     }));
     tauri::async_runtime::spawn(atender_ordenes(rx, Arc::clone(&playback)));
@@ -152,6 +159,18 @@ async fn reflejar_estado(
                 if status == PlayStatus::Stopped {
                     let _ = sistema.clear().await;
                 }
+            }
+            DomainEvent::Seeked { position_ms, .. } => {
+                // La duración no viaja en el evento; se pide la fila actual
+                // solo por eso. Sin este brazo, saltar dentro de una canción
+                // no movía la posición del panel del sistema hasta el
+                // siguiente cambio de pista.
+                let Some(fila) = playback.state().await.track else {
+                    continue;
+                };
+                let _ = sistema
+                    .set_position(DurationMs::new(position_ms), fila.duration)
+                    .await;
             }
             _ => {}
         }

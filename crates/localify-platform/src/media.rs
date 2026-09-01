@@ -22,13 +22,18 @@
 //! la posee. En Tauri ese es el hilo principal, que ya bombea mensajes, así que
 //! los `callbacks` llegan solos sin montar otro bucle.
 //!
-//! ## Fuera de Windows
+//! ## Linux: MPRIS
 //!
-//! [`SinIntegracion`] no hace nada y la aplicación funciona igual. Portar a
-//! Linux es escribir MPRIS aquí al lado, sin tocar una línea de negocio.
+//! `mod linux` implementa `org.mpris.MediaPlayer2` sobre D-Bus con
+//! `mpris-server`. Vive al lado de `mod win` sin tocar una línea de negocio:
+//! el resto de la aplicación solo conoce [`SystemMediaIntegration`].
+//!
+//! ## Fuera de Windows y Linux
+//!
+//! [`SinIntegracion`] no hace nada y la aplicación funciona igual.
 
-// Solo los usa `Manejador`, que es de SMTC y por tanto de Windows.
-#[cfg(windows)]
+// La usan `Manejador`, de SMTC y de MPRIS.
+#[cfg(any(windows, target_os = "linux"))]
 use std::sync::{Arc, Mutex};
 
 use localify_core::domain::audio::DurationMs;
@@ -60,11 +65,13 @@ impl SystemMediaIntegration for SinIntegracion {
     fn set_command_handler(&self, _handler: Box<dyn Fn(MediaCommand) + Send + Sync>) {}
 }
 
-/// El receptor de las órdenes del sistema, compartido con el callback de COM.
+/// El receptor de las órdenes del sistema, compartido con el callback nativo
+/// (COM en Windows, la tarea de D-Bus en Linux).
 ///
-/// Solo en Windows: el panel multimedia es SMTC, y fuera de ahí la integración
-/// es [`SinIntegracion`], que no recibe órdenes de nadie.
-#[cfg(windows)]
+/// Solo en Windows y Linux: son los dos sistemas con panel multimedia. Fuera
+/// de ahí la integración es [`SinIntegracion`], que no recibe órdenes de
+/// nadie.
+#[cfg(any(windows, target_os = "linux"))]
 type Manejador = Arc<Mutex<Option<Box<dyn Fn(MediaCommand) + Send + Sync>>>>;
 
 #[cfg(windows)]
@@ -308,12 +315,500 @@ mod win {
 #[cfg(windows)]
 pub use win::ControlesWindows;
 
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::{Manejador, MediaCommand, NowPlaying, PlayStatus, SystemMediaIntegration};
+
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use localify_core::domain::audio::DurationMs;
+    use localify_core::error::{CoreError, CoreResult};
+    use mpris_server::{
+        LoopStatus, Metadata, PlaybackRate, PlaybackStatus, PlayerInterface, Property,
+        RootInterface, Server, Signal, Time, TrackId, Volume, zbus,
+    };
+    use tracing::warn;
+
+    /// Identifica a Localify ante los clientes de MPRIS.
+    const IDENTIDAD: &str = "Localify";
+    /// Basename del `.desktop` que instala el paquete (ADR de empaquetado
+    /// Linux): lo que un cliente usa para encontrar el icono.
+    const ENTRADA_ESCRITORIO: &str = "localify";
+
+    /// Lo que está sonando ahora mismo, tal y como lo dejó la última llamada a
+    /// [`SystemMediaIntegration::set_now_playing`].
+    #[derive(Debug, Clone)]
+    struct Pista {
+        titulo: String,
+        artista: String,
+        album: Option<String>,
+        cover_path: Option<PathBuf>,
+        duracion_ms: u32,
+        /// Identificador sintético: `NowPlaying` no trae uno propio, y MPRIS
+        /// exige un `TrackId` estable para poder rechazar un `SetPosition`
+        /// que llega tarde y ya no habla de la pista actual.
+        id: u64,
+    }
+
+    /// Lo que la interfaz D-Bus necesita leer y escribir, compartido entre el
+    /// [`Server`] y el [`IntegracionMpris`] que lo expone al resto de la
+    /// aplicación.
+    struct Estado {
+        pista: Mutex<Option<Pista>>,
+        posicion_ms: AtomicU32,
+        reproduccion: Mutex<PlaybackStatus>,
+        siguiente_id: AtomicU64,
+        manejador: Manejador,
+    }
+
+    impl std::fmt::Debug for Estado {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Estado").finish_non_exhaustive()
+        }
+    }
+
+    impl Estado {
+        fn nuevo() -> Self {
+            Self {
+                pista: Mutex::new(None),
+                posicion_ms: AtomicU32::new(0),
+                reproduccion: Mutex::new(PlaybackStatus::Stopped),
+                siguiente_id: AtomicU64::new(0),
+                manejador: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        fn track_id_de(id: u64) -> TrackId {
+            TrackId::try_from(format!("/org/localify/Track/{id}")).unwrap_or(TrackId::NO_TRACK)
+        }
+
+        /// Metadatos MPRIS de la pista actual, o los de "no hay pista".
+        fn metadata(&self) -> Metadata {
+            let pista = self
+                .pista
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(p) = pista.as_ref() else {
+                return Metadata::builder().trackid(TrackId::NO_TRACK).build();
+            };
+
+            let mut b = Metadata::builder()
+                .trackid(Self::track_id_de(p.id))
+                .title(p.titulo.clone())
+                .artist(vec![p.artista.clone()])
+                .length(Time::from_millis(i64::from(p.duracion_ms)));
+            if let Some(album) = &p.album {
+                b = b.album(album.clone());
+            }
+            if let Some(ruta) = &p.cover_path {
+                // Igual que en Windows: el panel necesita un fichero, no un
+                // buffer en memoria. A diferencia de Windows, aquí el propio
+                // URI de fichero es lo que MPRIS espera, sin pasar por
+                // ninguna API de flujos.
+                b = b.art_url(format!("file://{}", ruta.display()));
+            }
+            b.build()
+        }
+
+        /// Envía la orden al manejador instalado, si lo hay. Nunca bloquea el
+        /// bus de D-Bus más de lo que tarda encolar.
+        fn enviar(&self, orden: MediaCommand) {
+            if let Ok(g) = self.manejador.lock()
+                && let Some(f) = g.as_ref()
+            {
+                f(orden);
+            }
+        }
+    }
+
+    /// La implementación de las dos interfaces de MPRIS. Solo lee y escribe
+    /// [`Estado`]; no habla con el reproductor directamente (ADR-008: el
+    /// manejador es lo único que cruza esa frontera).
+    #[derive(Debug)]
+    struct Implementacion {
+        estado: Arc<Estado>,
+    }
+
+    // La firma de cada método la dicta el trait de `mpris-server`, que exige
+    // `async fn` (es la interfaz de D-Bus, no una elección nuestra). La
+    // mayoría no necesita esperar nada: son datos que Localify no expone por
+    // este panel (fullscreen, listas de reproducción) o valores fijos.
+    #[allow(clippy::unused_async_trait_impl)]
+    impl RootInterface for Implementacion {
+        async fn raise(&self) -> zbus::fdo::Result<()> {
+            Ok(())
+        }
+
+        async fn quit(&self) -> zbus::fdo::Result<()> {
+            Ok(())
+        }
+
+        async fn can_quit(&self) -> zbus::fdo::Result<bool> {
+            Ok(false)
+        }
+
+        async fn fullscreen(&self) -> zbus::fdo::Result<bool> {
+            Ok(false)
+        }
+
+        async fn set_fullscreen(&self, _fullscreen: bool) -> zbus::Result<()> {
+            Ok(())
+        }
+
+        async fn can_set_fullscreen(&self) -> zbus::fdo::Result<bool> {
+            Ok(false)
+        }
+
+        async fn can_raise(&self) -> zbus::fdo::Result<bool> {
+            Ok(false)
+        }
+
+        async fn has_track_list(&self) -> zbus::fdo::Result<bool> {
+            Ok(false)
+        }
+
+        async fn identity(&self) -> zbus::fdo::Result<String> {
+            Ok(IDENTIDAD.to_owned())
+        }
+
+        async fn desktop_entry(&self) -> zbus::fdo::Result<String> {
+            Ok(ENTRADA_ESCRITORIO.to_owned())
+        }
+
+        async fn supported_uri_schemes(&self) -> zbus::fdo::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn supported_mime_types(&self) -> zbus::fdo::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+
+    // Mismo motivo que en `RootInterface`: la firma la impone el trait, y
+    // aquí casi todo es leer un `Mutex`/`Atomic` o encolar en el manejador,
+    // sin nada que esperar de verdad.
+    #[allow(clippy::unused_async_trait_impl)]
+    impl PlayerInterface for Implementacion {
+        async fn next(&self) -> zbus::fdo::Result<()> {
+            self.estado.enviar(MediaCommand::Next);
+            Ok(())
+        }
+
+        async fn previous(&self) -> zbus::fdo::Result<()> {
+            self.estado.enviar(MediaCommand::Previous);
+            Ok(())
+        }
+
+        async fn pause(&self) -> zbus::fdo::Result<()> {
+            self.estado.enviar(MediaCommand::Pause);
+            Ok(())
+        }
+
+        async fn play_pause(&self) -> zbus::fdo::Result<()> {
+            self.estado.enviar(MediaCommand::Toggle);
+            Ok(())
+        }
+
+        async fn stop(&self) -> zbus::fdo::Result<()> {
+            self.estado.enviar(MediaCommand::Stop);
+            Ok(())
+        }
+
+        async fn play(&self) -> zbus::fdo::Result<()> {
+            self.estado.enviar(MediaCommand::Play);
+            Ok(())
+        }
+
+        async fn seek(&self, offset: Time) -> zbus::fdo::Result<()> {
+            let actual = i64::from(self.estado.posicion_ms.load(Ordering::Relaxed));
+            let duracion = self
+                .estado
+                .pista
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .map_or(0, |p| i64::from(p.duracion_ms));
+
+            let destino = actual + offset.as_millis();
+            if destino >= duracion {
+                // "acts like a call to Next" (especificación de MPRIS).
+                self.estado.enviar(MediaCommand::Next);
+            } else {
+                let posicion = u32::try_from(destino.max(0)).unwrap_or(0);
+                self.estado.enviar(MediaCommand::Seek {
+                    position_ms: posicion,
+                });
+            }
+            Ok(())
+        }
+
+        async fn set_position(&self, track_id: TrackId, position: Time) -> zbus::fdo::Result<()> {
+            let vigente = self
+                .estado
+                .pista
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .map(|p| Estado::track_id_de(p.id));
+            // Un `SetPosition` que ya no habla de la pista actual llega
+            // tarde: se ignora en vez de mover una pista que el usuario ya
+            // dejó atrás.
+            if vigente != Some(track_id) {
+                return Ok(());
+            }
+            let ms = u32::try_from(position.as_millis().max(0)).unwrap_or(0);
+            self.estado.enviar(MediaCommand::Seek { position_ms: ms });
+            Ok(())
+        }
+
+        async fn open_uri(&self, _uri: String) -> zbus::fdo::Result<()> {
+            Err(zbus::fdo::Error::NotSupported(
+                "Localify no acepta URIs externas".to_owned(),
+            ))
+        }
+
+        async fn playback_status(&self) -> zbus::fdo::Result<PlaybackStatus> {
+            Ok(*self
+                .estado
+                .reproduccion
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner))
+        }
+
+        async fn loop_status(&self) -> zbus::fdo::Result<LoopStatus> {
+            // Localify no expone el modo de repetición a las integraciones
+            // del sistema (tampoco lo hace SMTC): es un ajuste de la propia
+            // interfaz, no un control de panel externo.
+            Ok(LoopStatus::None)
+        }
+
+        async fn set_loop_status(&self, _loop_status: LoopStatus) -> zbus::Result<()> {
+            Ok(())
+        }
+
+        async fn rate(&self) -> zbus::fdo::Result<PlaybackRate> {
+            Ok(1.0)
+        }
+
+        async fn set_rate(&self, _rate: PlaybackRate) -> zbus::Result<()> {
+            Ok(())
+        }
+
+        async fn shuffle(&self) -> zbus::fdo::Result<bool> {
+            Ok(false)
+        }
+
+        async fn set_shuffle(&self, _shuffle: bool) -> zbus::Result<()> {
+            Ok(())
+        }
+
+        async fn metadata(&self) -> zbus::fdo::Result<Metadata> {
+            Ok(self.estado.metadata())
+        }
+
+        async fn volume(&self) -> zbus::fdo::Result<Volume> {
+            // Igual que el modo de repetición: el volumen del sistema no
+            // gobierna el de Localify, así que no hay nada real que leer.
+            Ok(1.0)
+        }
+
+        async fn set_volume(&self, _volume: Volume) -> zbus::Result<()> {
+            Ok(())
+        }
+
+        async fn position(&self) -> zbus::fdo::Result<Time> {
+            Ok(Time::from_millis(i64::from(
+                self.estado.posicion_ms.load(Ordering::Relaxed),
+            )))
+        }
+
+        async fn minimum_rate(&self) -> zbus::fdo::Result<PlaybackRate> {
+            Ok(1.0)
+        }
+
+        async fn maximum_rate(&self) -> zbus::fdo::Result<PlaybackRate> {
+            Ok(1.0)
+        }
+
+        async fn can_go_next(&self) -> zbus::fdo::Result<bool> {
+            Ok(true)
+        }
+
+        async fn can_go_previous(&self) -> zbus::fdo::Result<bool> {
+            Ok(true)
+        }
+
+        async fn can_play(&self) -> zbus::fdo::Result<bool> {
+            Ok(true)
+        }
+
+        async fn can_pause(&self) -> zbus::fdo::Result<bool> {
+            Ok(true)
+        }
+
+        async fn can_seek(&self) -> zbus::fdo::Result<bool> {
+            Ok(true)
+        }
+
+        async fn can_control(&self) -> zbus::fdo::Result<bool> {
+            Ok(true)
+        }
+    }
+
+    /// La integración MPRIS completa: el servidor D-Bus más el estado que
+    /// alimenta sus respuestas.
+    #[derive(Debug)]
+    pub struct IntegracionMpris {
+        estado: Arc<Estado>,
+        servidor: Server<Implementacion>,
+    }
+
+    impl IntegracionMpris {
+        /// Publica el nombre de bus `org.mpris.MediaPlayer2.localify.instance{pid}`.
+        ///
+        /// El sufijo lleva el PID porque la especificación exige un
+        /// identificador único por instancia: dos Localify abiertos a la vez
+        /// (dos usuarios, o una sesión de depuración junto a la real) no
+        /// pueden competir por el mismo nombre.
+        ///
+        /// # Errors
+        /// Si D-Bus no está disponible o rechaza el nombre. No es un fallo
+        /// crítico: quien llama debe caer a [`super::SinIntegracion`] y
+        /// seguir.
+        pub async fn nuevo() -> CoreResult<Self> {
+            let estado = Arc::new(Estado::nuevo());
+            let servidor = Server::new(
+                &format!("localify.instance{}", std::process::id()),
+                Implementacion {
+                    estado: Arc::clone(&estado),
+                },
+            )
+            .await
+            .map_err(|e| CoreError::internal(format!("MPRIS no disponible: {e}")))?;
+
+            Ok(Self { estado, servidor })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SystemMediaIntegration for IntegracionMpris {
+        async fn set_now_playing(&self, info: &NowPlaying) -> CoreResult<()> {
+            let id = self.estado.siguiente_id.fetch_add(1, Ordering::Relaxed);
+            {
+                let mut pista = self
+                    .estado
+                    .pista
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *pista = Some(Pista {
+                    titulo: info.title.clone(),
+                    artista: info.artist.clone(),
+                    album: info.album.clone(),
+                    cover_path: info.cover_path.clone(),
+                    duracion_ms: info.duration.as_ms(),
+                    id,
+                });
+            }
+            self.estado.posicion_ms.store(0, Ordering::Relaxed);
+
+            self.servidor
+                .properties_changed([Property::Metadata(self.estado.metadata())])
+                .await
+                .map_err(|e| CoreError::internal(e.to_string()))?;
+            Ok(())
+        }
+
+        async fn set_status(&self, status: PlayStatus) -> CoreResult<()> {
+            let valor = match status {
+                PlayStatus::Playing => PlaybackStatus::Playing,
+                PlayStatus::Paused => PlaybackStatus::Paused,
+                // MPRIS no distingue "cargando": para el cliente sigue siendo
+                // una reproducción en curso (mismo criterio que SMTC).
+                PlayStatus::Buffering => PlaybackStatus::Playing,
+                PlayStatus::Stopped => PlaybackStatus::Stopped,
+            };
+            *self
+                .estado
+                .reproduccion
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = valor;
+
+            self.servidor
+                .properties_changed([Property::PlaybackStatus(valor)])
+                .await
+                .map_err(|e| CoreError::internal(e.to_string()))?;
+            Ok(())
+        }
+
+        async fn set_position(&self, position: DurationMs, duration: DurationMs) -> CoreResult<()> {
+            self.estado
+                .posicion_ms
+                .store(position.as_ms(), Ordering::Relaxed);
+            if let Some(p) = self
+                .estado
+                .pista
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_mut()
+            {
+                p.duracion_ms = duration.as_ms();
+            }
+
+            self.servidor
+                .emit(Signal::Seeked {
+                    position: Time::from_millis(i64::from(position.as_ms())),
+                })
+                .await
+                .map_err(|e| CoreError::internal(e.to_string()))?;
+            Ok(())
+        }
+
+        async fn clear(&self) -> CoreResult<()> {
+            *self
+                .estado
+                .pista
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            self.estado.posicion_ms.store(0, Ordering::Relaxed);
+            *self
+                .estado
+                .reproduccion
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = PlaybackStatus::Stopped;
+
+            self.servidor
+                .properties_changed([
+                    Property::Metadata(self.estado.metadata()),
+                    Property::PlaybackStatus(PlaybackStatus::Stopped),
+                ])
+                .await
+                .map_err(|e| CoreError::internal(e.to_string()))?;
+            Ok(())
+        }
+
+        fn set_command_handler(&self, handler: Box<dyn Fn(MediaCommand) + Send + Sync>) {
+            match self.estado.manejador.lock() {
+                Ok(mut g) => *g = Some(handler),
+                Err(e) => warn!(error = %e, "no se pudo instalar el manejador multimedia (MPRIS)"),
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub use linux::IntegracionMpris;
+
 /// Construye la integración multimedia para esta ventana.
 ///
 /// Devuelve [`SinIntegracion`] si el sistema no la concede. **No falla**: que
-/// el panel de Windows no aparezca no es motivo para que la música no suene.
+/// el panel del sistema no aparezca no es motivo para que la música no
+/// suene.
+///
+/// `hwnd` solo lo usa Windows; en Linux, MPRIS no se ata a ninguna ventana.
 #[must_use]
-pub fn integracion(hwnd: isize) -> std::sync::Arc<dyn SystemMediaIntegration> {
+pub async fn integracion(hwnd: isize) -> std::sync::Arc<dyn SystemMediaIntegration> {
     #[cfg(windows)]
     {
         match win::ControlesWindows::nuevo(hwnd) {
@@ -325,6 +820,16 @@ pub fn integracion(hwnd: isize) -> std::sync::Arc<dyn SystemMediaIntegration> {
     }
     #[cfg(not(windows))]
     let _ = hwnd;
+
+    #[cfg(target_os = "linux")]
+    {
+        match linux::IntegracionMpris::nuevo().await {
+            Ok(i) => return std::sync::Arc::new(i),
+            Err(e) => {
+                tracing::warn!(error = %e, "sin MPRIS: panel multimedia no disponible");
+            }
+        }
+    }
 
     std::sync::Arc::new(SinIntegracion)
 }
@@ -356,11 +861,11 @@ mod tests {
         .expect("metadatos");
     }
 
-    #[test]
-    fn una_ventana_invalida_no_tumba_la_aplicacion() {
+    #[tokio::test]
+    async fn una_ventana_invalida_no_tumba_la_aplicacion() {
         // Un HWND que no existe debe degradar a la implementacion nula, no
         // entrar en panico: es exactamente lo que pasaria si la ventana se
         // cerrara entre que se pide y se ata.
-        let _ = integracion(0);
+        let _ = integracion(0).await;
     }
 }

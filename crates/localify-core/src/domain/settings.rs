@@ -269,16 +269,6 @@ pub struct IntegrationSettings {
     /// todos los usuarios aparecerían bajo su nombre.
     #[serde(default)]
     pub discord_client_id: Option<String>,
-    pub lastfm_enabled: bool,
-    pub lastfm_user: Option<String>,
-    /// Si hay clave de API, secreto y sesión guardados.
-    ///
-    /// Derivado del almacén del sistema, nunca persistido: es el mismo trato
-    /// que `SpotifySettings::configured`. Guardarlo en el JSON crearía una
-    /// segunda verdad que se queda a `true` cuando alguien borra la sesión por
-    /// fuera.
-    #[serde(skip)]
-    pub lastfm_connected: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

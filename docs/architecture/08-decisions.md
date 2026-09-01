@@ -422,7 +422,8 @@ poder portarse.
 portar sea una excavación. (3) añade una dependencia que cubre solo parte de lo
 necesario (no cubre la thumbnail toolbar) y limita el control sobre la portada.
 (2) concentra todo `unsafe` y todo `#[cfg]` en un único crate con superficie
-pública mínima: portar a Linux es escribir `linux/mpris.rs` y nada más.
+pública mínima: portar a Linux fue escribir `mod linux` en `media.rs`, sin
+tocar una línea fuera de `localify-platform`.
 
 **Consecuencias.** Una capa de indirección extra en operaciones que ocurren
 como mucho una vez por canción. Coste nulo en la práctica.

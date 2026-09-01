@@ -205,11 +205,18 @@ export function pedirTextoConImagen(
  * `mensaje` es para las acciones destructivas: un título solo puede decir qué
  * se va a hacer, pero no **qué se conserva**, y esa es la mitad que decide.
  * "Borrar todo lo descargado" sin más se lee como "pierdo mis playlists".
+ *
+ * `destructivo` (por defecto `true`) decide dos cosas: el color del botón de
+ * aceptar y dónde arranca el foco. Para "borrar todo" el foco debe empezar en
+ * "cancelar" —no puede resolverse dándole a Enter por inercia—, pero esa misma
+ * cautela en "¿quieres actualizar?" solo estorbaría: ahí no hay nada que
+ * perder por aceptar de más.
  */
 export function confirmar(
     titulo: string,
     aceptar?: string,
     mensaje?: string,
+    destructivo = true,
 ): Promise<boolean> {
   return new Promise((resolver) => {
     const dlg = document.createElement("dialog");
@@ -232,7 +239,7 @@ export function confirmar(
 
     const si = document.createElement("button");
     si.type = "submit";
-    si.className = "boton boton--peligro";
+    si.className = destructivo ? "boton boton--peligro" : "boton";
     si.textContent = aceptar ?? t("common.confirm");
 
     acciones.append(no, si);
@@ -262,8 +269,6 @@ export function confirmar(
     });
 
     dlg.showModal();
-    // El foco arranca en "cancelar": una confirmación destructiva no debe
-    // resolverse dándole a Enter por inercia.
-    no.focus();
+    (destructivo ? no : si).focus();
   });
 }

@@ -315,7 +315,6 @@ flowchart TD
     D -.tarea de fondo.-> H["Purgar .tmp/ huérfanos"]
     D -.tarea de fondo.-> I["Verificar/actualizar sidecars<br/>yt-dlp · ffmpeg"]
     D -.tarea de fondo.-> J["purge_expired() de caché"]
-    D -.tarea de fondo.-> K["Reintentar scrobbles pendientes"]
     D -.tarea de fondo.-> L["Conectar Discord RPC"]
 
     style E fill:#1db954,color:#000

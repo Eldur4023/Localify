@@ -51,8 +51,8 @@ impl EventBus {
         Self { tx }
     }
 
-    /// Nuevo receptor. Cada consumidor (puente, Discord, Last.fm, SMTC) tiene
-    /// el suyo y avanza a su ritmo.
+    /// Nuevo receptor. Cada consumidor (puente, Discord, SMTC) tiene el suyo
+    /// y avanza a su ritmo.
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<DomainEvent> {
         self.tx.subscribe()

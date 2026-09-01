@@ -337,9 +337,6 @@ impl SettingsService for SinBiblioteca {
     async fn test_spotify(&self) -> CoreResult<ProviderStatus> {
         sin_biblioteca()
     }
-    async fn set_lastfm_session(&self, _user: Option<String>) -> CoreResult<Settings> {
-        sin_biblioteca()
-    }
     async fn change_library_path(&self, _path: &Path, _mover: bool) -> CoreResult<Uuid> {
         sin_biblioteca()
     }

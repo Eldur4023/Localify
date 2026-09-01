@@ -172,10 +172,6 @@ Localify/
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── discord.rs
-│   │       ├── lastfm/
-│   │       │   ├── mod.rs
-│   │       │   ├── auth.rs
-│   │       │   └── scrobbler.rs    # cola persistente, reintento offline
 │   │       └── lyrics/
 │   │           ├── mod.rs
 │   │           ├── lrclib.rs

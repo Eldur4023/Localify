@@ -114,7 +114,7 @@ pub struct Settings {
     pub audio: AudioSettings,               // crossfade_ms, eq_profile, gapless, normalización, dispositivo
     pub download: DownloadSettings,         // formato preferido, concurrencia, política de reintentos
     pub spotify: SpotifyCredentials,        // client_id + client_secret (secret cifrado en reposo)
-    pub integrations: IntegrationSettings,  // discord on/off, lastfm sesión
+    pub integrations: IntegrationSettings,  // discord on/off
     pub ui: UiSettings,                     // densidad de lista, vista por defecto
 }
 ```
@@ -534,7 +534,7 @@ descargado, el estado pasa a `Buffering` y se espera; no se falla ni se salta.
 El motor conoce `buffered_ms` y lo expone.
 
 **Eventos.** `TrackChanged`, `PlayStatusChanged`, `VolumeChanged`,
-`RepeatModeChanged`, `ShuffleChanged`, `TrackFinished` (dispara scrobble e
+`RepeatModeChanged`, `ShuffleChanged`, `TrackFinished` (dispara el
 historial).
 
 ---
@@ -827,9 +827,13 @@ En Windows (`localify-platform`):
   la barra de tareas (`ITaskbarList3::ThumbBarAddButtons`), más barra de
   progreso en el icono.
 
-Ambos detrás del trait `SystemMediaIntegration`, con implementación no-op en
-otros SO. Portar a Linux es implementar MPRIS; a macOS,
-`MPNowPlayingInfoCenter`. Cero cambios fuera de ese crate.
+En Linux: **MPRIS** (`org.mpris.MediaPlayer2`, sobre D-Bus vía el crate
+`mpris-server`), que es lo que expone la posición y los metadatos a `playerctl`
+y a los widgets de escritorio que muestran "qué suena".
+
+Los tres detrás del trait `SystemMediaIntegration`, con implementación no-op
+en macOS. Cero cambios fuera de `localify-platform` para portar a una
+plataforma nueva.
 
 Los avisos al usuario (`toast`) son **in-app**, discretos, y usan claves i18n.
 Localify nunca envía notificaciones del sistema por descargas: son invisibles
@@ -837,10 +841,10 @@ por diseño.
 
 ---
 
-## 17. Integrations (Discord · Last.fm)
+## 17. Integrations (Discord, autoactualización)
 
-Ambas son **consumidores del bus de eventos**, no dependencias de ningún
-servicio. Si fallan o se desactivan, nada más se entera.
+Discord es un **consumidor del bus de eventos**, no una dependencia de ningún
+servicio. Si falla o se desactiva, nada más se entera.
 
 **Discord Rich Presence** (named pipe `discord-ipc-N`, protocolo propio):
 actualiza "Escuchando X de Y" con marcas de tiempo. Reintento de conexión con
@@ -857,19 +861,15 @@ Necesita el identificador de una aplicación registrada por el usuario. No se
 puede incrustar uno: sería el de quien compiló, y todo el mundo aparecería bajo
 su nombre.
 
-**Last.fm**: `updateNowPlaying` al empezar y `scrobble` cuando se cumple la
-regla oficial (50 % de la pista o 4 minutos, lo que ocurra antes, con duración
-mínima de 30 s). Esa regla vive en `core::domain::scrobble` y **no es la del
-historial**: aquí una escucha cuenta al 90 %, y usar ese umbral para scrobblear
-dejaría fuera cualquier canción larga. Por eso `TrackFinished` lleva
-`ms_played` además de `completed`.
-
-Requiere clave de API, secreto y una autorización del usuario en el navegador;
-las tres van al almacén del sistema, nunca a SQLite. Los scrobbles se encolan en
-`scrobble_queue` **antes** de intentar enviarlos y se reenvían al recuperar
-conexión: **nunca se pierde un scrobble por estar offline**. Se descarta solo lo
-que Last.fm ya no aceptaría —más de catorce días— y lo que rechaza de forma
-irreversible, que si no atascaría la cola en cada vaciado.
+**Autoactualización** (`localify_integrations::autoupdate`): una comprobación
+por arranque contra `GET /repos/{repo}/releases/latest` de GitHub. Si el tag
+publicado es un semver mayor que `CARGO_PKG_VERSION`, publica
+`DomainEvent::UpdateAvailable { version }` y guarda la URL del release en
+`AppContext::actualizacion_disponible`. El frontend enseña un diálogo con la
+versión; si el usuario acepta, `updates_open_release_page` abre esa URL en el
+navegador — **nunca una que llegue como argumento del comando**, por el mismo
+motivo que `settings_open_external`. No descarga nada ni sustituye el binario
+en marcha.
 
 ---
 

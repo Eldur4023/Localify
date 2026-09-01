@@ -115,26 +115,7 @@ export type HomeSectionDto = {
  */
 key: string, params: Array<[string, string]>, items: HomeItemsDto, };
 
-export type IntegrationSettingsDto = { discordEnabled: boolean, discordClientId: string | null, lastfmEnabled: boolean, lastfmUser: string | null, 
-/**
- * Solo de lectura: dice si hay sesión de Last.fm. Se ignora al recibirlo,
- * porque conectarse no es un ajuste que se cambie con un interruptor.
- */
-lastfmConnected: boolean, };
-
-/**
- * Lo que hace falta para el primer paso de la autenticación de Last.fm.
- *
- * El token no es un secreto: caduca en una hora y solo vale para esta
- * autorización. Viaja al frontend porque el segundo comando lo necesita y
- * guardarlo en el backend obligaría a mantener estado de una conversación que
- * puede quedarse a medias.
- */
-export type LastfmAuthDto = { token: string, 
-/**
- * Página de Last.fm donde el usuario autoriza la aplicación.
- */
-url: string, };
+export type IntegrationSettingsDto = { discordEnabled: boolean, discordClientId: string | null, };
 
 export type LibraryStatsDto = { trackCount: bigint, 
 /**
@@ -154,7 +135,7 @@ failedCount: bigint, };
  * Enum exhaustivo a propósito: añadir un evento obliga a tocar aquí y a
  * regenerar los tipos, en lugar de colarse como una cadena suelta.
  */
-export type LocalifyEvent = { "type": "trackChanged", trackId: string, source: string, } | { "type": "playStatusChanged", status: string, } | { "type": "seeked", trackId: string, positionMs: number, } | { "type": "volumeChanged", volume: number, } | { "type": "repeatModeChanged", mode: string, } | { "type": "shuffleChanged", enabled: boolean, } | { "type": "trackFinished", trackId: string, completed: boolean, msPlayed: number, } | { "type": "queueChanged", revision: bigint, } | { "type": "downloadStarted", trackId: string, } | { "type": "downloadPlayable", trackId: string, } | { "type": "downloadProgress", trackId: string, percent: number, } | { "type": "downloadCompleted", trackId: string, } | { "type": "downloadFailed", trackId: string, reasonKey: string, } | { "type": "availabilityChanged", trackId: string, availability: AvailabilityDto, } | { "type": "libraryChanged", scope: string, } | { "type": "playlistChanged", playlistId: string, kind: string, } | { "type": "playlistImportProgress", importId: string, done: number, total: number, } | { "type": "playlistImportFinished", importId: string, playlistId: string, } | { "type": "scanProgress", scanId: string, done: number, total: number, } | { "type": "searchRemoteReady", queryId: bigint, } | { "type": "settingsChanged", sections: Array<string>, } | { "type": "providerStatusChanged", provider: string, status: ProviderStatusDto, } | { "type": "libraryMoveProgress", moveId: string, done: number, total: number, } | { "type": "libraryPathChanged", path: string, } | { "type": "toast", level: string, messageKey: string, params: Array<[string, string]>, };
+export type LocalifyEvent = { "type": "trackChanged", trackId: string, source: string, } | { "type": "playStatusChanged", status: string, } | { "type": "seeked", trackId: string, positionMs: number, } | { "type": "volumeChanged", volume: number, } | { "type": "repeatModeChanged", mode: string, } | { "type": "shuffleChanged", enabled: boolean, } | { "type": "trackFinished", trackId: string, completed: boolean, msPlayed: number, } | { "type": "queueChanged", revision: bigint, } | { "type": "downloadStarted", trackId: string, } | { "type": "downloadPlayable", trackId: string, } | { "type": "downloadProgress", trackId: string, percent: number, } | { "type": "downloadCompleted", trackId: string, } | { "type": "downloadFailed", trackId: string, reasonKey: string, } | { "type": "availabilityChanged", trackId: string, availability: AvailabilityDto, } | { "type": "libraryChanged", scope: string, } | { "type": "playlistChanged", playlistId: string, kind: string, } | { "type": "playlistImportProgress", importId: string, done: number, total: number, } | { "type": "playlistImportFinished", importId: string, playlistId: string, } | { "type": "scanProgress", scanId: string, done: number, total: number, } | { "type": "searchRemoteReady", queryId: bigint, } | { "type": "settingsChanged", sections: Array<string>, } | { "type": "providerStatusChanged", provider: string, status: ProviderStatusDto, } | { "type": "libraryMoveProgress", moveId: string, done: number, total: number, } | { "type": "libraryPathChanged", path: string, } | { "type": "updateAvailable", version: string, } | { "type": "toast", level: string, messageKey: string, params: Array<[string, string]>, };
 
 export type LyricLineDto = { atMs: number, text: string, };
 

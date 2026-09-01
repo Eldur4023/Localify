@@ -1,8 +1,7 @@
 //! DTOs de configuración.
 //!
-//! **Ningún secreto cruza el puente.** El `client_secret` de Spotify y la
-//! sesión de Last.fm viven en el almacén del sistema; aquí solo se informa de
-//! si están configurados.
+//! **Ningún secreto cruza el puente.** El `client_secret` de Spotify vive en
+//! el almacén del sistema; aquí solo se informa de si está configurado.
 
 use localify_core::domain::audio::{AudioDevice, EqProfile};
 use localify_core::domain::settings::{
@@ -215,33 +214,12 @@ pub struct SpotifySettingsDto {
     pub client_id: Option<String>,
 }
 
-/// Lo que hace falta para el primer paso de la autenticación de Last.fm.
-///
-/// El token no es un secreto: caduca en una hora y solo vale para esta
-/// autorización. Viaja al frontend porque el segundo comando lo necesita y
-/// guardarlo en el backend obligaría a mantener estado de una conversación que
-/// puede quedarse a medias.
-#[derive(Debug, Clone, Serialize, TS)]
-#[ts(export, export_to = "types.gen.ts")]
-#[serde(rename_all = "camelCase")]
-pub struct LastfmAuthDto {
-    pub token: String,
-    /// Página de Last.fm donde el usuario autoriza la aplicación.
-    pub url: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "types.gen.ts")]
 #[serde(rename_all = "camelCase")]
 pub struct IntegrationSettingsDto {
     pub discord_enabled: bool,
     pub discord_client_id: Option<String>,
-    pub lastfm_enabled: bool,
-    pub lastfm_user: Option<String>,
-    /// Solo de lectura: dice si hay sesión de Last.fm. Se ignora al recibirlo,
-    /// porque conectarse no es un ajuste que se cambie con un interruptor.
-    #[serde(default)]
-    pub lastfm_connected: bool,
 }
 
 impl From<IntegrationSettings> for IntegrationSettingsDto {
@@ -249,9 +227,6 @@ impl From<IntegrationSettings> for IntegrationSettingsDto {
         Self {
             discord_enabled: i.discord_enabled,
             discord_client_id: i.discord_client_id,
-            lastfm_enabled: i.lastfm_enabled,
-            lastfm_user: i.lastfm_user,
-            lastfm_connected: i.lastfm_connected,
         }
     }
 }
@@ -261,11 +236,6 @@ impl From<IntegrationSettingsDto> for IntegrationSettings {
         Self {
             discord_enabled: i.discord_enabled,
             discord_client_id: i.discord_client_id,
-            lastfm_enabled: i.lastfm_enabled,
-            lastfm_user: i.lastfm_user,
-            // Nunca viene del frontend: lo decide el almacén de secretos y lo
-            // rellena el servicio de ajustes al leer.
-            lastfm_connected: false,
         }
     }
 }
