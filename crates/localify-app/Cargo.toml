@@ -33,6 +33,7 @@ localify-musicbrainz = { workspace = true }
 localify-services = { workspace = true }
 
 async-trait = { workspace = true }
+axum = { workspace = true }
 tauri = { workspace = true }
 tauri-plugin-dialog = { workspace = true }
 tokio = { workspace = true }

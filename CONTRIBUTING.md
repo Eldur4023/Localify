@@ -67,6 +67,33 @@ hold in your head:
 
 ---
 
+## Running headless, and controlling it from outside
+
+```
+localify              # normal launch: window opens
+localify --headless   # no window at all, plays and stays in the background
+localify               # (while an instance is already running) shows/creates its window and exits
+localify --quit        # (while an instance is already running) asks it to actually exit, and exits
+```
+
+Closing the window never quits the app — the audio engine, MPRIS/SMTC and the
+control API all run independent of any window, and `bootstrap::run`'s
+`RunEvent::ExitRequested` handler only lets the process die when the exit was
+requested programmatically (`code: Some(_)`, from `AppHandle::exit`), never
+when it's just the last window closing (`code: None`). The only way to
+actually quit is `--quit`.
+
+A second launch that finds the single-instance lock already held never starts
+a competing backend: it sends a one-line `POST` to
+`127.0.0.1:51000/window/show` or `/app/quit` (see
+[`docs/architecture/06-api.md`](docs/architecture/06-api.md#12-api-de-control-local-http))
+and exits. That's also the HTTP surface a Waybar module, a Stream Deck, or any
+other external script talks to — `/player/play`, `/pause`, `/toggle`,
+`/next`, `/previous`, `/seek`, `/player/state`. Loopback only, no auth: same
+trust boundary as any other process running as you on your own machine.
+
+---
+
 ## Invariants
 
 These are not style preferences. Breaking one is a bug even if everything

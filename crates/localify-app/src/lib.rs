@@ -23,6 +23,7 @@ pub mod bootstrap;
 pub mod bridge;
 pub mod commands;
 pub mod context;
+pub mod control_api;
 pub mod credenciales;
 pub mod dto;
 pub mod logging;

@@ -4,6 +4,15 @@
 //! bloquea la aparición de la interfaz: los sidecars, la purga de temporales y
 //! el mantenimiento de la base de datos se lanzan como tareas de fondo una vez
 //! la ventana ya está en pantalla.
+//!
+//! ## `--headless`
+//!
+//! Cerrar la ventana **nunca** mata el proceso: la reproducción, MPRIS, SMTC
+//! y la API de control siguen vivos sin ella (ver el manejo de
+//! `RunEvent::ExitRequested` al final de [`run`]). `--headless` solo decide
+//! si esa ventana se crea al arrancar; `--quit` y un lanzamiento sin
+//! argumentos, dirigidos a una instancia que ya está en marcha, son las dos
+//! formas de hablarle desde fuera (ver [`avisar_a_la_instancia_en_marcha`]).
 
 use std::sync::Arc;
 
@@ -12,9 +21,39 @@ use localify_core::ports::platform::AppPaths;
 use localify_platform::{LocalifyPaths, adquirir_instancia};
 use tracing::{debug, error, info, warn};
 
+/// Los dos únicos flags que entiende la línea de órdenes.
+///
+/// Nada de una dependencia para dos banderas: `--headless` arranca sin
+/// ventana, `--quit` le pide a la instancia que ya corre que cierre de
+/// verdad. Cualquier otro argumento se ignora en silencio.
+struct Argumentos {
+    headless: bool,
+    quit: bool,
+}
+
+impl Argumentos {
+    fn desde_entorno() -> Self {
+        let mut headless = false;
+        let mut quit = false;
+        for arg in std::env::args().skip(1) {
+            match arg.as_str() {
+                "--headless" => headless = true,
+                "--quit" => quit = true,
+                _ => {}
+            }
+        }
+        Self { headless, quit }
+    }
+}
+
 /// Arranca la aplicación.
+#[allow(
+    clippy::too_many_lines,
+    reason = "cablea una docena de tareas de fondo independientes; partirla oscurecería el orden de arranque, no lo aclararía"
+)]
 pub fn run() {
     let inicio = std::time::Instant::now();
+    let args = Argumentos::desde_entorno();
 
     let paths = match LocalifyPaths::detectar() {
         Ok(p) => p,
@@ -39,13 +78,10 @@ pub fn run() {
     }
 
     // Dos instancias compartiendo base de datos y dispositivo de audio no es un
-    // escenario a soportar. Se rechaza antes de tocar nada.
-    let _instancia = match adquirir_instancia() {
-        Ok(g) => g,
-        Err(e) => {
-            warn!(error = %e, "ya hay otra instancia en ejecución; saliendo");
-            return;
-        }
+    // escenario a soportar. Si ya hay una, esta invocación no arranca nada
+    // propio: le pasa el aviso y termina.
+    let Some(_instancia) = adquirir_o_avisar(&args) else {
+        return;
     };
 
     info!(
@@ -68,6 +104,8 @@ pub fn run() {
     let binarios_ytdlp = paths.binaries_dir();
     let actualizacion_disponible = Arc::clone(&contexto.actualizacion_disponible);
     let eventos_actualizacion: Arc<dyn EventPublisher> = Arc::new(bus.clone());
+    let playback_control_api = Arc::clone(&contexto.playback);
+    let headless = args.headless;
 
     let builder = crate::registrar_comandos!(tauri::Builder::default())
         // Las portadas se sirven por su propio esquema en vez de por el
@@ -94,6 +132,15 @@ pub fn run() {
         .setup(move |app| {
             // El puente traduce eventos del dominio y los emite al WebView.
             crate::bridge::arrancar(app.handle().clone(), &bus);
+
+            // `--headless`: no se crea ninguna ventana. `mostrar_ventana`
+            // sabe crearla bajo demanda —desde `/window/show`— con la misma
+            // configuración declarativa de `tauri.conf.json`, así que no
+            // arrancar aquí no es un caso especial, es simplemente no llamar
+            // a la misma función todavía.
+            if !headless && let Err(e) = mostrar_ventana(app.handle()) {
+                error!(error = %e, "no se pudo crear la ventana principal");
+            }
 
             // El panel multimedia se ata a la ventana en Windows, así que ahí
             // solo se puede pedir una vez existe; en Linux, MPRIS no depende
@@ -166,13 +213,136 @@ pub fn run() {
                 ));
             }
 
+            // API de control local para procesos externos (scripts, mandos
+            // físicos, atajos personalizados): pausar, reanudar, saltar de
+            // pista y leer el estado por HTTP en 127.0.0.1. Igual que las
+            // demás integraciones, si no puede arrancar —el puerto ya está
+            // en uso— se avisa y la reproducción sigue igual. También es
+            // quien atiende `/window/show` y `/app/quit`: por eso necesita el
+            // `AppHandle`, no solo el reproductor.
+            tauri::async_runtime::spawn(crate::control_api::arrancar(
+                playback_control_api,
+                app.handle().clone(),
+            ));
+
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .unwrap_or_else(|e| {
             error!(error = %e, "fallo irrecuperable de Tauri");
             std::process::exit(1);
+        })
+        .run(|_app_handle, event| {
+            // Cerrar la última ventana dispara esto con `code: None`. Sin
+            // interceptarlo, Tauri sale del proceso entero —adiós motor de
+            // audio, MPRIS y la API de control— por el gesto de cerrar un
+            // WebView. `code` viene `Some(_)` solo cuando alguien pidió salir
+            // de verdad con `AppHandle::exit` (nuestro `/app/quit`), y ahí sí
+            // se deja seguir.
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = event
+                && code.is_none()
+            {
+                api.prevent_exit();
+            }
         });
+}
+
+/// Manda un `POST` sin cuerpo a la API de control de la instancia que ya
+/// está corriendo, y no espera nada más que la conexión.
+///
+/// Deliberadamente mínimo: esta invocación del binario no llega a construir
+/// ningún runtime asíncrono —se detiene nada más comprobar el bloqueo de
+/// instancia única—, así que tirar de `reqwest` aquí sería levantar toda una
+/// pila async para una petición de una línea. Un `TcpStream` a mano hace lo
+/// mismo con menos.
+/// Adquiere el bloqueo de instancia única, o atiende lo que corresponda si ya
+/// hay una corriendo.
+///
+/// `None` significa que esta invocación ya terminó su trabajo —avisó a la
+/// instancia existente, o `--quit` no tenía nada que cerrar— y `run` debe
+/// volver sin construir nada más.
+fn adquirir_o_avisar(args: &Argumentos) -> Option<localify_platform::InstanceGuard> {
+    match adquirir_instancia() {
+        Ok(guardia) => {
+            // Sin ninguna instancia en marcha, `--quit` no tiene nada que
+            // cerrar.
+            if args.quit {
+                info!("--quit sin ninguna instancia en marcha: nada que hacer");
+                return None;
+            }
+            Some(guardia)
+        }
+        Err(e) => {
+            // `--headless` combinado con una instancia existente no pide
+            // nada —no tiene sentido abrir una ventana que nadie pidió
+            // ver—, así que no manda nada.
+            warn!(error = %e, "ya hay otra instancia en ejecución");
+            if !args.headless {
+                avisar_a_la_instancia_en_marcha(if args.quit {
+                    "/app/quit"
+                } else {
+                    "/window/show"
+                });
+            }
+            None
+        }
+    }
+}
+
+fn avisar_a_la_instancia_en_marcha(ruta: &str) {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let intento = (|| -> std::io::Result<()> {
+        let mut conexion = TcpStream::connect(("127.0.0.1", crate::control_api::PUERTO))?;
+        conexion.set_read_timeout(Some(Duration::from_secs(3)))?;
+        write!(
+            conexion,
+            "POST {ruta} HTTP/1.1\r\n\
+             Host: 127.0.0.1\r\n\
+             Content-Length: 0\r\n\
+             Connection: close\r\n\r\n"
+        )?;
+        // No interesa la respuesta, solo que la petición salga; leer hasta
+        // el cierre es lo que garantiza que el servidor la procesó antes de
+        // que este proceso termine.
+        let mut respuesta = Vec::new();
+        conexion.read_to_end(&mut respuesta)?;
+        Ok(())
+    })();
+
+    match intento {
+        Ok(()) => info!(ruta, "aviso enviado a la instancia en marcha"),
+        Err(e) => warn!(error = %e, ruta, "no se pudo avisar a la instancia en marcha"),
+    }
+}
+
+/// Muestra la ventana principal, creándola si hace falta.
+///
+/// Cubre dos casos con el mismo código: el arranque normal (la ventana no
+/// existe todavía) y `/window/show` sobre una instancia que arrancó en
+/// `--headless` o que ya la había cerrado. La configuración —tamaño, tema,
+/// color de fondo— sale de `tauri.conf.json`, la misma que usaría Tauri si
+/// no le hubiéramos puesto `"create": false` para poder decidir esto a mano.
+///
+/// # Errors
+/// Si Tauri no puede construir o enfocar la ventana.
+pub(crate) fn mostrar_ventana(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::Manager;
+
+    if let Some(ventana) = app.get_webview_window("main") {
+        ventana.show()?;
+        ventana.set_focus()?;
+        return Ok(());
+    }
+
+    let Some(config) = app.config().app.windows.first() else {
+        return Ok(());
+    };
+    let ventana = tauri::WebviewWindowBuilder::from_config(app, config)?.build()?;
+    ventana.set_focus()?;
+    Ok(())
 }
 
 /// Espera antes del primer repaso de la base de datos.

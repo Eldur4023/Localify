@@ -423,7 +423,44 @@ type LocalifyEvent =
 
 ---
 
-## 12. Seguridad y permisos (Tauri v2)
+## 12. API de control local (HTTP)
+
+Servidor HTTP aparte del puente Tauri, en `localify-app::control_api`, para
+procesos **externos**: scripts, widgets de barra (Waybar), mandos físicos.
+Arranca solo, como Discord o MPRIS —si el puerto está ocupado, se avisa y
+la aplicación sigue igual—.
+
+- **`127.0.0.1:51000`, sin más.** Nunca `0.0.0.0`. Sin contraseña ni token:
+  es la misma confianza que ya existe entre procesos de un mismo usuario en
+  la misma máquina. Sin cabeceras CORS, así que una pestaña de navegador no
+  puede usarlo aunque lo intente.
+
+| Ruta | Método | Cuerpo | Devuelve |
+|---|---|---|---|
+| `/player/state` | GET | — | `PlayerStateDto` |
+| `/player/play` | POST | — | `PlayerStateDto` |
+| `/player/pause` | POST | — | `PlayerStateDto` |
+| `/player/toggle` | POST | — | `PlayerStateDto` |
+| `/player/next` | POST | — | `PlayerStateDto` |
+| `/player/previous` | POST | — | `PlayerStateDto` (< 3 s reproducidos → pista anterior; si no, reinicia la actual) |
+| `/player/seek` | POST | `{ "positionMs": number }` | `PlayerStateDto` |
+| `/window/show` | POST | — | 204, crea o muestra la ventana |
+| `/app/quit` | POST | — | 204, cierra la aplicación de verdad |
+
+Los errores del reproductor llegan como `ApiError` (el mismo DTO que usan los
+comandos de Tauri) con el código HTTP correspondiente a `ApiError.code`
+(`NOT_FOUND`→404, `INVALID`→400, `CONFLICT`→409, `RATE_LIMITED`→429,
+`NOT_CONFIGURED`→412, `SHUTTING_DOWN`→503, cualquier otro→500).
+
+`/window/show` y `/app/quit` son también el mecanismo de `--headless` y
+`--quit`: un segundo lanzamiento del binario, al encontrar el bloqueo de
+instancia única ya tomado, le manda un `POST` sin cuerpo a una de las dos
+rutas y termina. Ver `bootstrap::avisar_a_la_instancia_en_marcha` y la nota
+`--headless` al principio de `bootstrap.rs`.
+
+---
+
+## 13. Seguridad y permisos (Tauri v2)
 
 `capabilities/default.json` concede el mínimo estricto:
 
@@ -443,7 +480,7 @@ Rust, donde se controlan cabeceras, timeouts y rate limits.
 
 ---
 
-## 13. Versionado
+## 14. Versionado
 
 `api_version()` devuelve un `semver`. El frontend lo comprueba al arrancar y
 avisa si es incompatible (escenario real cuando en el futuro haya frontends

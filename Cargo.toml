@@ -80,6 +80,9 @@ refinery = { version = "0.9", default-features = false, features = ["rusqlite"] 
 
 # Red (Fase 5)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+# API de control local (127.0.0.1 solamente): reutiliza el hyper/tower que
+# Tauri ya trae, no añade una segunda pila HTTP al binario.
+axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1"] }
 
 # Audio (Fase 7)
 cpal = "0.15"
