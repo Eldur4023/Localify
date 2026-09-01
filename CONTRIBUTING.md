@@ -246,6 +246,53 @@ instalado` until you run it.
 `libasound2t64 | libasound2`: the `t64` name only exists on Ubuntu 24.04 and
 later, and without the alternative the package won't install on Debian 12.
 
+### The self-contained build (no distro dependencies)
+
+The `.deb` still depends on the target system already having WebKitGTK, GTK and
+their chain. For a build that needs **nothing** pre-installed, ship the AppImage
+payload as a plain directory instead of the AppImage itself: AppImages need
+FUSE to mount, and `libfuse2` isn't installed by default past Ubuntu 22.04. The
+payload — the extracted tree — doesn't need FUSE; only mounting the compressed
+`.AppImage` file does.
+
+```bash
+cd crates/localify-app
+cargo tauri build --bundles appimage
+cd ~ && rm -rf sq && mkdir sq && cd sq
+~/localify/target/release/bundle/appimage/Localify_*.AppImage --appimage-extract
+```
+
+That gives `squashfs-root/`: `AppRun` (a script that sources the GTK theme
+hook, then execs `AppRun.wrapped`), `AppRun.wrapped` (linuxdeploy's static
+launcher — it sets `LD_LIBRARY_PATH` etc. relative to its own location and
+execs the real binary), `usr/bin/localify`, and `usr/lib/` with all ~165
+bundled libraries. **`Localify.desktop` and `Localify.png` at the root have to
+stay** — `AppRun.wrapped` looks them up by path next to itself and aborts with
+`Error: No .desktop files found` if they're gone; only the stray lowercase
+`localify.png` duplicate is safe to drop.
+
+`scripts/instalar-linux.sh` packages that tree: copy `squashfs-root/` as `app/`
+next to the script, plus `fetch-sidecars.sh`, and tar it —
+`localify-1.0.0-linux-x86_64.tar.gz`, about 100 MB. Running it does three
+things, and nothing else:
+
+- copies `app/` to `/opt/localify` (`sudo ./instalar.sh`) or
+  `~/.local/lib/localify` (`./instalar.sh --user`)
+- writes a one-line wrapper — `exec "$DEST/AppRun" "$@"` — to
+  `/usr/local/bin/localify` or `~/.local/bin/localify`. It's a wrapper script,
+  not a symlink: `AppRun` resolves its own directory with `readlink -f
+  "$(dirname "$0")"`, and a symlink would resolve that to the *bin* directory,
+  where none of the libraries are.
+- registers a `.desktop` entry and icons, and warns if the target `bin/` isn't
+  on `PATH`
+
+`--desinstalar` reverses all three and says explicitly that `~/.config/Localify`
+and `~/Music/Localify` are untouched. Verified end to end: `--user` and
+system-wide installs, launching through the installed `localify` command (not
+just running the binary directly — that would skip the wrapper and miss a
+`readlink` bug entirely), and a clean uninstall with nothing left in
+`/opt`, `/usr/local/bin` or `/usr/share/applications`.
+
 Four things differ from Windows, and each is `cfg`-gated in `localify-platform`
 or in the Discord transport:
 
