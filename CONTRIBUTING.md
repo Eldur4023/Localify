@@ -209,11 +209,32 @@ sudo apt install build-essential curl wget file pkg-config libssl-dev \
 cargo build --release -p localify-app
 ```
 
-For a `.deb`, from `crates/localify-app`:
+### Build the `.deb` on the oldest glibc you want to support
+
+**This is not optional, and it is the one thing about packaging that is easy to
+get wrong.** glibc is backwards compatible, never forwards: a binary linked
+against 2.43 refuses to start on 2.39. Build on a new distro and the package
+only runs on that distro.
+
+Ubuntu 22.04 gives glibc 2.35, and the binary comes out needing at most
+**GLIBC_2.34** — enough for Ubuntu 22.04+, Debian 12+, RHEL 9+ and Fedora 35+.
+Built on Ubuntu 26.04 it demanded 2.43, over two symbols that Rust's standard
+library only uses when the build host has them: `pidfd_spawnp` and
+`pidfd_getpid`.
 
 ```bash
+cargo build --release -p localify-app   # build.rs generates frontend/dist,
+                                        # which `cargo tauri build` checks for
+                                        # before it runs cargo at all
+cd crates/localify-app
 cargo install tauri-cli --version "^2" --locked
 cargo tauri build --bundles deb
+```
+
+Check what you produced, every time:
+
+```bash
+objdump -T target/release/localify | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
 ```
 
 It installs the binary, a `.desktop` entry and icons at four sizes — **not the
