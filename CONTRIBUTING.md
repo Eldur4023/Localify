@@ -92,6 +92,18 @@ other external script talks to — `/player/play`, `/pause`, `/toggle`,
 `/next`, `/previous`, `/seek`, `/player/state`. Loopback only, no auth: same
 trust boundary as any other process running as you on your own machine.
 
+### `exec-once = localify --headless` can race the sound server
+
+Launching this early in a Wayland compositor's session start means the audio
+engine may try to open the output device **before PipeWire/WirePlumber has
+finished coming up**. `localify-audio::engine::salida` retries the initial
+device open for about 7.5s (`REINTENTOS_APERTURA_INICIAL` in `salida.rs`)
+before giving up, which covers most of these races on its own. If your
+session is slow enough that it doesn't, the config-level fix is ordering:
+prefer a systemd user service with `After=pipewire.service
+wireplumber.service`, or a short `exec-once = sleep 2 && localify --headless`
+as a blunter fallback.
+
 ---
 
 ## Invariants
@@ -106,7 +118,13 @@ disk already.
 
 **Audio paths never cross the IPC bridge.** They're stored relative to the
 library folder ([ADR-018](docs/architecture/08-decisions.md)) and resolved in
-Rust. Covers are addressed by identifier through the `cover://` scheme.
+Rust. Covers are addressed by identifier through the `cover://` scheme —
+requested from the frontend as `http://cover.localhost/…` first, falling back
+to `cover://localhost/…` on error (`asignarSrcConRespaldo` in
+`frontend/src/ui/cards.ts`), because Tauri serves a custom scheme differently
+per platform (Windows/Android vs. macOS/Linux — see the doc comment on
+`register_uri_scheme_protocol` in the `tauri` crate). Hardcoding one form
+broke covers on Linux while working fine on Windows, silently.
 
 **Secrets go to the secret store the system already has** — DPAPI on Windows,
 the Secret Service on Linux. Never SQLite, never the bridge, never the logs.

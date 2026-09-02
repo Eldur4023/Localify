@@ -13,6 +13,37 @@
 
 import { icono, type Icono } from "./icons.js";
 
+/**
+ * Pone `ruta` como fuente de una portada, probando las dos formas en que
+ * Tauri sirve un esquema propio según la plataforma.
+ *
+ * Windows y Android lo sirven como `http://<esquema>.localhost/<ruta>`;
+ * macOS y Linux, como `<esquema>://localhost/<ruta>` — está documentado así
+ * en el propio código fuente de Tauri, en el aviso de
+ * `register_uri_scheme_protocol`. Detectar el sistema operativo desde JS
+ * para elegir una sola forma añadiría una dependencia solo para esto; probar
+ * la de Windows primero y caer a la otra al fallar cubre las dos sin
+ * necesitarla, porque la que no es la de la plataforma actual falla limpio
+ * y al instante, no a medias ni con contenido equivocado.
+ *
+ * `siFallaDelTodo` solo se llama si **ninguna** de las dos formas cargó: ni
+ * hay portada, ni es un problema de plataforma.
+ */
+function asignarSrcConRespaldo(
+  img: HTMLImageElement,
+  ruta: string,
+  siFallaDelTodo: () => void,
+): void {
+  img.onerror = () => {
+    img.onerror = () => {
+      img.onerror = null;
+      siFallaDelTodo();
+    };
+    img.src = `cover://localhost/${ruta}`;
+  };
+  img.src = `http://cover.localhost/${ruta}`;
+}
+
 /** Filas de tarjetas, con desplazamiento horizontal. */
 export function carrusel(titulo: string): {
   el: HTMLElement;
@@ -87,15 +118,11 @@ function ponerImagen(hueco: HTMLElement, ruta: string): void {
   img.decoding = "async";
   // Veinte tarjetas en pantalla y cien fuera: sin esto se pedirían todas.
   img.loading = "lazy";
-  // En Windows, Tauri sirve los esquemas propios en `http://<esquema>.localhost`,
-  // no como `esquema://`: escribirlo de la segunda forma deja la imagen sin
-  // resolver y sin ningún error visible. El CSP tiene ese origen permitido.
-  img.src = `http://cover.localhost/${ruta}`;
-
   // Hasta que carga no se muestra, para que el icono no salte a la imagen con
-  // un parpadeo intermedio. Si falla, se queda el icono y ya está.
+  // un parpadeo intermedio. Si falla de verdad —ni portada, ni problema de
+  // plataforma—, se queda el icono y ya está.
   img.addEventListener("load", () => img.classList.add("is-lista"));
-  img.addEventListener("error", () => img.remove());
+  asignarSrcConRespaldo(img, ruta, () => img.remove());
 
   hueco.append(img);
 }
@@ -260,9 +287,12 @@ export function ponerImagenDePlaylist(hueco: HTMLElement, p: ImagenDePlaylist): 
     img.className = "portada";
     img.alt = "";
     img.decoding = "async";
-    img.src = `http://cover.localhost/playlist/${encodeURIComponent(p.id)}?v=${p.updatedAt}`;
     img.addEventListener("load", () => img.classList.add("is-lista"));
-    img.addEventListener("error", () => img.remove());
+    asignarSrcConRespaldo(
+      img,
+      `playlist/${encodeURIComponent(p.id)}?v=${p.updatedAt}`,
+      () => img.remove(),
+    );
     hueco.append(img);
     return;
   }
@@ -317,9 +347,6 @@ export function comienzoReciclable(): ComienzoReciclable {
   img.alt = "";
   img.decoding = "async";
   img.addEventListener("load", () => img.classList.add("is-lista"));
-  // Al fallar se queda el icono debajo, que para eso está. La etiqueta no se
-  // quita: este nodo tiene que seguir sirviendo para la siguiente canción.
-  img.addEventListener("error", () => img.classList.remove("is-lista"));
   arte.append(img);
 
   let puesto: string | null = null;
@@ -340,10 +367,16 @@ export function comienzoReciclable(): ComienzoReciclable {
 
       img.classList.remove("is-lista");
       if (ruta === null) {
+        img.onerror = null;
         img.removeAttribute("src");
         return;
       }
-      img.src = `http://cover.localhost/${ruta}`;
+      // Al fallar se queda el icono debajo, que para eso está. La etiqueta
+      // no se quita: este nodo tiene que seguir sirviendo para la siguiente
+      // canción. `asignarSrcConRespaldo` reemplaza `onerror` en cada llamada,
+      // así que reciclar el nodo para otra pista no arrastra el fallo del
+      // anterior.
+      asignarSrcConRespaldo(img, ruta, () => img.classList.remove("is-lista"));
     },
   };
 }

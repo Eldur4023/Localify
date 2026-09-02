@@ -121,8 +121,12 @@ impl Salida {
             .map_err(|e| AudioError::NoDevice.tap(e))?;
 
         // Se espera a la primera construcción: si no hay dispositivo, es mejor
-        // saberlo aquí que descubrirlo cuando el usuario pulse play.
-        match aviso_rx.recv_timeout(Duration::from_secs(5)) {
+        // saberlo aquí que descubrirlo cuando el usuario pulse play. El tope
+        // deja margen a los reintentos de `abrir` (`REINTENTOS_APERTURA_INICIAL`
+        // más abajo): sin él, un dispositivo que tarda en aparecer -PipeWire
+        // arrancando a la vez que Localify, por `exec-once`- se reportaría
+        // como ausente aunque el hilo lo consiguiera un instante después.
+        match aviso_rx.recv_timeout(Duration::from_secs(8)) {
             Ok(Ok(())) => Ok(Self {
                 ordenes: tx,
                 estado,
@@ -289,7 +293,31 @@ fn marcos_maximos_de(config: &cpal::SupportedStreamConfig) -> usize {
     .clamp(64, 16_384)
 }
 
+/// Cuántas veces se reintenta la apertura inicial antes de rendirse, y cada
+/// cuánto. 25 × 300 ms ≈ 7,5 s: se queda por debajo de los 8 s que espera
+/// `Salida::arrancar` (`aviso_rx.recv_timeout`), para no tener éxito después
+/// de que quien llama ya haya desistido.
+const REINTENTOS_APERTURA_INICIAL: u32 = 25;
+const ESPERA_ENTRE_REINTENTOS: Duration = Duration::from_millis(300);
+
 /// Elige dispositivo, negocia configuración y arranca el stream.
+///
+/// Si el primer intento falla, reintenta con `reabrir` —el mismo camino que
+/// ya existe para cuando el dispositivo desaparece en marcha— antes de
+/// rendirse. `construir` es `FnOnce`: solo puede llamarse una vez, así que el
+/// mezclador se fabrica aquí, con la configuración del primer intento, y los
+/// reintentos posteriores lo reconfiguran en vez de reconstruirlo.
+///
+/// ## Por qué hace falta
+///
+/// `elegir` puede encontrar el dispositivo en la enumeración —el sistema ya
+/// sabe que existe— antes de que el servidor de sonido (PipeWire, PulseAudio)
+/// termine de dejarlo listo para abrir un stream de verdad. Es exactamente lo
+/// que pasa al lanzar Localify muy pronto en el inicio de sesión, por
+/// ejemplo con `exec-once = localify --headless` en un compositor Wayland:
+/// sin reintento, esa carrera se traduce en "sin dispositivo de audio" para
+/// el resto de la sesión, aunque el dispositivo esté listo un segundo
+/// después.
 fn abrir<F>(
     id: Option<&str>,
     estado: &Arc<EstadoSalida>,
@@ -300,11 +328,42 @@ where
 {
     let (dispositivo, config) = elegir(id)?;
     let sample_rate = config.sample_rate();
-
     let mezclador = construir(sample_rate, marcos_maximos_de(&config));
-    let stream = montar(&dispositivo, &config, &mezclador, estado)?;
-    anotar(estado, &dispositivo, sample_rate);
-    Ok((stream, mezclador))
+
+    match montar(&dispositivo, &config, &mezclador, estado) {
+        Ok(stream) => {
+            anotar(estado, &dispositivo, sample_rate);
+            Ok((stream, mezclador))
+        }
+        Err(e) => {
+            warn!(error = %e, "el primer intento de abrir el dispositivo falló; reintentando");
+            let stream = reintentar_apertura(id, estado, &mezclador)?;
+            Ok((stream, mezclador))
+        }
+    }
+}
+
+/// Reintenta `reabrir` a intervalos cortos. Ver [`abrir`] para el motivo.
+fn reintentar_apertura(
+    id: Option<&str>,
+    estado: &Arc<EstadoSalida>,
+    mezclador: &Arc<Mutex<Mezclador>>,
+) -> Result<cpal::Stream, AudioError> {
+    for intento in 1..=REINTENTOS_APERTURA_INICIAL {
+        std::thread::sleep(ESPERA_ENTRE_REINTENTOS);
+        match reabrir(id, estado, mezclador) {
+            Ok(stream) => {
+                info!(
+                    intento,
+                    "dispositivo de audio listo tras esperar al servidor de sonido"
+                );
+                return Ok(stream);
+            }
+            Err(e) if intento == REINTENTOS_APERTURA_INICIAL => return Err(e),
+            Err(_) => {}
+        }
+    }
+    Err(AudioError::NoDevice)
 }
 
 /// Reconstruye el stream conservando el mezclador y todo su estado.
