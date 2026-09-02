@@ -50,7 +50,8 @@
       "deb": {
         "depends": [
           "libasound2t64 | libasound2",
-          "libsecret-1-0"
+          "libsecret-1-0",
+          "libayatana-appindicator3-1 | libappindicator3-1"
         ]
       }
     }

@@ -142,24 +142,32 @@ pub fn run() {
                 error!(error = %e, "no se pudo crear la ventana principal");
             }
 
-            // El panel multimedia se ata a la ventana en Windows, así que ahí
-            // solo se puede pedir una vez existe; en Linux, MPRIS no depende
-            // de ninguna ventana y arranca siempre. Si el sistema no lo
-            // concede, la integración se queda inerte y la reproducción
-            // funciona igual.
+            // Arranca siempre, con o sin ventana: en Linux, MPRIS no depende
+            // de ninguna; en Windows, sin HWND —`--headless`, o la ventana
+            // se cerró antes de llegar aquí, que no puede pasar pero da
+            // igual— `integracion_multimedia` cae sola a `SinIntegracion`.
+            // Antes esto se saltaba entero sin ventana en Windows, y con
+            // ello se perdía SMTC para el resto de la sesión aunque
+            // `/window/show` la creara después.
             let hwnd = hwnd_principal(app);
-            if hwnd.is_some() || !cfg!(windows) {
-                tauri::async_runtime::spawn(crate::multimedia::arrancar(
-                    hwnd.unwrap_or(0),
-                    playback,
-                    metadata_smtc,
-                    bus.clone(),
-                ));
-            } else {
-                warn!("sin ventana principal: no hay panel multimedia");
-            }
+            tauri::async_runtime::spawn(crate::multimedia::arrancar(
+                hwnd.unwrap_or(0),
+                playback,
+                metadata_smtc,
+                bus.clone(),
+            ));
 
             abrir_devtools(app);
+
+            // Única señal de que Localify sigue vivo sin ventana: cerrarla ya
+            // no mata el proceso (ver `RunEvent::ExitRequested` más abajo), y
+            // sin esto no habría forma de saberlo ni de recuperarlo salvo por
+            // `localify --quit`. Si el icono no se puede crear —sistema sin
+            // bandeja, o sin `libayatana-appindicator3` en Linux— se avisa y
+            // se sigue: no es motivo para no arrancar.
+            if let Err(e) = arrancar_bandeja(app) {
+                warn!(error = %e, "sin icono de bandeja");
+            }
 
             info!(ms = inicio.elapsed().as_millis(), "ventana lista");
 
@@ -342,6 +350,57 @@ pub(crate) fn mostrar_ventana(app: &tauri::AppHandle) -> tauri::Result<()> {
     };
     let ventana = tauri::WebviewWindowBuilder::from_config(app, config)?.build()?;
     ventana.set_focus()?;
+    Ok(())
+}
+
+/// Crea el icono de la bandeja del sistema.
+///
+/// Dos entradas y nada más: "Mostrar" llama a lo mismo que `/window/show`, y
+/// "Salir" a lo mismo que `/app/quit`. En Windows, el clic izquierdo directo
+/// sobre el icono también muestra la ventana —el menú es para el derecho—;
+/// en Linux esa distinción no existe (`TrayIconEvent` no se emite ahí, según
+/// la propia documentación de Tauri), así que el menú es el único camino, y
+/// se llega a él con cualquier botón.
+///
+/// # Errors
+/// Si Tauri no puede crear el icono o el menú.
+fn arrancar_bandeja(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let mostrar = MenuItem::with_id(app, "mostrar", "Mostrar Localify", true, None::<&str>)?;
+    let salir = MenuItem::with_id(app, "salir", "Salir", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&mostrar, &salir])?;
+
+    let mut icono = TrayIconBuilder::new()
+        .menu(&menu)
+        .tooltip("Localify")
+        .on_menu_event(|app, event| match event.id().0.as_str() {
+            "mostrar" => {
+                if let Err(e) = mostrar_ventana(app) {
+                    warn!(error = %e, "no se pudo mostrar la ventana desde la bandeja");
+                }
+            }
+            "salir" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+                && let Err(e) = mostrar_ventana(tray.app_handle())
+            {
+                warn!(error = %e, "no se pudo mostrar la ventana desde la bandeja");
+            }
+        });
+
+    if let Some(icono_app) = app.default_window_icon() {
+        icono = icono.icon(icono_app.clone());
+    }
+
+    icono.build(app)?;
     Ok(())
 }
 
