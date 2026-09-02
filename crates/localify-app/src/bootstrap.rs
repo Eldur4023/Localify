@@ -368,6 +368,9 @@ fn arrancar_bandeja(app: &tauri::App) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
+    #[cfg(target_os = "linux")]
+    verificar_libappindicator()?;
+
     let mostrar = MenuItem::with_id(app, "mostrar", "Mostrar Localify", true, None::<&str>)?;
     let salir = MenuItem::with_id(app, "salir", "Salir", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&mostrar, &salir])?;
@@ -402,6 +405,38 @@ fn arrancar_bandeja(app: &tauri::App) -> tauri::Result<()> {
 
     icono.build(app)?;
     Ok(())
+}
+
+/// Comprueba que `libayatana-appindicator3` o `libappindicator3` existen
+/// antes de dejar que `tray-icon` las busque ella sola.
+///
+/// `libappindicator-sys` las resuelve con `dlopen` la primera vez que se usan,
+/// y si no aparece ninguna hace `panic!` dentro de esa librería — con
+/// `panic = "abort"` en el perfil de publicación eso no es un error que se
+/// pueda capturar con `Result`, es el proceso entero muriendo sin avisar de
+/// nada. Ocurría de verdad: el tarball autocontenido de Linux no la trae (a
+/// diferencia del `.deb`, que la declara como dependencia), así que en
+/// cualquier sistema sin esa librería instalada el arranque abortaba en
+/// silencio. Comprobar antes convierte eso en el mismo "sin bandeja, se
+/// sigue" que ya existe para cualquier otro fallo de `arrancar_bandeja`.
+///
+/// # Errors
+/// Si no se encuentra ninguna de las dos librerías.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code, reason = "cargar una librería dinámica es intrínsecamente unsafe en libloading")]
+fn verificar_libappindicator() -> tauri::Result<()> {
+    for nombre in ["libayatana-appindicator3.so.1", "libappindicator3.so.1"] {
+        // SAFETY: solo se comprueba que la carga funcione; `lib` se descarta
+        // en el acto y no se llama a ningún símbolo suyo desde aquí.
+        if unsafe { libloading::Library::new(nombre) }.is_ok() {
+            return Ok(());
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "no se encontró libayatana-appindicator3 ni libappindicator3",
+    )
+    .into())
 }
 
 /// Espera antes del primer repaso de la base de datos.
@@ -675,4 +710,23 @@ async fn comprobar_actualizaciones(
         }
     })
     .await;
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    // `libappindicator-sys` resuelve su librería con `Lazy<Library>`, y si
+    // ninguna de las dos existe hace `panic!` en el primer uso — con
+    // `panic = "abort"` del perfil de publicación eso mata el proceso, no da
+    // un `Result` que capturar. `verificar_libappindicator` evita tocar esa
+    // `Lazy` y hace su propia comprobación antes; esta prueba fija que un
+    // nombre de librería que no existe se resuelve como `Err` normal y
+    // corriente, sin abortar el proceso de pruebas.
+    #[test]
+    #[allow(unsafe_code, reason = "cargar una librería dinámica es intrínsecamente unsafe en libloading")]
+    fn cargar_una_libreria_inexistente_da_error_y_no_aborta() {
+        // SAFETY: solo se comprueba el resultado de la carga; no se llama a
+        // ningún símbolo de la librería.
+        let resultado = unsafe { libloading::Library::new("libEstoDeVerdadNoExisteEnNingunSitio.so.1") };
+        assert!(resultado.is_err());
+    }
 }

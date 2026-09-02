@@ -2533,6 +2533,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "libloading",
  "localify-audio",
  "localify-core",
  "localify-db",

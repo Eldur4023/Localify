@@ -47,6 +47,12 @@ tracing-appender = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Para comprobar si libayatana-appindicator3/libappindicator3 existe antes de
+# que tray-icon la dlopen-ee ella misma: ver el comentario en
+# `verificar_libappindicator` en bootstrap.rs.
+libloading = "0.7"
+
 [build-dependencies]
 tauri-build = { workspace = true }
 # Transpilación de TypeScript sin Node ni bundler (ADR-019).

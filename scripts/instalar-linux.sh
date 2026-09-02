@@ -127,6 +127,17 @@ case ":$PATH:" in
      avisa "  export PATH=\"\$PATH:$BIN\"" ;;
 esac
 
+# El icono de bandeja es la única pieza que este árbol no trae consigo: la
+# usan muchos escritorios distintos y cada uno con su propia implementación,
+# así que se busca en el sistema en vez de empaquetarla. Sin ella Localify
+# arranca y suena igual —solo falta el icono—, así que no se para el
+# instalador por esto, solo se avisa.
+if ! ldconfig -p 2>/dev/null | grep -q "libayatana-appindicator3.so.1\|libappindicator3.so.1"; then
+  echo
+  avisa "Sin libayatana-appindicator3, Localify arrancará sin icono de bandeja."
+  avisa "  (el resto funciona igual; instálala si la quieres)"
+fi
+
 # ─── Sidecars ────────────────────────────────────────────────────────────────
 # yt-dlp y FFmpeg no van dentro: yt-dlp se rompe cuando YouTube cambia y tiene
 # que poder actualizarse solo, sin reinstalar Localify (ADR-006).

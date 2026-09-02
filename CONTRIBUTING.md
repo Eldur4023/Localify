@@ -104,6 +104,23 @@ prefer a systemd user service with `After=pipewire.service
 wireplumber.service`, or a short `exec-once = sleep 2 && localify --headless`
 as a blunter fallback.
 
+### The tray icon depends on a library the self-contained Linux tarball doesn't bundle
+
+`tray-icon`'s Linux backend (`libappindicator-sys`) resolves
+`libayatana-appindicator3.so.1`/`libappindicator3.so.1` with `dlopen` on first
+use, and **panics** if neither is found — with `panic = "abort"` in the
+release profile, that's the whole process dying, not a `Result` anyone gets to
+handle. The `.deb` declares the dependency so apt always has it; the
+self-contained tarball (`instalar-linux.sh`) deliberately bundles everything
+*except* this one, since it's a desktop-integration library with its own
+system dependencies rather than something safe to vendor. `arrancar_bandeja`
+in `bootstrap.rs` now calls `verificar_libappindicator` first, which probes
+for both library names itself (same `dlopen`, but through a plain
+`Result`) before ever calling into `tray-icon` — missing either one degrades
+to "no tray icon", same as any other `arrancar_bandeja` failure, instead of
+aborting. `instalar-linux.sh` also warns at install time if neither is
+present.
+
 ---
 
 ## Invariants
