@@ -2528,7 +2528,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "localify-app"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "async-trait",
  "axum",
@@ -2566,7 +2566,7 @@ dependencies = [
 
 [[package]]
 name = "localify-audio"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "audioadapter-buffers",
  "cpal",
@@ -2581,7 +2581,7 @@ dependencies = [
 
 [[package]]
 name = "localify-core"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2594,7 +2594,7 @@ dependencies = [
 
 [[package]]
 name = "localify-db"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2611,7 +2611,7 @@ dependencies = [
 
 [[package]]
 name = "localify-integrations"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2626,7 +2626,7 @@ dependencies = [
 
 [[package]]
 name = "localify-musicbrainz"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2640,7 +2640,7 @@ dependencies = [
 
 [[package]]
 name = "localify-platform"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "async-trait",
  "directories",
@@ -2658,7 +2658,7 @@ dependencies = [
 
 [[package]]
 name = "localify-services"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2675,7 +2675,7 @@ dependencies = [
 
 [[package]]
 name = "localify-spotify"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2690,7 +2690,7 @@ dependencies = [
 
 [[package]]
 name = "localify-ytdlp"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2706,7 +2706,7 @@ dependencies = [
 
 [[package]]
 name = "localify-ytmusic"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "async-trait",
  "chrono",

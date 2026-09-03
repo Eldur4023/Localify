@@ -19,7 +19,7 @@
 set -euo pipefail
 
 NOMBRE="localify"
-VERSION="1.2.3"
+VERSION="1.2.4"
 AQUI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 MODO_USUARIO=0
