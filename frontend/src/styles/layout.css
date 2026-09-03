@@ -96,7 +96,10 @@
     padding-inline: 0;
   }
 
-  .sidebar__item span {
+  /* `:not(.sidebar__arte)`: la miniatura de una playlist es un `span`, igual
+     que en el colapso manual de más abajo — sin la excepción, este modo de
+     solo iconos borraba justo lo único que tenía que enseñar. */
+  .sidebar__item span:not(.sidebar__arte) {
     display: none;
   }
 

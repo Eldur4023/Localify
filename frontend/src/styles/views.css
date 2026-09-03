@@ -750,10 +750,14 @@
 }
 
 /* Deslizador vertical de verdad: `writing-mode` lo gira sin invertir el ratón
-   ni el teclado, cosa que sí hace un `transform: rotate(-90deg)`. */
+   ni el teclado, cosa que sí hace un `transform: rotate(-90deg)`. `orient`
+   (puesto en JS) es cosa de Firefox; WebKit —WebKitGTK en Linux, WKWebView en
+   macOS— lo ignora y sin `-webkit-appearance` dibuja el widget horizontal de
+   siempre estirado en la caja alta y estrecha, que es lo que se veía mal. */
 .eq__slider {
   writing-mode: vertical-lr;
   direction: rtl;
+  -webkit-appearance: slider-vertical;
   width: 20px;
   height: 96px;
   accent-color: var(--accent);

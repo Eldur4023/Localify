@@ -116,8 +116,13 @@ function ponerImagen(hueco: HTMLElement, ruta: string): void {
   img.className = "portada";
   img.alt = "";
   img.decoding = "async";
-  // Veinte tarjetas en pantalla y cien fuera: sin esto se pedirían todas.
-  img.loading = "lazy";
+  // Antes llevaba `loading = "lazy"` para no pedir de golpe las tarjetas
+  // fuera de pantalla. En Linux, con la ventana sin maximizar, WebKitGTK a
+  // veces calcula mal el tamaño del contenedor en el primer pintado y estas
+  // imágenes nunca llegan a considerarse visibles: el `load` no se dispara
+  // jamás y la portada se queda con el icono para siempre. Las imágenes las
+  // sirve el propio backend en disco, no la red, así que pedirlas todas no
+  // sale caro.
   // Hasta que carga no se muestra, para que el icono no salte a la imagen con
   // un parpadeo intermedio. Si falla de verdad —ni portada, ni problema de
   // plataforma—, se queda el icono y ya está.
