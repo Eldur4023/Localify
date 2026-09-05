@@ -409,6 +409,133 @@
   color: var(--text-subdued);
 }
 
+/*
+ * Pestañas de Ajustes.
+ *
+ * Antes era una sola página larga con siete secciones seguidas: encontrar
+ * "Discord" significaba desplazarse a ciegas pasando por audio y descargas.
+ * Repartirlas en pestañas hace que cada una se abra ya en su sitio.
+ */
+.ajustes__tabs {
+  display: flex;
+  /* Sin esto, la fila entera colapsa a 0 de alto pese a llevar botones con
+     texto dentro. `.vista--scroll` hace de esta fila un flex item, y
+     `overflow-x: auto` fija también `overflow-y` a `auto` (la especificación
+     obliga a los dos ejes a la vez si no se dice lo contrario): un flex item
+     con overflow que no sea `visible` calcula su alto mínimo automático como
+     cero en vez de "lo que ocupe el contenido". Fijarlo a mano es lo que
+     rompe ese cálculo. */
+  min-height: 36px;
+  gap: var(--sp-1);
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: var(--sp-5);
+  overflow-x: auto;
+}
+
+.ajustes__tab {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: var(--sp-3) var(--sp-3);
+  font: inherit;
+  font-weight: var(--fw-medium);
+  color: var(--text-subdued);
+  cursor: pointer;
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+  /* Se superpone al borde del contenedor en vez de sumarse a él, para que la
+     línea activa y la del fondo queden a la misma altura. */
+  margin-bottom: -1px;
+}
+
+.ajustes__tab:hover {
+  color: var(--text-base);
+}
+
+.ajustes__tab.is-activa {
+  color: var(--text-base);
+  border-bottom-color: var(--accent);
+}
+
+/* ── Estadísticas ────────────────────────────────────────────────────────── */
+
+.stats__destacado {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.stats__numero {
+  font-size: var(--fs-2xl);
+  font-weight: var(--fw-bold);
+  color: var(--text-base);
+  font-variant-numeric: tabular-nums;
+}
+
+.stats__etiqueta {
+  font-size: var(--fs-sm);
+  color: var(--text-subdued);
+}
+
+.stats__resumen {
+  display: flex;
+  gap: var(--sp-5);
+  flex-wrap: wrap;
+}
+
+.stats__lista {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+/*
+ * Fila de "más escuchado": el número de puesto no es un adorno, es lo que
+ * dice que esto es un ranking y no una lista cualquiera de canciones.
+ */
+.stats__fila {
+  display: grid;
+  grid-template-columns: 2ch 1fr auto;
+  align-items: center;
+  gap: var(--sp-3);
+  padding-block: var(--sp-2);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.stats__fila:last-child {
+  border-bottom: none;
+}
+
+.stats__puesto {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.stats__nombre {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-base);
+}
+
+.stats__subtitulo {
+  display: block;
+  font-size: var(--fs-sm);
+  color: var(--text-subdued);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stats__detalle {
+  font-size: var(--fs-sm);
+  color: var(--text-subdued);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .boton {
   height: 36px;
   padding-inline: var(--sp-4);

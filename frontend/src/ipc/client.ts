@@ -21,6 +21,7 @@ import type {
   EqProfileDto,
   HomeSectionDto,
   LibraryStatsDto,
+  ListeningStatsDto,
   LyricsDto,
   PageDto,
   PageRequestDto,
@@ -308,6 +309,11 @@ export const settings = {
    */
   changeLibraryPath: (path: string, moveExisting: boolean) =>
     invoke<string>("settings_change_library_path", { path, moveExisting }),
+};
+
+export const stats = {
+  /** Tiempo total escuchado y las canciones y artistas que más se llevan. */
+  get: () => invoke<ListeningStatsDto>("stats_get"),
 };
 
 export const system = {

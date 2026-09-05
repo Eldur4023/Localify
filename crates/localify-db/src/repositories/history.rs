@@ -9,6 +9,7 @@ use localify_core::domain::album::AlbumRow;
 use localify_core::domain::artist::ArtistRow;
 use localify_core::domain::ids::{ArtistId, TrackId};
 use localify_core::domain::library::PlayHistoryEntry;
+use localify_core::domain::stats::{ArtistListeningStat, TrackListeningStat};
 use localify_core::domain::track::TrackRow;
 use localify_core::error::CoreResult;
 use localify_core::ports::database::HistoryRepository;
@@ -254,6 +255,140 @@ impl HistoryRepository for SqliteHistoryRepository {
             .escribir(move |tx| {
                 let borradas = tx.execute("DELETE FROM play_history", [])?;
                 Ok(u32::try_from(borradas).unwrap_or(u32::MAX))
+            })
+            .await
+            .to_core()
+    }
+
+    async fn total_ms_played(&self) -> CoreResult<u64> {
+        self.pool
+            .leer(move |conn| {
+                let ms: i64 = conn.query_row(
+                    "SELECT COALESCE(SUM(ms_played), 0) FROM play_history",
+                    [],
+                    |r| r.get(0),
+                )?;
+                Ok(u64::try_from(ms.max(0)).unwrap_or(0))
+            })
+            .await
+            .to_core()
+    }
+
+    async fn total_plays(&self) -> CoreResult<u64> {
+        self.pool
+            .leer(move |conn| {
+                let n: i64 =
+                    conn.query_row("SELECT COUNT(*) FROM play_history", [], |r| r.get(0))?;
+                Ok(u64::try_from(n.max(0)).unwrap_or(0))
+            })
+            .await
+            .to_core()
+    }
+
+    async fn distinct_tracks_played(&self) -> CoreResult<u64> {
+        self.pool
+            .leer(move |conn| {
+                let n: i64 = conn.query_row(
+                    "SELECT COUNT(DISTINCT track_id) FROM play_history",
+                    [],
+                    |r| r.get(0),
+                )?;
+                Ok(u64::try_from(n.max(0)).unwrap_or(0))
+            })
+            .await
+            .to_core()
+    }
+
+    async fn most_played_tracks(&self, limit: u8) -> CoreResult<Vec<TrackListeningStat>> {
+        let columnas = COLUMNAS_TRACK_ROW;
+        let joins = JOINS_TRACK_ROW;
+
+        // Tiempo puro, no la puntuación ponderada de `top_tracks`: aquí lo que
+        // manda es cuánto ha sonado de verdad, sin ventana temporal.
+        let sql = format!(
+            "SELECT {columnas},
+                    SUM(h.ms_played) AS ms_total,
+                    COUNT(*) AS veces
+             FROM play_history h
+             JOIN tracks t ON t.id = h.track_id
+             {joins}
+             GROUP BY t.id
+             ORDER BY ms_total DESC
+             LIMIT ?1"
+        );
+
+        self.pool
+            .leer(move |conn| {
+                let mut stmt = conn.prepare_cached(&sql)?;
+                let filas = stmt
+                    .query_map([i64::from(limit)], |row| {
+                        let ms: i64 = row.get("ms_total")?;
+                        let veces: i64 = row.get("veces")?;
+                        Ok((a_track_row(row), ms, veces))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                filas
+                    .into_iter()
+                    .map(|(track, ms, veces)| {
+                        Ok(TrackListeningStat {
+                            track: track?,
+                            ms_played: u64::try_from(ms.max(0)).unwrap_or(0),
+                            plays: u32::try_from(veces.max(0)).unwrap_or(0),
+                        })
+                    })
+                    .collect::<DbResult<Vec<_>>>()
+            })
+            .await
+            .to_core()
+    }
+
+    async fn most_played_artists(&self, limit: u8) -> CoreResult<Vec<ArtistListeningStat>> {
+        self.pool
+            .leer(move |conn| {
+                // Mismas columnas que `top_artists`, sin la ventana temporal y
+                // ordenando por tiempo real en vez de por la puntuación
+                // ponderada.
+                let mut stmt = conn.prepare_cached(
+                    "SELECT ar.id, ar.name, ar.image_url,
+                            (SELECT COUNT(*) FROM track_artists ta2
+                              WHERE ta2.artist_id = ar.id) AS track_count,
+                            (SELECT COUNT(*) FROM track_artists ta2
+                              JOIN audio_files af ON af.track_id = ta2.track_id
+                              WHERE ta2.artist_id = ar.id) AS local_track_count,
+                            SUM(h.ms_played) AS ms_total
+                     FROM play_history h
+                     JOIN track_artists ta ON ta.track_id = h.track_id
+                     JOIN artists ar       ON ar.id = ta.artist_id
+                     GROUP BY ar.id
+                     ORDER BY ms_total DESC
+                     LIMIT ?1",
+                )?;
+
+                let filas = stmt
+                    .query_map([i64::from(limit)], |r| {
+                        let ms: i64 = r.get("ms_total")?;
+                        Ok((
+                            ArtistRow {
+                                id: ArtistId::from_trusted(r.get::<_, String>(0)?),
+                                name: r.get(1)?,
+                                image_url: r.get(2)?,
+                                track_count: u32::try_from(r.get::<_, i64>(3)?).unwrap_or(0),
+                                local_track_count: u32::try_from(r.get::<_, i64>(4)?)
+                                    .unwrap_or(0),
+                            },
+                            ms,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                Ok(filas
+                    .into_iter()
+                    .map(|(artist, ms)| ArtistListeningStat {
+                        artist,
+                        ms_played: u64::try_from(ms.max(0)).unwrap_or(0),
+                    })
+                    .collect())
             })
             .await
             .to_core()
@@ -627,5 +762,76 @@ mod tests {
             repo.top_tracks(30, 10).await.expect("top").is_empty(),
             "la ventana existe para que Inicio refleje lo de ahora"
         );
+    }
+
+    #[tokio::test]
+    async fn las_estadisticas_de_escucha_suman_milisegundos_reales() {
+        let (repo, tracks, _pool, _g) = ctx().await;
+        let a = pista("A", vec![]);
+        let b = pista("B", vec![]);
+        tracks
+            .upsert(&[a.clone(), b.clone()])
+            .await
+            .expect("guarda");
+
+        assert_eq!(repo.total_ms_played().await.expect("total"), 0);
+        assert_eq!(repo.total_plays().await.expect("total"), 0);
+        assert_eq!(repo.distinct_tracks_played().await.expect("total"), 0);
+
+        // Dos escuchas completas de A (200_000 ms cada una) y una saltada de B
+        // (15_000 ms): la escucha saltada cuenta igual para el tiempo total,
+        // que no pondera por si se completó como sí hace `top_tracks`.
+        repo.record(&escucha(&a.id, 100, true))
+            .await
+            .expect("registra");
+        repo.record(&escucha(&a.id, 50, true))
+            .await
+            .expect("registra");
+        repo.record(&escucha(&b.id, 10, false))
+            .await
+            .expect("registra");
+
+        assert_eq!(
+            repo.total_ms_played().await.expect("total"),
+            200_000 + 200_000 + 15_000
+        );
+        assert_eq!(repo.total_plays().await.expect("total"), 3);
+        assert_eq!(repo.distinct_tracks_played().await.expect("total"), 2);
+    }
+
+    #[tokio::test]
+    async fn lo_mas_escuchado_por_tiempo_ordena_distinto_que_el_top_ponderado() {
+        // Una cancion escuchada una vez entera y muy larga puede pesar mas en
+        // tiempo real que otra repetida varias veces pero corta o saltada; es
+        // justo lo contrario de lo que persigue `top_tracks` para Inicio.
+        let (repo, tracks, _pool, _g) = ctx().await;
+        let repetida = pista("Repetida", vec![artista("Uno")]);
+        let larga = pista("Larga", vec![artista("Dos")]);
+        tracks
+            .upsert(&[repetida.clone(), larga.clone()])
+            .await
+            .expect("guarda");
+
+        // Tres escuchas saltadas de 15s: 45_000 ms en total, tres reproducciones.
+        for _ in 0..3 {
+            repo.record(&escucha(&repetida.id, 60, false))
+                .await
+                .expect("registra");
+        }
+        // Una escucha completa de 200_000 ms.
+        repo.record(&escucha(&larga.id, 60, true))
+            .await
+            .expect("registra");
+
+        let top = repo.most_played_tracks(10).await.expect("top");
+        assert_eq!(top.first().map(|s| s.track.title.as_str()), Some("Larga"));
+        assert_eq!(top.first().map(|s| s.ms_played), Some(200_000));
+        assert_eq!(
+            top.iter().find(|s| s.track.title == "Repetida").map(|s| s.plays),
+            Some(3)
+        );
+
+        let top_artistas = repo.most_played_artists(10).await.expect("top artistas");
+        assert_eq!(top_artistas.first().map(|s| s.artist.name.as_str()), Some("Dos"));
     }
 }

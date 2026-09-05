@@ -15,6 +15,7 @@ pub mod lyrics;
 pub mod playlist;
 pub mod queue;
 pub mod settings;
+pub mod stats;
 pub mod track;
 pub mod versiones;
 
@@ -43,5 +44,6 @@ pub use settings::{
     IntegrationSettings, Language, Settings, SettingsPatch, SettingsSection, SpotifySettings,
     UiSettings,
 };
+pub use stats::{ArtistListeningStat, ListeningStats, TrackListeningStat};
 pub use track::{AlbumRef, ArtistRef, Track, TrackFilter, TrackRow, TrackSort};
 pub use versiones::{ClaseDeVersion, clase, titulo_canonico};
