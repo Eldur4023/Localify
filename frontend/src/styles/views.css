@@ -430,6 +430,11 @@
   border-bottom: 1px solid var(--border-subtle);
   margin-bottom: var(--sp-5);
   overflow-x: auto;
+  /* Mismo motivo que el comentario de arriba: al fijar `overflow-x`, el
+     eje vertical pasa a computarse como `auto` si no se dice lo contrario, y
+     como el contenido es un pixel o dos más alto que `min-height`, aparecía
+     una barra de scroll vertical diminuta en la propia fila de pestañas. */
+  overflow-y: hidden;
 }
 
 .ajustes__tab {
