@@ -22,7 +22,7 @@ import type {
   HomeSectionDto,
   ImportReportDto,
   LibraryStatsDto,
-  TrackCandidateDto,
+  ListeningStatsDto,
   LyricsDto,
   PageDto,
   PageRequestDto,
@@ -37,6 +37,7 @@ import type {
   SearchResultsDto,
   SettingsDto,
   SettingsPatchDto,
+  TrackCandidateDto,
   TrackFilterDto,
   TrackRowDto,
 } from "./types.gen.js";
@@ -330,6 +331,11 @@ export const settings = {
    */
   changeLibraryPath: (path: string, moveExisting: boolean) =>
     invoke<string>("settings_change_library_path", { path, moveExisting }),
+};
+
+export const stats = {
+  /** Tiempo total escuchado y las canciones y artistas que más se llevan. */
+  get: () => invoke<ListeningStatsDto>("stats_get"),
 };
 
 export const system = {

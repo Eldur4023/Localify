@@ -26,6 +26,7 @@ pub mod events;
 pub mod library;
 pub mod player;
 pub mod settings;
+pub mod stats;
 
 pub use catalog::{
     AlbumDetailDto, AlbumRefDto, AlbumRowDto, ArtistDetailDto, ArtistRefDto, ArtistRowDto,
@@ -39,6 +40,7 @@ pub use library::{
 };
 pub use player::{PlaybackContextDto, PlayerStateDto, QueueEntryDto, QueueSnapshotDto};
 pub use settings::{ProviderStatusDto, SettingsDto, SettingsPatchDto};
+pub use stats::{ArtistListeningStatDto, ListeningStatsDto, TrackListeningStatDto};
 
 /// Carpeta donde `ts-rs` deposita los tipos generados.
 ///

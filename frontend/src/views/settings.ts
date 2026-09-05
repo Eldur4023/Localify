@@ -30,10 +30,11 @@ import type {
   AudioSettingsInputDto,
   DownloadSettingsDto,
   EqProfileDto,
+  ListeningStatsDto,
   SettingsDto,
   SettingsPatchDto,
 } from "../ipc/types.gen.js";
-import { library, settings as api } from "../ipc/client.js";
+import { library, settings as api, stats as statsApi } from "../ipc/client.js";
 import { alRecibir } from "../ipc/events.js";
 import { alCambiarIdioma, cambiarIdioma, t, type Idioma } from "../i18n/index.js";
 import { conEspera } from "../ui/cards.js";
@@ -104,6 +105,24 @@ function audioEnviable(s: SettingsDto): AudioSettingsInputDto {
   };
 }
 
+/**
+ * Milisegundos de escucha en algo legible: "3 d 4 h", "4 h 12 min" o "12 min".
+ *
+ * Tres formatos y no uno solo con todas las unidades: "0 d 3 h 20 min" para
+ * alguien que lleva un rato escuchando dice más ruido que información. Cada
+ * franja muestra solo las dos unidades que importan a esa escala.
+ */
+function duracionEscucha(ms: bigint): string {
+  const totalMinutos = Math.floor(Number(ms) / 60_000);
+  const dias = Math.floor(totalMinutos / (60 * 24));
+  const horas = Math.floor((totalMinutos % (60 * 24)) / 60);
+  const minutos = totalMinutos % 60;
+
+  if (dias > 0) return t("stats.duration_days", { days: dias, hours: horas });
+  if (horas > 0) return t("stats.duration_hours", { hours: horas, minutes: minutos });
+  return t("stats.duration_minutes", { minutes: minutos });
+}
+
 /** Bytes en algo legible. Base 1024, que es lo que enseña el explorador. */
 function tamano(bytes: bigint): string {
   const unidades = ["B", "KB", "MB", "GB", "TB"];
@@ -128,6 +147,28 @@ function nombrePerfil(p: EqProfileDto): string {
   return p.nameKey.startsWith("eq.") ? t(p.nameKey) : p.nameKey;
 }
 
+/** Una pestaña de Ajustes. El orden aquí es el orden en que se pintan. */
+const PESTAÑAS = [
+  "general",
+  "audio",
+  "descargas",
+  "integraciones",
+  "stats",
+  "almacenamiento",
+] as const;
+type Pestaña = (typeof PESTAÑAS)[number];
+
+/** Clave i18n del rótulo de cada pestaña. Reutiliza las de sus secciones —son
+ * el mismo texto— salvo las dos que antes no tenían una sola sección propia. */
+const ETIQUETA_PESTAÑA: Record<Pestaña, string> = {
+  general: "settings.tab_general",
+  audio: "settings.audio",
+  descargas: "settings.downloads",
+  integraciones: "settings.tab_integrations",
+  stats: "settings.tab_stats",
+  almacenamiento: "settings.storage",
+};
+
 export function mountSettingsView(contenedor: HTMLElement): Vista {
   const el = document.createElement("section");
   el.className = "vista vista--scroll ajustes";
@@ -140,6 +181,7 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
   /** Avance de la copia, o `null` si no hay ninguna en curso. */
   let migrando: { done: number; total: number } | null = null;
   let ecualizador: Ecualizador | null = null;
+  let pestañaActiva: Pestaña = "general";
 
   // ── Piezas de formulario ────────────────────────────────────────────────
 
@@ -348,6 +390,33 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
     }
   }
 
+  /** Fila de pestañas. Cambiar de pestaña no vuelve a pedir nada al backend
+   * —los ajustes ya están en memoria—, salvo Estadísticas, que se refresca
+   * cada vez que se entra: es la única pestaña cuyos números cambian sin que
+   * el usuario haya tocado nada aquí. */
+  function barraPestañas(): HTMLElement {
+    const nav = document.createElement("div");
+    nav.className = "ajustes__tabs";
+    nav.setAttribute("role", "tablist");
+
+    for (const clave of PESTAÑAS) {
+      const boton = document.createElement("button");
+      boton.type = "button";
+      boton.className = "ajustes__tab";
+      boton.classList.toggle("is-activa", clave === pestañaActiva);
+      boton.setAttribute("role", "tab");
+      boton.setAttribute("aria-selected", String(clave === pestañaActiva));
+      boton.textContent = t(ETIQUETA_PESTAÑA[clave]);
+      boton.addEventListener("click", () => {
+        if (pestañaActiva === clave) return;
+        pestañaActiva = clave;
+        pintar();
+      });
+      nav.append(boton);
+    }
+    return nav;
+  }
+
   // ── Pintado ─────────────────────────────────────────────────────────────
 
   function pintar(): void {
@@ -355,9 +424,27 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
     if (!actual) return;
     const s = actual;
 
+    // El ecualizador guarda lo que tenga pendiente al desmontarse (mover un
+    // deslizador y cambiar de pestaña sin soltar no puede perder el ajuste),
+    // así que se destruye aquí y no solo al salir de Ajustes entero.
+    if (pestañaActiva !== "audio" && ecualizador) {
+      ecualizador.destroy();
+      ecualizador = null;
+    }
+
+    el.append(barraPestañas());
+    const panel = document.createElement("div");
+    panel.className = "ajustes__panel";
+    el.append(panel);
+
+    if (pestañaActiva === "stats") {
+      pintarStats(panel);
+      return;
+    }
+
     // General
-    {
-      const { el: bloque, cuerpo } = seccion(t("settings.title"));
+    if (pestañaActiva === "general") {
+      const { el: bloque, cuerpo } = seccion(t("settings.tab_general"));
       cuerpo.append(
         campo(
           t("settings.language"),
@@ -431,11 +518,11 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
         cuerpo.append(aviso);
       }
 
-      el.append(bloque);
+      panel.append(bloque);
     }
 
     // Audio
-    {
+    if (pestañaActiva === "audio") {
       const { el: bloque, cuerpo } = seccion(t("settings.audio"));
 
       // Crossfade a cero significa reproducción sin huecos, no "sin nada": son
@@ -519,7 +606,7 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
         ),
       );
 
-      el.append(bloque);
+      panel.append(bloque);
     }
 
     // Descargas
@@ -531,7 +618,7 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
     // pasajero. Las dos únicas cosas que la abren son unas cookies de sesión y
     // un yt-dlp reciente, y hasta ahora ninguna de las dos se podía tocar desde
     // la aplicación.
-    {
+    if (pestañaActiva === "descargas") {
       const { el: bloque, cuerpo } = seccion(t("settings.downloads"));
 
       const ayuda = document.createElement("p");
@@ -616,11 +703,16 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
       nota.textContent = t("settings.ytdlp_help");
       cuerpo.append(nota);
 
-      el.append(bloque);
+      panel.append(bloque);
     }
 
+    // Integraciones: Spotify y Discord comparten pestaña porque las dos son
+    // "presta tus propias credenciales a un servicio externo" — la misma
+    // decisión, con el mismo motivo (ADR: incrustarlas en el binario las
+    // volvería compartidas por todo el mundo).
+
     // Spotify
-    {
+    if (pestañaActiva === "integraciones") {
       const { el: bloque, cuerpo } = seccion(t("settings.spotify"));
 
       const ayuda = document.createElement("p");
@@ -679,7 +771,7 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
       acciones.append(guardar, estado);
       cuerpo.append(acciones);
 
-      el.append(bloque);
+      panel.append(bloque);
     }
 
     // Discord
@@ -688,7 +780,7 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
     // mismo motivo que Spotify: incrustarlas en el binario las convertiría en
     // credenciales compartidas por todo el mundo, sacables del ejecutable con
     // un editor de texto.
-    {
+    if (pestañaActiva === "integraciones") {
       const { el: bloque, cuerpo } = seccion(t("settings.discord_section"));
 
       cuerpo.append(pasos(["discord_step_1", "discord_step_2", "discord_step_3"]));
@@ -740,7 +832,7 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
         campo(t("settings.discord_client_id"), discordId, t("settings.discord_id_help")),
       );
 
-      el.append(bloque);
+      panel.append(bloque);
     }
 
     // Almacenamiento
@@ -748,7 +840,7 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
     // Es el único sitio donde el disco es el tema, así que es el único donde
     // tiene sentido contar cuántas canciones están guardadas y cuánto ocupan.
     // En las listas no lo tiene: allí lo que importa es la canción.
-    {
+    if (pestañaActiva === "almacenamiento") {
       const { el: bloque, cuerpo } = seccion(t("settings.storage"));
 
       const revisar = document.createElement("button");
@@ -900,7 +992,130 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
       peligro.append(vaciar);
       cuerpo.append(acciones, uso, fallidas, peligro);
 
-      el.append(bloque);
+      panel.append(bloque);
+    }
+  }
+
+  /**
+   * Fila de un ranking (canción o artista más escuchado): puesto, nombre y un
+   * detalle a la derecha con el tiempo y, si aplica, las reproducciones.
+   */
+  function filaRanking(puesto: number, nombre: string, subtitulo: string, detalle: string): HTMLElement {
+    const fila = document.createElement("div");
+    fila.className = "stats__fila";
+
+    const n = document.createElement("span");
+    n.className = "stats__puesto";
+    n.textContent = String(puesto);
+
+    const centro = document.createElement("div");
+    centro.className = "stats__nombre";
+    const titulo = document.createElement("span");
+    titulo.textContent = nombre;
+    centro.append(titulo);
+    if (subtitulo) {
+      const sub = document.createElement("span");
+      sub.className = "stats__subtitulo";
+      sub.textContent = subtitulo;
+      centro.append(sub);
+    }
+
+    const d = document.createElement("span");
+    d.className = "stats__detalle";
+    d.textContent = detalle;
+
+    fila.append(n, centro, d);
+    return fila;
+  }
+
+  /**
+   * Pestaña de Estadísticas.
+   *
+   * Se pide siempre que se entra, a diferencia del resto de la pantalla: es la
+   * única pestaña cuyos números cambian sin que el usuario haya tocado nada
+   * aquí —escuchar música en otra vista los mueve— así que enseñar lo que se
+   * pidió la última vez estaría, tarde o temprano, mintiendo.
+   */
+  function pintarStats(destino: HTMLElement): void {
+    const { el: bloque, cuerpo } = seccion(t("settings.tab_stats"));
+    destino.append(bloque);
+
+    void conEspera(cuerpo, statsApi.get())
+      .then((r) => pintarContenidoStats(cuerpo, r))
+      .catch((e: unknown) => {
+        mostrarError(t("error.internal"), String(e));
+      });
+  }
+
+  function pintarContenidoStats(cuerpo: HTMLElement, r: ListeningStatsDto): void {
+    if (r.totalPlays === 0n) {
+      const vacio = document.createElement("p");
+      vacio.className = "ajustes__ayuda";
+      vacio.textContent = t("stats.empty");
+      cuerpo.append(vacio);
+      return;
+    }
+
+    // ── Resumen ─────────────────────────────────────────────────────────
+    const resumen = document.createElement("div");
+    resumen.className = "stats__resumen";
+
+    const destacar = (numero: string, etiqueta: string): HTMLElement => {
+      const caja = document.createElement("div");
+      caja.className = "stats__destacado";
+      const n = document.createElement("span");
+      n.className = "stats__numero";
+      n.textContent = numero;
+      const e = document.createElement("span");
+      e.className = "stats__etiqueta";
+      e.textContent = etiqueta;
+      caja.append(n, e);
+      return caja;
+    };
+
+    resumen.append(
+      destacar(duracionEscucha(r.totalMsPlayed), t("stats.total_time")),
+      destacar(String(r.totalPlays), t("stats.plays", { count: Number(r.totalPlays) })),
+      destacar(
+        String(r.distinctTracks),
+        t("stats.distinct_tracks", { count: Number(r.distinctTracks) }),
+      ),
+    );
+    cuerpo.append(resumen);
+
+    // ── Canciones más escuchadas ────────────────────────────────────────
+    if (r.topTracks.length > 0) {
+      const titulo = document.createElement("h4");
+      titulo.className = "ajustes__titulo";
+      titulo.textContent = t("stats.top_tracks");
+
+      const lista = document.createElement("div");
+      lista.className = "stats__lista";
+      r.topTracks.forEach((fila, i) => {
+        lista.append(
+          filaRanking(
+            i + 1,
+            fila.track.title,
+            fila.track.artistDisplay,
+            duracionEscucha(fila.msPlayed),
+          ),
+        );
+      });
+      cuerpo.append(titulo, lista);
+    }
+
+    // ── Artistas más escuchados ─────────────────────────────────────────
+    if (r.topArtists.length > 0) {
+      const titulo = document.createElement("h4");
+      titulo.className = "ajustes__titulo";
+      titulo.textContent = t("stats.top_artists");
+
+      const lista = document.createElement("div");
+      lista.className = "stats__lista";
+      r.topArtists.forEach((fila, i) => {
+        lista.append(filaRanking(i + 1, fila.artist.name, "", duracionEscucha(fila.msPlayed)));
+      });
+      cuerpo.append(titulo, lista);
     }
   }
 

@@ -22,6 +22,7 @@ use crate::domain::ids::{AlbumId, ArtistId, PlaylistEntryId, PlaylistId, QueueEn
 use crate::domain::library::{ImportReport, LibraryStats, ScanReport};
 use crate::domain::lyrics::Lyrics;
 use crate::domain::playlist::{PlaylistDetail, PlaylistSummary};
+use crate::domain::stats::ListeningStats;
 use crate::domain::queue::{
     AdvanceReason, PlaybackContext, PlayerState, QueueSnapshot, RepeatMode,
 };
@@ -416,6 +417,12 @@ pub trait LibraryService: Send + Sync + 'static {
 
     async fn recent(&self, limit: u16) -> CoreResult<Vec<TrackRow>>;
     async fn stats(&self) -> CoreResult<LibraryStats>;
+
+    /// Cuánto tiempo real se ha pasado escuchando música, y qué canciones y
+    /// artistas se llevan la mayor parte. Para la pestaña de Estadísticas en
+    /// Ajustes; no tiene ventana temporal, a diferencia de las secciones de
+    /// Inicio que vienen del motor de recomendaciones.
+    async fn listening_stats(&self, top_limit: u8) -> CoreResult<ListeningStats>;
 
     /// Borra el fichero descargado de una pista.
     ///

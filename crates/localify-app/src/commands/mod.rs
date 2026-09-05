@@ -13,6 +13,7 @@ pub mod player;
 pub mod playlist;
 pub mod search;
 pub mod settings;
+pub mod stats;
 pub mod updates;
 
 /// Registra todos los comandos en el constructor de Tauri.
@@ -66,6 +67,8 @@ macro_rules! registrar_comandos {
             $crate::commands::library::library_assign_metadata,
             $crate::commands::library::album_detail,
             $crate::commands::library::artist_detail,
+            // ── Estadísticas ────────────────────────────────────────────────
+            $crate::commands::stats::stats_get,
             // ── Búsqueda ────────────────────────────────────────────────────
             $crate::commands::search::search_query,
             $crate::commands::search::search_suggest,

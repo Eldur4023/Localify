@@ -23,6 +23,7 @@ use crate::domain::library::{AudioFileRecord, LibraryStats, PlayHistoryEntry, Sc
 use crate::domain::lyrics::Lyrics;
 use crate::domain::playlist::{Playlist, PlaylistEntry, PlaylistSummary};
 use crate::domain::queue::{PlaybackContext, RepeatMode};
+use crate::domain::stats::{ArtistListeningStat, TrackListeningStat};
 use crate::domain::track::{Track, TrackFilter, TrackRow, TrackSort};
 use crate::error::CoreResult;
 use crate::page::{Page, PageRequest};
@@ -152,6 +153,33 @@ pub trait HistoryRepository: Send + Sync + 'static {
     /// pantalla, y sobrevivir al borrado la convierte en un museo de lo que
     /// hubo.
     async fn clear(&self) -> CoreResult<u32>;
+
+    // ── Estadísticas de escucha ──────────────────────────────────────────
+    //
+    // Sin ventana temporal, a diferencia de `top_tracks`/`top_artists`: esto
+    // es "toda la vida", para la pantalla de Estadísticas, no "el último mes"
+    // para Inicio.
+
+    /// Milisegundos totales escuchados en toda la biblioteca.
+    async fn total_ms_played(&self) -> CoreResult<u64>;
+
+    /// Escuchas registradas en total. Cada una ya superó el mínimo que evita
+    /// contar un salto de un par de segundos como una escucha.
+    async fn total_plays(&self) -> CoreResult<u64>;
+
+    /// Cuántas canciones distintas se han escuchado alguna vez.
+    async fn distinct_tracks_played(&self) -> CoreResult<u64>;
+
+    /// Canciones más escuchadas por tiempo real acumulado.
+    ///
+    /// No es lo mismo que `top_tracks`, que pondera por si la escucha se
+    /// completó y solo mira los últimos `days`: aquí el orden es tiempo puro
+    /// desde siempre, que es lo que responde a "¿qué he escuchado más?".
+    async fn most_played_tracks(&self, limit: u8) -> CoreResult<Vec<TrackListeningStat>>;
+
+    /// Artistas más escuchados por tiempo real acumulado. Mismo matiz que
+    /// [`Self::most_played_tracks`] frente a `top_artists`.
+    async fn most_played_artists(&self, limit: u8) -> CoreResult<Vec<ArtistListeningStat>>;
 }
 
 #[async_trait]

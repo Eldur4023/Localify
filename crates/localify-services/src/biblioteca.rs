@@ -37,6 +37,7 @@ use localify_core::domain::artist::{ArtistDetail, ArtistRow};
 use localify_core::domain::audio::DurationMs;
 use localify_core::domain::ids::{AlbumId, ArtistId, TrackId};
 use localify_core::domain::library::{ImportReport, LibraryStats, PlayHistoryEntry, ScanReport};
+use localify_core::domain::stats::ListeningStats;
 use localify_core::domain::track::{TrackFilter, TrackRow, TrackSort};
 use localify_core::error::{CoreError, CoreResult};
 use localify_core::events::{DomainEvent, EventPublisher, LibraryScope};
@@ -515,6 +516,26 @@ impl LibraryService for LibraryServiceImpl {
 
     async fn stats(&self) -> CoreResult<LibraryStats> {
         self.deps.tracks.stats().await
+    }
+
+    async fn listening_stats(&self, top_limit: u8) -> CoreResult<ListeningStats> {
+        // Secuencial y no `try_join!`: son cinco consultas de coste trivial
+        // sobre una tabla local, y esta pantalla no se pinta sesenta veces por
+        // segundo (a diferencia del motivo que sí justifica paralelizar en
+        // otros sitios, ver ADR-011). Encadenarlas es más simple de leer.
+        let total_ms_played = self.deps.historial.total_ms_played().await?;
+        let total_plays = self.deps.historial.total_plays().await?;
+        let distinct_tracks = self.deps.historial.distinct_tracks_played().await?;
+        let top_tracks = self.deps.historial.most_played_tracks(top_limit).await?;
+        let top_artists = self.deps.historial.most_played_artists(top_limit).await?;
+
+        Ok(ListeningStats {
+            total_ms_played,
+            total_plays,
+            distinct_tracks,
+            top_tracks,
+            top_artists,
+        })
     }
 
     async fn delete_download(&self, id: &TrackId) -> CoreResult<()> {

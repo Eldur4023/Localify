@@ -55,6 +55,8 @@ detail: string | null, };
 
 export type ArtistDetailDto = { id: string, name: string, imageUrl: string | null, genres: Array<string>, localTrackCount: number, topTracks: Array<TrackRowDto>, albums: Array<AlbumRowDto>, };
 
+export type ArtistListeningStatDto = { artist: ArtistRowDto, msPlayed: bigint, };
+
 /**
  * Referencia ligera a un artista.
  */
@@ -138,6 +140,8 @@ localCount: bigint, albumCount: bigint, artistCount: bigint, totalDurationMs: bi
  * no se ve en ninguna pantalla.
  */
 failedCount: bigint, };
+
+export type ListeningStatsDto = { totalMsPlayed: bigint, totalPlays: bigint, distinctTracks: bigint, topTracks: Array<TrackListeningStatDto>, topArtists: Array<ArtistListeningStatDto>, };
 
 /**
  * Todo lo que el backend comunica hacia el frontend.
@@ -353,6 +357,8 @@ export type TrackFilterDto = { favoritesOnly: boolean,
  * La vista Biblioteca lo activa; los resultados de búsqueda no.
  */
 localOnly: boolean, albumId: string | null, artistId: string | null, genreId: bigint | null, text: string | null, };
+
+export type TrackListeningStatDto = { track: TrackRowDto, msPlayed: bigint, plays: number, };
 
 /**
  * Fila de lista.

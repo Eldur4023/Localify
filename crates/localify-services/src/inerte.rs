@@ -47,6 +47,7 @@ use localify_core::domain::ids::{
     AlbumId, ArtistId, PlaylistEntryId, PlaylistId, QueueEntryId, TrackId,
 };
 use localify_core::domain::library::{ImportReport, LibraryStats, ScanReport};
+use localify_core::domain::stats::ListeningStats;
 use localify_core::domain::lyrics::Lyrics;
 use localify_core::domain::playlist::{PlaylistDetail, PlaylistSummary};
 use localify_core::domain::queue::{
@@ -134,6 +135,9 @@ impl LibraryService for SinBiblioteca {
         sin_biblioteca()
     }
     async fn stats(&self) -> CoreResult<LibraryStats> {
+        sin_biblioteca()
+    }
+    async fn listening_stats(&self, _top_limit: u8) -> CoreResult<ListeningStats> {
         sin_biblioteca()
     }
     async fn delete_download(&self, _id: &TrackId) -> CoreResult<()> {
