@@ -10,7 +10,7 @@ pub type DbResult<T> = Result<T, DbError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
-    #[error("error de SQLite")]
+    #[error("error de SQLite: {0}")]
     Sqlite(#[from] rusqlite::Error),
 
     #[error("fallo al aplicar migraciones")]

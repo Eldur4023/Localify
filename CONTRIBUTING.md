@@ -128,10 +128,15 @@ present.
 These are not style preferences. Breaking one is a bug even if everything
 compiles and every test passes.
 
-**Downloads are invisible.** No download button, no progress bar, no queue the
-user manages. Pressing play plays. Anything that makes the user aware there was
-a download is wrong — including recommending only songs that happen to be on
-disk already.
+**Downloads trigger themselves — but they're not invisible.** There's still no
+download button and no queue the user manages: pressing play is still the only
+action that exists, and nothing here should ever prompt the user to start,
+queue, or manage a download by hand. What changed is passive visibility: a
+track that's fetching shows its live progress (`downloadProgress`), one that's
+on disk shows a small persistent indicator, and one that failed says so —
+because leaving the user unable to tell "still fetching" from "silently
+broken" turned out to matter more than the row staying blank. Recommending
+only songs that happen to be on disk already is still wrong.
 
 **Audio paths never cross the IPC bridge.** They're stored relative to the
 library folder ([ADR-018](docs/architecture/08-decisions.md)) and resolved in

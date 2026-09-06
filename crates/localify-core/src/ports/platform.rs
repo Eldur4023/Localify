@@ -44,6 +44,13 @@ pub trait AppPaths: Send + Sync + 'static {
     /// persisten relativas (ADR-018); si alguien concatenara por su cuenta,
     /// cambiar la carpeta de biblioteca rompería en sitios impredecibles.
     fn resolve(&self, rel: &Path) -> PathBuf;
+
+    /// Ruta relativa de un fichero de audio, con sharding por prefijo del ID.
+    ///
+    /// Mismo esquema que usan las descargas (`audio/<shard>/<track_id>.<ext>`):
+    /// un fichero importado por el usuario tiene que colocarse igual, porque la
+    /// identidad por nombre de fichero (ADR-021) no distingue de dónde vino.
+    fn audio_rel_path(&self, track_id: &str, extension: &str) -> PathBuf;
 }
 
 /// Almacén de secretos del sistema (DPAPI en Windows).

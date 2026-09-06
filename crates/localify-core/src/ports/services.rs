@@ -19,14 +19,14 @@ use crate::domain::audio::{AudioDevice, DurationMs, EqProfile, Volume};
 use crate::domain::availability::Availability;
 use crate::domain::download::Priority;
 use crate::domain::ids::{AlbumId, ArtistId, PlaylistEntryId, PlaylistId, QueueEntryId, TrackId};
-use crate::domain::library::{LibraryStats, ScanReport};
+use crate::domain::library::{ImportReport, LibraryStats, ScanReport};
 use crate::domain::lyrics::Lyrics;
 use crate::domain::playlist::{PlaylistDetail, PlaylistSummary};
 use crate::domain::queue::{
     AdvanceReason, PlaybackContext, PlayerState, QueueSnapshot, RepeatMode,
 };
 use crate::domain::settings::{Settings, SettingsPatch};
-use crate::domain::track::{TrackFilter, TrackRow, TrackSort};
+use crate::domain::track::{Track, TrackFilter, TrackRow, TrackSort};
 use crate::error::CoreResult;
 use crate::events::ProviderStatus;
 use crate::page::{Page, PageRequest};
@@ -130,6 +130,40 @@ pub trait MetadataService: Send + Sync + 'static {
 
     /// Refresca metadatos caducados en segundo plano. Devuelve cuántos.
     async fn refresh_stale(&self, limit: u32) -> CoreResult<u32>;
+
+    /// Busca candidatos en el proveedor activo, para reasignar los metadatos
+    /// de una pista a mano.
+    ///
+    /// A diferencia de la búsqueda normal, **no persiste nada**: son
+    /// candidatos a elegir, no resultados que ya entraron en el catálogo.
+    /// Solo `assign_metadata` escribe, y solo con el que el usuario elija.
+    async fn search_candidates(&self, query: &str, limit: u8) -> CoreResult<Vec<Track>>;
+
+    /// Sobreescribe los metadatos de una pista con los de `candidate`.
+    ///
+    /// Conserva el identificador de la pista (así no rompe playlists,
+    /// favoritos ni historial) y su fecha de alta; todo lo demás —título,
+    /// artistas, álbum, ISRC…— viene del candidato elegido. Bloquea la pista
+    /// frente al refresco automático (ver
+    /// [`crate::ports::database::TrackRepository::stale`]) y
+    /// olvida cualquier emparejamiento de YouTube anterior, que ya no
+    /// significa nada con la identidad nueva.
+    ///
+    /// # Errors
+    /// Si la pista no existe.
+    async fn assign_metadata(&self, id: &TrackId, candidate: &Track) -> CoreResult<()>;
+
+    /// Vuelve una pista a un estado "sin identificar": el título cae al
+    /// nombre de su fichero si lo tiene descargado, sin artista ni álbum. El
+    /// audio, si lo hay, no se toca.
+    ///
+    /// Como `assign_metadata`, bloquea frente al refresco automático y olvida
+    /// el emparejamiento de YouTube — es el primer paso antes de reasignar a
+    /// mano, no un borrado.
+    ///
+    /// # Errors
+    /// Si la pista no existe.
+    async fn reset_metadata(&self, id: &TrackId) -> CoreResult<()>;
 }
 
 /// Ámbito de una búsqueda.
@@ -405,6 +439,24 @@ pub trait LibraryService: Send + Sync + 'static {
     /// plano con progreso; nunca bloquea el arranque.
     async fn rescan(&self) -> CoreResult<Uuid>;
     async fn last_scan_report(&self) -> CoreResult<Option<ScanReport>>;
+
+    /// Importa ficheros que el usuario ya tenía, para que convivan con lo
+    /// descargado.
+    ///
+    /// A diferencia de `rescan`, que solo recupera ficheros de pistas que el
+    /// catálogo ya conoce, esto da de alta una pista **nueva** por fichero,
+    /// leyendo título, artista y álbum de sus propias etiquetas. Se ejecuta
+    /// síncrono: es una selección manual de decenas de ficheros, no un barrido
+    /// de biblioteca entera.
+    async fn import_files(&self, paths: Vec<PathBuf>) -> CoreResult<ImportReport>;
+
+    /// Borra la pista del catálogo entero, no solo su audio.
+    ///
+    /// A diferencia de [`LibraryService::delete_download`], esto **sí** se
+    /// lleva sus playlists, sus favoritos y su historial — quien llama debe
+    /// pedir confirmación antes de invocarlo. El fichero de audio, si lo hay,
+    /// se borra primero del disco.
+    async fn delete_track(&self, id: &TrackId) -> CoreResult<()>;
 }
 
 #[async_trait]

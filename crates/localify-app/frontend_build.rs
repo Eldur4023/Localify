@@ -246,6 +246,9 @@ const GLOBALES: &[&str] = &[
     "TextDecoder",
     "URL",
     "URLSearchParams",
+    // `CSS.escape`, para construir selectores a partir de un identificador que
+    // puede llevar caracteres que no son válidos sueltos en un selector.
+    "CSS",
     "isNaN",
     "isFinite",
     "parseInt",

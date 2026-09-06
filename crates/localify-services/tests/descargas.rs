@@ -27,7 +27,8 @@ use localify_core::ports::database::TrackRepository;
 use localify_core::ports::platform::AppPaths;
 use localify_core::ports::services::DownloadService;
 use localify_core::ports::youtube::{
-    DownloadObserver, DownloadedFile, MediaInfo, TagWriter, YoutubeDownloader, YoutubeMatcher,
+    DownloadObserver, DownloadedFile, GenericTags, MediaInfo, TagWriter, YoutubeDownloader,
+    YoutubeMatcher,
 };
 use localify_db::Pool;
 use localify_db::pool::TempDbGuard;
@@ -252,6 +253,10 @@ impl TagWriter for EtiquetadorFalso {
 
     async fn read_track_id(&self, _path: &Path) -> CoreResult<Option<String>> {
         Ok(None)
+    }
+
+    async fn read_generic_tags(&self, _path: &Path) -> CoreResult<GenericTags> {
+        Ok(GenericTags::default())
     }
 }
 

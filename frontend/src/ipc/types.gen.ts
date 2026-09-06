@@ -6,6 +6,11 @@ export type AlbumDetailDto = { id: string, title: string, artists: Array<ArtistR
  */
 tracks: Array<TrackRowDto>, };
 
+/**
+ * Referencia ligera a un álbum.
+ */
+export type AlbumRefDto = { id: string, title: string, };
+
 export type AlbumRowDto = { id: string, title: string, artistDisplay: string, year: number | null, 
 /**
  * Identificador de la portada cacheada, o `null` si aún no lo está. El
@@ -114,6 +119,11 @@ export type HomeSectionDto = {
  * Clave i18n del título, con sus parámetros: "Porque escuchaste {artist}".
  */
 key: string, params: Array<[string, string]>, items: HomeItemsDto, };
+
+/**
+ * Resultado de importar ficheros propios del usuario.
+ */
+export type ImportReportDto = { filesSelected: number, imported: number, skippedUnreadable: number, };
 
 export type IntegrationSettingsDto = { discordEnabled: boolean, discordClientId: string | null, };
 
@@ -311,6 +321,17 @@ export type SpotifySettingsDto = { configured: boolean,
  * puso. El `clientSecret` **nunca** aparece.
  */
 clientId: string | null, };
+
+/**
+ * Candidato para reasignar los metadatos de una pista a mano.
+ *
+ * Va y vuelve: `library_search_candidates` lo llena a partir de lo que
+ * devuelve el proveedor, y `library_assign_metadata` lo recibe de vuelta tal
+ * cual lo eligió el usuario. No lleva identificador propio ni fecha de
+ * alta — el backend conserva los de la pista que se está reasignando, nunca
+ * los del candidato (ver `MetadataService::assign_metadata`).
+ */
+export type TrackCandidateDto = { title: string, artists: Array<ArtistRefDto>, album: AlbumRefDto | null, durationMs: number, trackNumber: number | null, discNumber: number | null, explicit: boolean, isrc: string | null, releaseDate: string | null, popularity: number | null, };
 
 /**
  * Detalle de una pista. Solo se pide al abrir una vista concreta.

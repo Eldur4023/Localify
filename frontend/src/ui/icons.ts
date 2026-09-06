@@ -44,6 +44,8 @@ export type Icono =
   | "close"
   | "check"
   | "download"
+  | "cloud-download"
+  | "alert"
   | "music"
   | "expand"
   | "collapse"
@@ -82,6 +84,11 @@ const TRAZOS: Record<Icono, string> = {
   close: "M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4l5.6 5.6L5 17.6 6.4 19l5.6-5.6 5.6 5.6 1.4-1.4-5.6-5.6L19 6.4Z",
   check: "M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2Z",
   download: "M11 3h2v9h4l-5 5-5-5h4V3ZM4 19h16v2H4v-2Z",
+  // El indicador de "ya está en disco": la nube clásica con la flecha, para
+  // que se distinga de un botón de acción como "download" de arriba.
+  "cloud-download":
+    "M19.35 10.04A7.49 7.49 0 0 0 12 4a7.49 7.99 0 0 0-7.35 6.04A5.5 5.5 0 0 0 6.5 20H19a5 5 0 0 0 .35-9.96ZM17 13l-5 5-5-5h3V9h4v4h3Z",
+  alert: "M12 2 1 21h22L12 2Zm1 15h-2v-2h2v2Zm0-4h-2V9h2v4Z",
   music: "M12 3v10.6A4 4 0 1 0 14 17V7h4V3h-6Z",
   expand: "M4 4h7v2H6v5H4V4Zm9 0h7v7h-2V6h-5V4ZM4 13h2v5h5v2H4v-7Zm14 0h2v7h-7v-2h5v-5Z",
   collapse: "M9 4h2v7H4V9h5V4Zm4 0h2v5h5v2h-7V4ZM4 13h7v7H9v-5H4v-2Zm9 2h7v2h-5v5h-2v-7Z",

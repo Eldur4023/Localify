@@ -330,6 +330,33 @@ impl AlbumRepository for SqliteAlbumRepository {
             .await
             .to_core()
     }
+
+    async fn find_by_title_and_artist(
+        &self,
+        title_norm: &str,
+        artist_name_norm: &str,
+    ) -> CoreResult<Option<AlbumId>> {
+        let title_norm = title_norm.to_owned();
+        let artist_name_norm = artist_name_norm.to_owned();
+
+        self.pool
+            .leer(move |conn| {
+                let id: Option<String> = conn
+                    .query_row(
+                        "SELECT al.id FROM albums al
+                         JOIN album_artists aa ON aa.album_id = al.id
+                         JOIN artists ar ON ar.id = aa.artist_id
+                         WHERE al.title_norm = ?1 AND ar.name_norm = ?2
+                         LIMIT 1",
+                        params![title_norm, artist_name_norm],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                Ok(id.map(AlbumId::from_trusted))
+            })
+            .await
+            .to_core()
+    }
 }
 
 #[cfg(test)]
@@ -652,5 +679,47 @@ mod tests {
             por_viejo, 0,
             "el título viejo no debe dejar residuo en el índice"
         );
+    }
+
+    #[tokio::test]
+    async fn se_encuentra_un_album_existente_por_titulo_y_artista() {
+        let (repo, _tracks, _pool, _g) = repos().await;
+        let al = album("Hot Space", vec![artista("Queen")]);
+        repo.upsert(std::slice::from_ref(&al))
+            .await
+            .expect("guarda");
+
+        let encontrado = repo
+            .find_by_title_and_artist(&text::normalize("Hot Space"), &text::normalize("Queen"))
+            .await
+            .expect("consulta");
+        assert_eq!(encontrado, Some(al.id));
+    }
+
+    #[tokio::test]
+    async fn un_titulo_igual_con_otro_artista_no_se_confunde() {
+        let (repo, _tracks, _pool, _g) = repos().await;
+        repo.upsert(&[album("Greatest Hits", vec![artista("Queen")])])
+            .await
+            .expect("guarda");
+
+        let encontrado = repo
+            .find_by_title_and_artist(
+                &text::normalize("Greatest Hits"),
+                &text::normalize("David Bowie"),
+            )
+            .await
+            .expect("consulta");
+        assert!(encontrado.is_none());
+    }
+
+    #[tokio::test]
+    async fn un_album_inexistente_no_se_encuentra() {
+        let (repo, _tracks, _pool, _g) = repos().await;
+        let encontrado = repo
+            .find_by_title_and_artist(&text::normalize("Nada"), &text::normalize("Nadie"))
+            .await
+            .expect("consulta");
+        assert!(encontrado.is_none());
     }
 }

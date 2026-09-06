@@ -36,7 +36,7 @@ use localify_core::domain::album::{AlbumDetail, AlbumFilter, AlbumRow};
 use localify_core::domain::artist::{ArtistDetail, ArtistRow};
 use localify_core::domain::audio::DurationMs;
 use localify_core::domain::ids::{AlbumId, ArtistId, TrackId};
-use localify_core::domain::library::{LibraryStats, PlayHistoryEntry, ScanReport};
+use localify_core::domain::library::{ImportReport, LibraryStats, PlayHistoryEntry, ScanReport};
 use localify_core::domain::track::{TrackFilter, TrackRow, TrackSort};
 use localify_core::error::{CoreError, CoreResult};
 use localify_core::events::{DomainEvent, EventPublisher, LibraryScope};
@@ -48,6 +48,7 @@ use localify_core::ports::database::{
 use localify_core::ports::platform::{AppPaths, FileSystem};
 use localify_core::ports::services::LibraryService;
 use localify_core::ports::youtube::TagWriter;
+use localify_core::text;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -630,6 +631,183 @@ impl LibraryService for LibraryServiceImpl {
     async fn last_scan_report(&self) -> CoreResult<Option<ScanReport>> {
         self.deps.informes.last().await
     }
+
+    async fn delete_track(&self, id: &TrackId) -> CoreResult<()> {
+        // El fichero primero: si el borrado de la fila fallara después de
+        // borrar el fichero no pasaría nada (la pista quedaría `Absent`, como
+        // si nunca se hubiera descargado), pero al revés dejaría un fichero
+        // huérfano que ningún catálogo referencia ya.
+        if let Some(registro) = self.deps.audio.get(id).await? {
+            let absoluta = self.deps.paths.resolve(&registro.rel_path);
+            if let Err(e) = self.deps.fs.remove_file(&absoluta).await {
+                debug!(pista = %id, error = %e, "no se pudo borrar el fichero");
+            }
+        }
+
+        self.deps.tracks.delete(id).await?;
+        self.deps.bus.publish(DomainEvent::LibraryChanged {
+            scope: LibraryScope::Tracks,
+        });
+        info!(pista = %id, "pista borrada del catálogo");
+        Ok(())
+    }
+
+    async fn import_files(&self, paths: Vec<std::path::PathBuf>) -> CoreResult<ImportReport> {
+        let informe = importar(&self.deps, paths).await;
+
+        if informe.imported > 0 {
+            self.deps.bus.publish(DomainEvent::LibraryChanged {
+                scope: LibraryScope::Tracks,
+            });
+        }
+        info!(?informe, "importación de ficheros propios terminada");
+        Ok(informe)
+    }
+}
+
+/// Importa una selección manual de ficheros. Nunca aborta el lote entero por
+/// un fichero que falle: se cuenta y se sigue con el siguiente.
+async fn importar(deps: &Arc<Dependencias>, rutas: Vec<std::path::PathBuf>) -> ImportReport {
+    let mut informe = ImportReport {
+        files_selected: u32::try_from(rutas.len()).unwrap_or(u32::MAX),
+        ..ImportReport::default()
+    };
+
+    for absoluta in rutas {
+        match importar_uno(deps, &absoluta).await {
+            Ok(()) => informe.imported += 1,
+            Err(e) => {
+                debug!(fichero = %absoluta.display(), error = %e, "no se pudo importar");
+                informe.skipped_unreadable += 1;
+            }
+        }
+    }
+
+    informe
+}
+
+/// Da de alta un único fichero propio del usuario.
+///
+/// A diferencia de [`registrar`], que recupera un fichero de una pista que el
+/// catálogo **ya conoce**, aquí la pista es nueva: sus metadatos salen de las
+/// etiquetas del propio fichero, no de ningún proveedor. El fichero se copia
+/// —nunca se mueve ni se toca el original— al mismo esquema de rutas que usan
+/// las descargas, para que la identidad por nombre de fichero (ADR-021) siga
+/// funcionando en un `rescan` posterior.
+async fn importar_uno(deps: &Arc<Dependencias>, absoluta: &std::path::Path) -> CoreResult<()> {
+    use localify_core::domain::album::{Album, AlbumType, CoverSet};
+    use localify_core::domain::audio::AudioFormat;
+    use localify_core::domain::track::{AlbumRef, ArtistRef, Track};
+
+    let formato = absoluta
+        .extension()
+        .and_then(|e| e.to_str())
+        .and_then(AudioFormat::from_extension)
+        .ok_or_else(|| CoreError::invalid("extensión no reconocida"))?;
+
+    let tags = deps.tagger.read_generic_tags(absoluta).await?;
+
+    // `tracks.duration_ms` lleva un `CHECK (duration_ms > 0)`: caer a cero
+    // violaría la restricción con un error de SQLite en lugar de un fallo
+    // legible. Un fichero cuya duración no se pueda medir no es un fichero
+    // de audio utilizable, así que se cuenta como ilegible y no se importa.
+    let duracion = tags
+        .duration
+        .filter(|d| !d.is_zero())
+        .ok_or_else(|| CoreError::invalid("no se pudo determinar la duración del audio"))?;
+
+    let titulo = tags.title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| {
+        absoluta
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Pista sin título")
+            .to_owned()
+    });
+
+    let artistas: Vec<ArtistRef> = match tags.artist.filter(|a| !a.trim().is_empty()) {
+        Some(nombre) => vec![ArtistRef {
+            id: ArtistId::nuevo_local(),
+            name: nombre,
+        }],
+        None => Vec::new(),
+    };
+
+    // Álbum: solo si la etiqueta lo trae, y reutilizando uno ya existente con
+    // el mismo título y artista en vez de mintar uno sintético por pista. Sin
+    // esto, importar varias pistas del mismo álbum lo fragmentaría en tantos
+    // álbumes de una sola canción como pistas se importen.
+    let album_nuevo = tags.album.filter(|a| !a.trim().is_empty()).map(|titulo_album| {
+        let normalizado = text::normalize(&titulo_album);
+        (titulo_album, normalizado)
+    });
+
+    let album_existente = if let (Some((_, titulo_norm)), Some(principal)) =
+        (&album_nuevo, artistas.first())
+    {
+        deps.albums
+            .find_by_title_and_artist(titulo_norm, &text::normalize(&principal.name))
+            .await?
+    } else {
+        None
+    };
+
+    let album_ref = match (&album_nuevo, &album_existente) {
+        (Some((titulo_album, _)), Some(id)) => Some(AlbumRef {
+            id: id.clone(),
+            title: titulo_album.clone(),
+        }),
+        (Some((titulo_album, _)), None) => Some(AlbumRef {
+            id: AlbumId::nuevo_local(),
+            title: titulo_album.clone(),
+        }),
+        (None, _) => None,
+    };
+
+    let track_id = TrackId::nuevo_local();
+    let track = Track {
+        id: track_id.clone(),
+        title: titulo,
+        album: album_ref.clone(),
+        artists: artistas.clone(),
+        duration: duracion,
+        track_number: tags.track_number,
+        disc_number: None,
+        explicit: false,
+        isrc: None,
+        release_date: None,
+        popularity: None,
+        added_at: chrono::Utc::now(),
+    };
+
+    // El fichero se copia **antes** de escribir nada en la base de datos: si la
+    // copia falla, no debe quedar un catálogo apuntando a un audio que no
+    // existe.
+    let relativa = deps.paths.audio_rel_path(track_id.as_str(), formato.extension());
+    let destino = deps.paths.resolve(&relativa);
+    if let Some(padre) = destino.parent() {
+        deps.fs.ensure_dir(padre).await?;
+    }
+    deps.fs.copy_file(absoluta, &destino).await?;
+
+    deps.tracks.upsert(std::slice::from_ref(&track)).await?;
+
+    if let (Some(album_ref), None) = (&album_ref, &album_existente) {
+        deps.albums
+            .upsert(&[Album {
+                id: album_ref.id.clone(),
+                title: album_ref.title.clone(),
+                artists: artistas,
+                album_type: AlbumType::Album,
+                release_date: None,
+                total_tracks: None,
+                cover_url: None,
+                covers: CoverSet::default(),
+                label: None,
+            }])
+            .await?;
+    }
+
+    registrar(deps, &track_id, &relativa, &destino).await
 }
 
 /// Decide si una escucha cuenta como completa.

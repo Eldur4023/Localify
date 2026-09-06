@@ -23,6 +23,7 @@ import type {
 } from "../ipc/types.gen.js";
 import { library, page } from "../ipc/client.js";
 import { alCambiarIdioma, t } from "../i18n/index.js";
+import { alRecibirTipo } from "../ipc/events.js";
 import { mountTrackList } from "../ui/track-list.js";
 import type { Pagina } from "../ui/virtual-list.js";
 import type { Vista } from "../router.js";
@@ -138,12 +139,20 @@ export function mountLibraryView(contenedor: HTMLElement): Vista {
   const recargar = (): void => trackList.refrescar();
   orden.addEventListener("change", recargar);
 
+  // Un rescan y una importación de ficheros propios cambian qué pistas hay
+  // sin que el usuario haga nada en esta vista: sin escuchar el evento, las
+  // canciones nuevas solo aparecerían al navegar fuera y volver.
+  const dejarLibraryChanged = alRecibirTipo("libraryChanged", (evento) => {
+    if (evento.scope === "tracks") recargar();
+  });
+
   etiquetas();
   const dejarIdioma = alCambiarIdioma(etiquetas);
 
   return {
     destroy(): void {
       dejarIdioma();
+      dejarLibraryChanged();
       orden.removeEventListener("change", recargar);
       trackList.destroy();
       el.remove();

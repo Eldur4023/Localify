@@ -15,9 +15,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use localify_core::domain::ids::{AlbumId, ArtistId, TrackId};
+use localify_core::domain::track::Track;
 use localify_core::error::{CoreError, CoreResult};
 use localify_core::events::{DomainEvent, EventPublisher, LibraryScope};
-use localify_core::ports::database::{AlbumRepository, ArtistRepository, TrackRepository};
+use localify_core::ports::database::{
+    AlbumRepository, ArtistRepository, AudioFileRepository, TrackRepository,
+};
 use localify_core::ports::metadata_provider::{ImageFetcher, MetadataProvider};
 use localify_core::ports::platform::AppPaths;
 use localify_core::ports::services::MetadataService;
@@ -45,6 +48,9 @@ pub struct MetadataServiceImpl {
     /// Ausente en los dobles de test y en modo degradado: entonces esas pistas
     /// se quedan con su icono, que es lo que hacían antes.
     matches: Option<Arc<dyn localify_core::ports::database::YoutubeMatchRepository>>,
+    /// Para el nombre de fichero al resetear metadatos. Ausente en los
+    /// dobles de test: entonces el reseteo conserva el título que ya había.
+    audio: Option<Arc<dyn AudioFileRepository>>,
 }
 
 impl std::fmt::Debug for MetadataServiceImpl {
@@ -74,6 +80,7 @@ impl MetadataServiceImpl {
             imagenes,
             paths,
             matches: None,
+            audio: None,
         }
     }
 
@@ -88,6 +95,14 @@ impl MetadataServiceImpl {
         matches: Arc<dyn localify_core::ports::database::YoutubeMatchRepository>,
     ) -> Self {
         self.matches = Some(matches);
+        self
+    }
+
+    /// Añade el repositorio de ficheros de audio, para el nombre de fichero
+    /// al resetear metadatos. Mismo motivo que [`Self::con_emparejamientos`].
+    #[must_use]
+    pub fn con_audio(mut self, audio: Arc<dyn AudioFileRepository>) -> Self {
+        self.audio = Some(audio);
         self
     }
 
@@ -461,6 +476,89 @@ impl MetadataService for MetadataServiceImpl {
                 Ok(0)
             }
         }
+    }
+
+    async fn search_candidates(&self, query: &str, limit: u8) -> CoreResult<Vec<Track>> {
+        // Sin `offset`: el usuario elige de una lista corta, no pasa páginas.
+        let pagina = self.provider.search_tracks(query, limit, 0).await?;
+        Ok(pagina.items)
+    }
+
+    async fn assign_metadata(&self, id: &TrackId, candidate: &Track) -> CoreResult<()> {
+        let actual = self
+            .tracks
+            .get(id)
+            .await?
+            .ok_or_else(|| CoreError::not_found("track", id.as_str()))?;
+
+        let pista = Track {
+            id: id.clone(),
+            title: candidate.title.clone(),
+            album: candidate.album.clone(),
+            artists: candidate.artists.clone(),
+            duration: candidate.duration,
+            track_number: candidate.track_number,
+            disc_number: candidate.disc_number,
+            explicit: candidate.explicit,
+            isrc: candidate.isrc.clone(),
+            release_date: candidate.release_date,
+            popularity: candidate.popularity,
+            // Se conservan, no vienen del candidato: la fecha de alta es de
+            // cuándo entró *esta* pista en la biblioteca, no de él.
+            added_at: actual.added_at,
+        };
+
+        self.persistir(std::slice::from_ref(&pista)).await?;
+        self.tracks.set_metadata_locked(id, true).await?;
+        if let Some(matches) = &self.matches {
+            // El vídeo elegido o rechazado con la identidad vieja no dice
+            // nada con la nueva: sesgaría el próximo emparejamiento.
+            matches.clear(id).await?;
+        }
+        Ok(())
+    }
+
+    async fn reset_metadata(&self, id: &TrackId) -> CoreResult<()> {
+        let actual = self
+            .tracks
+            .get(id)
+            .await?
+            .ok_or_else(|| CoreError::not_found("track", id.as_str()))?;
+
+        let titulo_de_fichero = match &self.audio {
+            Some(audio) => audio.get(id).await?.and_then(|registro| {
+                registro
+                    .rel_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(str::to_owned)
+            }),
+            None => None,
+        };
+
+        let pista = Track {
+            id: id.clone(),
+            title: titulo_de_fichero.unwrap_or(actual.title),
+            album: None,
+            artists: Vec::new(),
+            // La duración es del fichero medido, no un metadato del proveedor:
+            // no se toca, igual que el audio en sí.
+            duration: actual.duration,
+            track_number: None,
+            disc_number: None,
+            explicit: false,
+            isrc: None,
+            release_date: None,
+            popularity: None,
+            added_at: actual.added_at,
+        };
+
+        self.persistir(std::slice::from_ref(&pista)).await?;
+        self.tracks.set_metadata_locked(id, true).await?;
+        if let Some(matches) = &self.matches {
+            matches.clear(id).await?;
+        }
+        Ok(())
     }
 }
 

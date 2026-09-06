@@ -1,8 +1,10 @@
 //! Servicio de descargas, implementado como actor.
 //!
-//! Convierte "quiero esta pista" en un fichero local completo y etiquetado, de
-//! forma **invisible** para el usuario: no hay botón de descargar, no hay
-//! gestor, no hay barra de progreso que atender.
+//! Convierte "quiero esta pista" en un fichero local completo y etiquetado, sin
+//! que el usuario tenga que gestionar nada: no hay botón de descargar, no hay
+//! gestor, no hay cola que atender. Lo que sí se ve, pasivamente, es *si* algo
+//! está pasando: el progreso de una descarga en curso y un indicador en lo ya
+//! descargado, para que una canción que tarda no se confunda con una rota.
 //!
 //! ## Lo que este servicio NO tiene
 //!
@@ -427,6 +429,15 @@ const fn localify_ytdlp_extension(preferencia: FormatPreference) -> &'static str
 struct Observador {
     track: TrackId,
     bus: Arc<dyn EventPublisher>,
+    /// Para persistir el progreso real, no solo emitirlo. Sin esto, una
+    /// consulta de snapshot (`library_availability`) veía siempre 0% a mitad
+    /// de descarga: el evento en vivo llevaba el número correcto, pero la fila
+    /// en la base de datos se quedaba con lo que puso `guardar_estado` al
+    /// entrar en `Downloading`.
+    jobs: Arc<dyn DownloadJobRepository>,
+    priority: Priority,
+    video: String,
+    attempts: u8,
     ultimo: std::sync::Mutex<std::time::Instant>,
     avisado: std::sync::atomic::AtomicBool,
 }
@@ -449,12 +460,38 @@ impl DownloadObserver for Observador {
             }
         });
 
-        if toca {
-            self.bus.publish(DomainEvent::DownloadProgress {
-                track_id: self.track.clone(),
-                percent: fraccion,
-            });
+        if !toca {
+            return;
         }
+
+        self.bus.publish(DomainEvent::DownloadProgress {
+            track_id: self.track.clone(),
+            percent: fraccion,
+        });
+
+        // `on_progress` es síncrono y llega desde el hilo que lee la salida de
+        // yt-dlp; persistir es async, así que se lanza una tarea aparte y no
+        // se espera. Puede haber una carrera cosmética e inofensiva —un
+        // progreso tardío que se escribe justo después de que `finalizar` ya
+        // haya movido el trabajo a `Finalizing`—, pero el siguiente evento (o
+        // el borrado del trabajo al terminar) lo corrige enseguida.
+        let jobs = Arc::clone(&self.jobs);
+        let job = DownloadJob {
+            track_id: self.track.clone(),
+            state: DownloadState::Downloading,
+            priority: self.priority,
+            video_id: Some(self.video.clone()),
+            tmp_path: None,
+            bytes_done: progress.bytes_done,
+            bytes_total: progress.bytes_total,
+            attempts: self.attempts,
+            last_error_key: None,
+        };
+        tokio::spawn(async move {
+            if let Err(e) = jobs.upsert(&job).await {
+                warn!(error = %e, "no se pudo persistir el progreso de la descarga");
+            }
+        });
     }
 
     fn on_playable(&self, _ruta: &std::path::Path) {
@@ -651,6 +688,10 @@ async fn descargar(
     let observador = Observador {
         track: track.clone(),
         bus: Arc::clone(&deps.bus),
+        jobs: Arc::clone(&deps.jobs),
+        priority,
+        video: video.to_owned(),
+        attempts: intento + 1,
         ultimo: std::sync::Mutex::new(std::time::Instant::now()),
         avisado: std::sync::atomic::AtomicBool::new(false),
     };
@@ -912,6 +953,94 @@ mod tests {
         // el puerto y habria que revisar la decision a conciencia.
         fn acepta_el_contrato<T: DownloadService>() {}
         acepta_el_contrato::<DownloadActor>();
+    }
+
+    /// Repositorio de trabajos que solo recuerda el último `upsert`.
+    #[derive(Default)]
+    struct JobsDePrueba {
+        guardado: std::sync::Mutex<Option<DownloadJob>>,
+    }
+
+    #[async_trait]
+    impl DownloadJobRepository for JobsDePrueba {
+        async fn upsert(&self, job: &DownloadJob) -> CoreResult<()> {
+            *self.guardado.lock().expect("lock") = Some(job.clone());
+            Ok(())
+        }
+        async fn get(&self, _track: &TrackId) -> CoreResult<Option<DownloadJob>> {
+            Ok(self.guardado.lock().expect("lock").clone())
+        }
+        async fn delete(&self, _track: &TrackId) -> CoreResult<()> {
+            Ok(())
+        }
+        async fn interrupted(&self) -> CoreResult<Vec<DownloadJob>> {
+            Ok(Vec::new())
+        }
+        async fn failed(&self) -> CoreResult<Vec<DownloadJob>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct BusMudo;
+    impl EventPublisher for BusMudo {
+        fn publish(&self, _event: DomainEvent) {}
+    }
+
+    #[tokio::test]
+    async fn el_progreso_se_persiste_de_verdad_y_no_solo_se_emite() {
+        // Antes, `guardar_estado` siempre subía `bytes_done: 0, bytes_total:
+        // None` al entrar en `Downloading`, y solo el evento en vivo llevaba
+        // el número real. Una consulta de snapshot a mitad de descarga
+        // (`library_availability`) veía siempre 0%. Este test comprueba la
+        // fila, no el evento.
+        let jobs = Arc::new(JobsDePrueba::default());
+        let track = TrackId::from_trusted("kM0Fpbz0W8U");
+
+        let observador = Observador {
+            track: track.clone(),
+            bus: Arc::new(BusMudo),
+            jobs: Arc::clone(&jobs) as Arc<dyn DownloadJobRepository>,
+            priority: Priority::Immediate,
+            video: "kM0Fpbz0W8U".to_owned(),
+            attempts: 1,
+            // Ya pasado el intervalo: sin esto, la primera llamada real se
+            // descartaría por el límite de frecuencia y el test no probaría
+            // nada.
+            ultimo: std::sync::Mutex::new(
+                std::time::Instant::now()
+                    .checked_sub(INTERVALO_PROGRESO)
+                    .unwrap_or_else(std::time::Instant::now),
+            ),
+            avisado: std::sync::atomic::AtomicBool::new(false),
+        };
+
+        observador.on_progress(&DownloadProgress {
+            bytes_done: 12_345,
+            bytes_total: Some(50_000),
+            playable: false,
+            state: DownloadState::Downloading,
+        });
+
+        // La persistencia se lanza en una tarea aparte (`on_progress` es
+        // síncrono); hay que darle ocasión de correr.
+        let mut visto = false;
+        for _ in 0..100 {
+            if jobs
+                .get(&track)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|j| j.bytes_done == 12_345 && j.bytes_total == Some(50_000))
+            {
+                visto = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            visto,
+            "el progreso real debe persistirse en el repositorio, no solo emitirse por evento"
+        );
     }
 }
 

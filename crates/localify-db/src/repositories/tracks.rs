@@ -640,7 +640,8 @@ impl TrackRepository for SqliteTrackRepository {
             .leer(move |conn| {
                 let mut stmt = conn.prepare_cached(
                     "SELECT id FROM tracks
-                     WHERE metadata_at IS NULL OR metadata_at < ?1
+                     WHERE (metadata_at IS NULL OR metadata_at < ?1)
+                       AND metadata_locked = 0
                      ORDER BY metadata_at ASC NULLS FIRST
                      LIMIT ?2",
                 )?;
@@ -688,6 +689,34 @@ impl TrackRepository for SqliteTrackRepository {
                     total_bytes: total_bytes.max(0).unsigned_abs(),
                     failed_count: failed_count.max(0).unsigned_abs(),
                 })
+            })
+            .await
+            .to_core()
+    }
+
+    async fn delete(&self, id: &TrackId) -> CoreResult<()> {
+        let id = id.as_str().to_owned();
+        self.pool
+            .escribir(move |tx| {
+                // El esquema arrastra `track_artists`, `audio_files`,
+                // `youtube_matches`, `favorites`, `download_jobs` y las
+                // entradas de playlist por `ON DELETE CASCADE`.
+                tx.execute("DELETE FROM tracks WHERE id = ?1", [&id])?;
+                Ok(())
+            })
+            .await
+            .to_core()
+    }
+
+    async fn set_metadata_locked(&self, id: &TrackId, locked: bool) -> CoreResult<()> {
+        let id = id.as_str().to_owned();
+        self.pool
+            .escribir(move |tx| {
+                tx.execute(
+                    "UPDATE tracks SET metadata_locked = ?2 WHERE id = ?1",
+                    params![id, i64::from(locked)],
+                )?;
+                Ok(())
             })
             .await
             .to_core()
@@ -1382,18 +1411,56 @@ mod tests {
         let t = pista("X", vec![artista("A"), artista("B")]);
         repo.upsert(std::slice::from_ref(&t)).await.expect("guarda");
 
-        let id = t.id.as_str().to_owned();
-        pool.escribir(move |tx| {
-            tx.execute("DELETE FROM tracks WHERE id = ?1", [&id])?;
-            Ok(())
-        })
-        .await
-        .expect("borra");
+        repo.delete(&t.id).await.expect("borra");
 
+        assert!(repo.get(&t.id).await.expect("consulta").is_none());
         let huerfanos: i64 = pool
             .leer(|c| Ok(c.query_row("SELECT COUNT(*) FROM track_artists", [], |r| r.get(0))?))
             .await
             .expect("cuenta");
         assert_eq!(huerfanos, 0, "ON DELETE CASCADE debe limpiar track_artists");
+    }
+
+    #[tokio::test]
+    async fn borrar_una_pista_inexistente_no_falla() {
+        let (repo, _pool, _g) = repo().await;
+        repo.delete(&TrackId::nuevo_local())
+            .await
+            .expect("borrar lo que no está no es un error");
+    }
+
+    #[tokio::test]
+    async fn una_pista_bloqueada_no_sale_en_las_caducadas() {
+        let (repo, pool, _g) = repo().await;
+        let t = pista("Bloqueada", vec![artista("A")]);
+        repo.upsert(std::slice::from_ref(&t)).await.expect("guarda");
+
+        // Mismo truco que `stale_devuelve_primero_lo_que_nunca_se_refresco`:
+        // se envejece a mano en vez de esperar a que pase un segundo de reloj.
+        let id = t.id.as_str().to_owned();
+        pool.escribir(move |tx| {
+            tx.execute("UPDATE tracks SET metadata_at = NULL WHERE id = ?1", [&id])?;
+            Ok(())
+        })
+        .await
+        .expect("envejece");
+
+        assert!(
+            repo.stale(3600, 10)
+                .await
+                .expect("consulta")
+                .contains(&t.id),
+            "sin bloquear, una pista caducada debe ofrecerse al refresco"
+        );
+
+        repo.set_metadata_locked(&t.id, true).await.expect("bloquea");
+        assert!(
+            !repo
+                .stale(3600, 10)
+                .await
+                .expect("consulta")
+                .contains(&t.id),
+            "una pista bloqueada no debe ofrecerse al refresco automático aunque haya caducado"
+        );
     }
 }

@@ -56,10 +56,9 @@ pub struct LibraryStats {
     pub total_bytes: u64,
     /// Canciones cuya descarga falló y sigue fallada.
     ///
-    /// Es el único sitio donde ese número aparece. Las descargas son invisibles
-    /// por diseño y las listas no dicen si una canción está en disco, así que sin
-    /// esto un fallo de emparejamiento no se veía en ninguna parte: la canción
-    /// simplemente no sonaba, y no había forma de pedir que se reintentara.
+    /// Es el recuento agregado para Ajustes; cada fila ya muestra su propio
+    /// aviso (`Availability::Failed`), pero sin este total no había forma de
+    /// saber de un vistazo si valía la pena pulsar "reintentar fallidas".
     pub failed_count: u64,
 }
 
@@ -76,6 +75,18 @@ pub struct ScanReport {
     /// Ficheros ilegibles o sin metadatos utilizables.
     pub unreadable: u32,
     pub duration_ms: u64,
+}
+
+/// Resultado de importar ficheros propios del usuario.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportReport {
+    /// Cuántos ficheros eligió el usuario en el selector.
+    pub files_selected: u32,
+    /// Cuántos entraron en la biblioteca.
+    pub imported: u32,
+    /// Ficheros con una extensión no reconocida, o que `lofty` no pudo abrir.
+    pub skipped_unreadable: u32,
 }
 
 /// Una reproducción registrada.

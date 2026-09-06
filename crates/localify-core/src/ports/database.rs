@@ -49,9 +49,25 @@ pub trait TrackRepository: Send + Sync + 'static {
     async fn rows_by_ids(&self, ids: &[TrackId]) -> CoreResult<Vec<TrackRow>>;
 
     /// Pistas cuyos metadatos llevan más de `older_than_secs` sin refrescarse.
+    ///
+    /// Nunca incluye una pista con `metadata_locked` — el refresco automático
+    /// no debe pisar unos metadatos que el usuario acaba de fijar a mano
+    /// (resetear o reasignar, ver `LibraryService`).
     async fn stale(&self, older_than_secs: u64, limit: u32) -> CoreResult<Vec<TrackId>>;
 
     async fn stats(&self) -> CoreResult<LibraryStats>;
+
+    /// Borra la pista del catálogo entero: favoritos, historial, playlists y
+    /// el fichero de audio si lo hay se van con ella por `ON DELETE CASCADE`.
+    ///
+    /// A diferencia de borrar solo la descarga, esto **no tiene marcha
+    /// atrás** para las playlists ni el historial — quien llama debe pedir
+    /// confirmación antes.
+    async fn delete(&self, id: &TrackId) -> CoreResult<()>;
+
+    /// Fija si los metadatos de una pista están bloqueados frente al refresco
+    /// automático. Ver la nota de [`TrackRepository::stale`].
+    async fn set_metadata_locked(&self, id: &TrackId, locked: bool) -> CoreResult<()>;
 }
 
 #[async_trait]
@@ -65,6 +81,18 @@ pub trait AlbumRepository: Send + Sync + 'static {
     ) -> CoreResult<Page<AlbumRow>>;
     async fn tracks_of(&self, id: &AlbumId) -> CoreResult<Vec<TrackRow>>;
     async fn set_cover_cached(&self, id: &AlbumId, cached: bool) -> CoreResult<()>;
+
+    /// Álbum ya existente con este título y artista normalizados, si lo hay.
+    ///
+    /// Solo lo necesita el importador de ficheros propios: a diferencia de un
+    /// artista (`asegurar_artista` ya lo pliega solo), `upsert` no busca un
+    /// álbum por título antes de crear uno con id sintético, y sin esto cada
+    /// pista de un mismo álbum importada por separado mintaría el suyo propio.
+    async fn find_by_title_and_artist(
+        &self,
+        title_norm: &str,
+        artist_name_norm: &str,
+    ) -> CoreResult<Option<AlbumId>>;
 }
 
 #[async_trait]
@@ -189,6 +217,14 @@ pub trait YoutubeMatchRepository: Send + Sync + 'static {
     /// Marca un vídeo como incorrecto para que no vuelva a elegirse.
     async fn reject(&self, track: &TrackId, video_id: &str) -> CoreResult<()>;
     async fn rejected_ids(&self, track: &TrackId) -> CoreResult<Vec<String>>;
+
+    /// Olvida todo lo emparejado para una pista.
+    ///
+    /// Se usa al resetear o reasignar sus metadatos: los vídeos rechazados o
+    /// elegidos con la identidad vieja no significan nada con la nueva, y
+    /// dejarlos sesgaría el próximo emparejamiento hacia un vídeo que ya no
+    /// corresponde a lo que la pista dice ser.
+    async fn clear(&self, track: &TrackId) -> CoreResult<()>;
 }
 
 #[async_trait]

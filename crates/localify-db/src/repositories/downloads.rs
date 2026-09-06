@@ -326,6 +326,17 @@ impl YoutubeMatchRepository for SqliteYoutubeMatchRepository {
             .await
             .to_core()
     }
+
+    async fn clear(&self, track: &TrackId) -> CoreResult<()> {
+        let id = track.as_str().to_owned();
+        self.pool
+            .escribir(move |tx| {
+                tx.execute("DELETE FROM youtube_matches WHERE track_id = ?1", [&id])?;
+                Ok(())
+            })
+            .await
+            .to_core()
+    }
 }
 
 #[cfg(test)]
@@ -608,5 +619,28 @@ mod tests {
 
         assert!(c.jobs.get(&id).await.expect("consulta").is_none());
         assert!(c.matches.best_for(&id).await.expect("consulta").is_none());
+    }
+
+    #[tokio::test]
+    async fn borrar_los_emparejamientos_de_una_pista_olvida_aceptados_y_rechazados() {
+        // Se usa al resetear o reasignar metadatos: con una identidad nueva, ni
+        // el vídeo elegido ni los rechazados dicen nada de la pista.
+        let c = ctx().await;
+        let id = nueva_pista(&c.pool).await;
+        c.matches
+            .save(&MatchResult {
+                track_id: id.clone(),
+                best: candidato(91.0),
+                confidence: Confidence::High,
+                candidates_considered: 1,
+            })
+            .await
+            .expect("match");
+        c.matches.reject(&id, "otro_video").await.expect("rechaza");
+
+        c.matches.clear(&id).await.expect("olvida");
+
+        assert!(c.matches.best_for(&id).await.expect("consulta").is_none());
+        assert!(c.matches.rejected_ids(&id).await.expect("consulta").is_empty());
     }
 }

@@ -24,9 +24,10 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use localify_core::domain::audio::DurationMs;
 use localify_core::domain::track::Track;
 use localify_core::error::CoreResult;
-use localify_core::ports::youtube::TagWriter;
+use localify_core::ports::youtube::{GenericTags, TagWriter};
 use lofty::config::WriteOptions;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::picture::{Picture, PictureType};
@@ -189,6 +190,37 @@ fn leer_id_sincrono(ruta: &Path) -> Option<String> {
     leer_id_de_etiquetas(ruta).or_else(|| id_desde_nombre(ruta))
 }
 
+/// Lee los metadatos genéricos de un fichero ajeno, de forma síncrona.
+///
+/// Nunca falla por falta de etiquetas legibles: un fichero sin etiqueta, o que
+/// `lofty` no sabe abrir, devuelve `GenericTags::default()` en lugar de error,
+/// porque quien importa un fichero propio no debe rechazarlo solo porque no
+/// esté etiquetado.
+fn leer_generico_sincrono(ruta: &Path) -> GenericTags {
+    let Some(fichero) = Probe::open(ruta).ok().and_then(|p| p.read().ok()) else {
+        return GenericTags::default();
+    };
+
+    let Some(tag) = fichero.primary_tag() else {
+        return GenericTags {
+            duration: Some(DurationMs::new(
+                u32::try_from(fichero.properties().duration().as_millis()).unwrap_or(u32::MAX),
+            )),
+            ..GenericTags::default()
+        };
+    };
+
+    GenericTags {
+        title: tag.title().map(std::borrow::Cow::into_owned),
+        artist: tag.artist().map(std::borrow::Cow::into_owned),
+        album: tag.album().map(std::borrow::Cow::into_owned),
+        track_number: tag.track().and_then(|n| u16::try_from(n).ok()),
+        duration: Some(DurationMs::new(
+            u32::try_from(fichero.properties().duration().as_millis()).unwrap_or(u32::MAX),
+        )),
+    }
+}
+
 #[async_trait]
 impl TagWriter for EtiquetadorLofty {
     async fn write(&self, path: &Path, track: &Track, cover: Option<&[u8]>) -> CoreResult<()> {
@@ -216,6 +248,18 @@ impl TagWriter for EtiquetadorLofty {
             })?;
 
         Ok(id)
+    }
+
+    async fn read_generic_tags(&self, path: &Path) -> CoreResult<GenericTags> {
+        let ruta = path.to_path_buf();
+
+        let tags = tokio::task::spawn_blocking(move || leer_generico_sincrono(&ruta))
+            .await
+            .map_err(|e| {
+                localify_core::error::CoreError::internal(format!("la lectura se cayó: {e}"))
+            })?;
+
+        Ok(tags)
     }
 }
 
@@ -458,6 +502,58 @@ mod tests {
             .await
             .expect("consulta");
         assert!(leido.is_none());
+    }
+
+    #[tokio::test]
+    async fn los_metadatos_genericos_se_leen_de_un_fichero_etiquetado() {
+        let ruta = mp3_de_prueba("generico-etiquetado.mp3");
+        let etiquetador = EtiquetadorLofty::nuevo();
+        etiquetador
+            .write(&ruta, &pista(), None)
+            .await
+            .expect("etiqueta");
+
+        let tags = etiquetador
+            .read_generic_tags(&ruta)
+            .await
+            .expect("lee metadatos genéricos");
+        assert_eq!(tags.title.as_deref(), Some("Under Pressure"));
+        assert_eq!(tags.artist.as_deref(), Some("Queen, David Bowie"));
+        assert_eq!(tags.album.as_deref(), Some("Hot Space"));
+        assert_eq!(tags.track_number, Some(11));
+
+        let _ = std::fs::remove_file(ruta);
+    }
+
+    #[tokio::test]
+    async fn los_metadatos_genericos_de_un_fichero_sin_etiquetas_no_revientan() {
+        let ruta = mp3_de_prueba("generico-sin-etiquetas.mp3");
+        let cabecera = [0xFF_u8, 0xFB, 0x90, 0x00];
+        let mut datos = Vec::with_capacity(417 * 40);
+        for _ in 0..40 {
+            datos.extend_from_slice(&cabecera);
+            datos.extend_from_slice(&[0_u8; 413]);
+        }
+        std::fs::write(&ruta, &datos).expect("escribe");
+
+        let tags = EtiquetadorLofty::nuevo()
+            .read_generic_tags(&ruta)
+            .await
+            .expect("no debe fallar por falta de etiquetas");
+        assert!(tags.title.is_none());
+        assert!(tags.artist.is_none());
+        assert!(tags.album.is_none());
+
+        let _ = std::fs::remove_file(ruta);
+    }
+
+    #[tokio::test]
+    async fn los_metadatos_genericos_de_un_fichero_inexistente_no_revientan() {
+        let tags = EtiquetadorLofty::nuevo()
+            .read_generic_tags(Path::new("no-existe.mp3"))
+            .await
+            .expect("consulta");
+        assert_eq!(tags, GenericTags::default());
     }
 
     #[tokio::test]

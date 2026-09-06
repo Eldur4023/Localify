@@ -769,6 +769,40 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
         });
       });
 
+      // ── Importar canciones propias ────────────────────────────────────
+      //
+      // A diferencia de «Revisar biblioteca» (que solo recupera ficheros de
+      // pistas que el catálogo ya conoce), esto da de alta pistas nuevas a
+      // partir de ficheros que no tienen ni tendrán equivalente remoto.
+      const importar = document.createElement("button");
+      importar.type = "button";
+      importar.className = "boton";
+      importar.textContent = t("settings.import");
+      importar.addEventListener("click", () => {
+        void (async () => {
+          const elegidos = await library.pickImportFiles();
+          if (elegidos.length === 0) return;
+
+          importar.disabled = true;
+          importar.textContent = t("common.loading");
+          try {
+            const informe = await library.importFiles(elegidos);
+            mostrarError(
+              t("settings.import_done", {
+                imported: String(informe.imported),
+                selected: String(informe.filesSelected),
+              }),
+              "",
+            );
+            await refrescarUso();
+          } catch (e) {
+            mostrarError(t("settings.import_failed"), String(e));
+          }
+          importar.disabled = false;
+          importar.textContent = t("settings.import");
+        })();
+      });
+
       // ── Borrar todo lo descargado ─────────────────────────────────────
       //
       // Es la única acción destructiva de la pantalla, y por eso es la única
@@ -858,7 +892,7 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
 
       const acciones = document.createElement("div");
       acciones.className = "ajustes__acciones";
-      acciones.append(revisar, reintentar);
+      acciones.append(revisar, importar, reintentar);
       // El destructivo va en su propia fila, separado del de revisar: pegados,
       // el rojo se convierte en "el botón de al lado" y se pulsa por inercia.
       const peligro = document.createElement("div");

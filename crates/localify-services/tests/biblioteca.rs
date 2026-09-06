@@ -24,7 +24,7 @@ use localify_core::events::{DomainEvent, EventPublisher};
 use localify_core::ports::database::{AudioFileRepository, TrackRepository};
 use localify_core::ports::platform::AppPaths;
 use localify_core::ports::services::LibraryService;
-use localify_core::ports::youtube::TagWriter;
+use localify_core::ports::youtube::{GenericTags, TagWriter};
 use localify_db::Pool;
 use localify_db::pool::TempDbGuard;
 use localify_platform::{LocalifyPaths, RealFileSystem};
@@ -57,11 +57,24 @@ impl BusDePrueba {
 /// Etiquetador que devuelve el identificador que se le programe.
 ///
 /// Sirve para probar las dos vías de ADR-021 por separado: con etiqueta legible
-/// y sin ella.
+/// y sin ella. También sirve a la importación de ficheros propios: cada ruta
+/// puede llevar sus propios metadatos genéricos programados, para simular un
+/// fichero etiquetado o uno que no lo está.
 #[derive(Debug, Default)]
 struct EtiquetadorFalso {
     /// `None` simula un fichero cuyo etiquetado falló o se perdió.
     id: std::sync::Mutex<Option<String>>,
+    /// Metadatos genéricos por ruta. Una ruta ausente del mapa se comporta
+    /// como un fichero sin ninguna etiqueta legible.
+    genericos: std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, GenericTags>>,
+}
+
+impl EtiquetadorFalso {
+    fn con_tags(&self, ruta: &Path, tags: GenericTags) {
+        if let Ok(mut g) = self.genericos.lock() {
+            g.insert(ruta.to_path_buf(), tags);
+        }
+    }
 }
 
 #[async_trait]
@@ -71,6 +84,22 @@ impl TagWriter for EtiquetadorFalso {
     }
     async fn read_track_id(&self, _path: &Path) -> CoreResult<Option<String>> {
         Ok(self.id.lock().ok().and_then(|g| g.clone()))
+    }
+    async fn read_generic_tags(&self, path: &Path) -> CoreResult<GenericTags> {
+        Ok(self
+            .genericos
+            .lock()
+            .ok()
+            .and_then(|g| g.get(path).cloned())
+            .unwrap_or_else(|| GenericTags {
+                // `lofty` mide la duración a partir de las propiedades del
+                // propio audio, no de las etiquetas: un fichero sin ninguna
+                // etiqueta legible sigue teniendo una duración real. Sin este
+                // valor por defecto, el doble simularía un fichero que ni
+                // siquiera `lofty` podría abrir, que es un caso distinto.
+                duration: Some(DurationMs::from_secs(180)),
+                ..GenericTags::default()
+            }))
     }
 }
 
@@ -551,4 +580,228 @@ async fn vaciar_las_descargas_tambien_vacia_el_historial() {
             .is_empty(),
         "el historial se va con las descargas"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Importar ficheros propios
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Escribe un fichero **fuera** de la biblioteca, como si el usuario lo
+/// hubiera elegido en el selector nativo.
+fn escribir_fichero_externo(nombre: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("localify-import-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).expect("crea carpeta");
+    let ruta = dir.join(nombre);
+    std::fs::write(&ruta, vec![0_u8; 256]).expect("escribe");
+    ruta
+}
+
+#[tokio::test]
+async fn importar_un_fichero_con_etiquetas_crea_track_artista_y_album() {
+    let c = ctx().await;
+    let origen = escribir_fichero_externo("cancion.mp3");
+    c.etiquetador.con_tags(
+        &origen,
+        GenericTags {
+            title: Some("Bohemian Rhapsody".into()),
+            artist: Some("Queen".into()),
+            album: Some("A Night at the Opera".into()),
+            track_number: Some(11),
+            duration: Some(DurationMs::from_secs(355)),
+        },
+    );
+
+    let informe = c
+        .lib
+        .import_files(vec![origen.clone()])
+        .await
+        .expect("importa");
+    assert_eq!(informe.files_selected, 1);
+    assert_eq!(informe.imported, 1);
+    assert_eq!(informe.skipped_unreadable, 0);
+
+    let pagina = c
+        .audio
+        .list_all(&localify_core::page::PageRequest::new(0, 10))
+        .await
+        .expect("lista");
+    assert_eq!(pagina.items.len(), 1);
+    let registro = &pagina.items[0];
+    assert_eq!(registro.source, AudioSource::Imported);
+
+    let pista = c
+        .tracks
+        .get(&registro.track_id)
+        .await
+        .expect("consulta")
+        .expect("existe");
+    assert_eq!(pista.title, "Bohemian Rhapsody");
+    assert_eq!(pista.artist_display(), "Queen");
+    assert_eq!(
+        pista.album.as_ref().map(|a| a.title.clone()),
+        Some("A Night at the Opera".to_owned())
+    );
+    assert_eq!(pista.track_number, Some(11));
+
+    let _ = std::fs::remove_dir_all(origen.parent().expect("tiene carpeta"));
+}
+
+#[tokio::test]
+async fn importar_dos_pistas_del_mismo_album_reutiliza_un_solo_album() {
+    let c = ctx().await;
+    let una = escribir_fichero_externo("una.mp3");
+    let otra = escribir_fichero_externo("otra.mp3");
+    for (ruta, titulo, numero) in [(&una, "Una", 1_u16), (&otra, "Otra", 2_u16)] {
+        c.etiquetador.con_tags(
+            ruta,
+            GenericTags {
+                title: Some(titulo.into()),
+                artist: Some("Radiohead".into()),
+                album: Some("OK Computer".into()),
+                track_number: Some(numero),
+                duration: Some(DurationMs::from_secs(200)),
+            },
+        );
+    }
+
+    let informe = c
+        .lib
+        .import_files(vec![una.clone(), otra.clone()])
+        .await
+        .expect("importa");
+    assert_eq!(informe.imported, 2);
+
+    let pagina = c
+        .audio
+        .list_all(&localify_core::page::PageRequest::new(0, 10))
+        .await
+        .expect("lista");
+    assert_eq!(pagina.items.len(), 2);
+
+    let mut album_ids = std::collections::HashSet::new();
+    for registro in &pagina.items {
+        let pista = c
+            .tracks
+            .get(&registro.track_id)
+            .await
+            .expect("consulta")
+            .expect("existe");
+        album_ids.insert(pista.album.expect("tiene álbum").id);
+    }
+    assert_eq!(
+        album_ids.len(),
+        1,
+        "las dos pistas del mismo álbum no deben mintar dos álbumes distintos"
+    );
+
+    let _ = std::fs::remove_dir_all(una.parent().expect("tiene carpeta"));
+    let _ = std::fs::remove_dir_all(otra.parent().expect("tiene carpeta"));
+}
+
+#[tokio::test]
+async fn importar_un_fichero_sin_etiquetas_usa_el_nombre_de_fichero() {
+    let c = ctx().await;
+    // Sin `con_tags`: simula un fichero sin ninguna etiqueta legible.
+    let origen = escribir_fichero_externo("Mi Cancion Favorita.mp3");
+
+    let informe = c
+        .lib
+        .import_files(vec![origen.clone()])
+        .await
+        .expect("importa");
+    assert_eq!(informe.imported, 1);
+
+    let pagina = c
+        .audio
+        .list_all(&localify_core::page::PageRequest::new(0, 10))
+        .await
+        .expect("lista");
+    let pista = c
+        .tracks
+        .get(&pagina.items[0].track_id)
+        .await
+        .expect("consulta")
+        .expect("existe");
+    assert_eq!(pista.title, "Mi Cancion Favorita");
+    assert!(pista.artists.is_empty());
+    assert!(pista.album.is_none());
+
+    let _ = std::fs::remove_dir_all(origen.parent().expect("tiene carpeta"));
+}
+
+#[tokio::test]
+async fn una_extension_no_reconocida_se_cuenta_y_no_aborta_el_lote() {
+    let c = ctx().await;
+    let buena = escribir_fichero_externo("buena.mp3");
+    let mala = escribir_fichero_externo("notas.txt");
+
+    let informe = c
+        .lib
+        .import_files(vec![buena.clone(), mala.clone()])
+        .await
+        .expect("importa");
+    assert_eq!(informe.files_selected, 2);
+    assert_eq!(informe.imported, 1);
+    assert_eq!(informe.skipped_unreadable, 1);
+
+    let _ = std::fs::remove_dir_all(buena.parent().expect("tiene carpeta"));
+    let _ = std::fs::remove_dir_all(mala.parent().expect("tiene carpeta"));
+}
+
+#[tokio::test]
+async fn el_fichero_original_no_se_toca_al_importar() {
+    let c = ctx().await;
+    let origen = escribir_fichero_externo("original.mp3");
+
+    c.lib
+        .import_files(vec![origen.clone()])
+        .await
+        .expect("importa");
+
+    assert!(origen.exists(), "el fichero del usuario no debe borrarse");
+    assert_eq!(
+        std::fs::metadata(&origen).expect("metadatos").len(),
+        256,
+        "el fichero del usuario no debe modificarse"
+    );
+
+    let _ = std::fs::remove_dir_all(origen.parent().expect("tiene carpeta"));
+}
+
+#[tokio::test]
+async fn un_rescan_tras_importar_no_marca_la_pista_como_huerfana() {
+    let c = ctx().await;
+    let origen = escribir_fichero_externo("importada.mp3");
+    c.etiquetador.con_tags(
+        &origen,
+        GenericTags {
+            title: Some("Importada".into()),
+            duration: Some(DurationMs::from_secs(180)),
+            ..GenericTags::default()
+        },
+    );
+
+    c.lib
+        .import_files(vec![origen.clone()])
+        .await
+        .expect("importa");
+
+    let informe = c.lib.escanear().await.expect("escanea");
+    assert_eq!(
+        informe.missing, 0,
+        "el fichero recién importado no debe darse por perdido"
+    );
+    assert_eq!(
+        informe.recovered, 0,
+        "ya estaba registrado: no es un huérfano que recuperar"
+    );
+
+    let pagina = c
+        .audio
+        .list_all(&localify_core::page::PageRequest::new(0, 10))
+        .await
+        .expect("lista");
+    assert_eq!(pagina.items.len(), 1, "sigue habiendo exactamente un fichero");
+
+    let _ = std::fs::remove_dir_all(origen.parent().expect("tiene carpeta"));
 }

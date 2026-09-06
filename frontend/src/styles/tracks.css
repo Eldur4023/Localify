@@ -139,6 +139,26 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Estado de descarga: un hueco fijo y estrecho, para que aparecer y
+   desaparecer no empuje el resto de la fila de un lado a otro. */
+.track__state {
+  flex: 0 0 3.5ch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-subdued);
+}
+
+.track__state--local {
+  color: var(--accent);
+}
+
+.track__state--failed {
+  color: var(--warning);
+}
+
 /* Las columnas estrechas desaparecen antes que el título: en una ventana
    pequeña, saber qué canción es importa más que cuándo se añadió. */
 @media (width < 900px) {

@@ -2,14 +2,15 @@
 
 use localify_core::domain::album::{AlbumDetail, AlbumRow};
 use localify_core::domain::artist::{ArtistDetail, ArtistRow};
-use localify_core::domain::track::{ArtistRef, Track, TrackRow};
-use serde::Serialize;
+use localify_core::domain::ids::{AlbumId, ArtistId, TrackId};
+use localify_core::domain::track::{AlbumRef, ArtistRef, Track, TrackRow};
+use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::common::AvailabilityDto;
 
 /// Referencia ligera a un artista.
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "types.gen.ts")]
 #[serde(rename_all = "camelCase")]
 pub struct ArtistRefDto {
@@ -22,6 +23,105 @@ impl From<ArtistRef> for ArtistRefDto {
         Self {
             id: a.id.into_string(),
             name: a.name,
+        }
+    }
+}
+
+impl From<ArtistRefDto> for ArtistRef {
+    fn from(a: ArtistRefDto) -> Self {
+        Self {
+            id: ArtistId::from_trusted(a.id),
+            name: a.name,
+        }
+    }
+}
+
+/// Referencia ligera a un álbum.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "types.gen.ts")]
+#[serde(rename_all = "camelCase")]
+pub struct AlbumRefDto {
+    pub id: String,
+    pub title: String,
+}
+
+impl From<AlbumRef> for AlbumRefDto {
+    fn from(a: AlbumRef) -> Self {
+        Self {
+            id: a.id.into_string(),
+            title: a.title,
+        }
+    }
+}
+
+impl From<AlbumRefDto> for AlbumRef {
+    fn from(a: AlbumRefDto) -> Self {
+        Self {
+            id: AlbumId::from_trusted(a.id),
+            title: a.title,
+        }
+    }
+}
+
+/// Candidato para reasignar los metadatos de una pista a mano.
+///
+/// Va y vuelve: `library_search_candidates` lo llena a partir de lo que
+/// devuelve el proveedor, y `library_assign_metadata` lo recibe de vuelta tal
+/// cual lo eligió el usuario. No lleva identificador propio ni fecha de
+/// alta — el backend conserva los de la pista que se está reasignando, nunca
+/// los del candidato (ver `MetadataService::assign_metadata`).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "types.gen.ts")]
+#[serde(rename_all = "camelCase")]
+pub struct TrackCandidateDto {
+    pub title: String,
+    pub artists: Vec<ArtistRefDto>,
+    pub album: Option<AlbumRefDto>,
+    pub duration_ms: u32,
+    pub track_number: Option<u16>,
+    pub disc_number: Option<u16>,
+    pub explicit: bool,
+    pub isrc: Option<String>,
+    pub release_date: Option<String>,
+    pub popularity: Option<u8>,
+}
+
+impl From<Track> for TrackCandidateDto {
+    fn from(t: Track) -> Self {
+        Self {
+            title: t.title,
+            artists: t.artists.into_iter().map(Into::into).collect(),
+            album: t.album.map(Into::into),
+            duration_ms: t.duration.as_ms(),
+            track_number: t.track_number,
+            disc_number: t.disc_number,
+            explicit: t.explicit,
+            isrc: t.isrc,
+            release_date: t.release_date.map(|d| d.format("%Y-%m-%d").to_string()),
+            popularity: t.popularity,
+        }
+    }
+}
+
+impl From<TrackCandidateDto> for Track {
+    /// El `id` y `added_at` son marcadores: `assign_metadata` los ignora y
+    /// conserva los de la pista que ya existe en el catálogo.
+    fn from(c: TrackCandidateDto) -> Self {
+        Self {
+            id: TrackId::nuevo_local(),
+            title: c.title,
+            album: c.album.map(Into::into),
+            artists: c.artists.into_iter().map(Into::into).collect(),
+            duration: localify_core::domain::audio::DurationMs::new(c.duration_ms),
+            track_number: c.track_number,
+            disc_number: c.disc_number,
+            explicit: c.explicit,
+            isrc: c.isrc,
+            release_date: c
+                .release_date
+                .and_then(|s| chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok()),
+            popularity: c.popularity,
+            added_at: chrono::Utc::now(),
         }
     }
 }

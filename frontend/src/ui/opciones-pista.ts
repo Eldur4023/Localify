@@ -20,7 +20,8 @@
 import type { TrackRowDto, PlaybackContextDto } from "../ipc/types.gen.js";
 import { library, playlists, player, queue } from "../ipc/client.js";
 import { t } from "../i18n/index.js";
-import { pedirTexto } from "./dialogo.js";
+import { confirmar, pedirTexto } from "./dialogo.js";
+import { elegirCandidato } from "./reasignar-metadatos.js";
 import type { OpcionMenu } from "./menu.js";
 
 /** Longitud máxima del nombre de una playlist, la misma que acepta el backend. */
@@ -191,6 +192,52 @@ export function opcionesDePista(pista: TrackRowDto, ctx: ContextoDePista): Opcio
       },
     });
   }
+
+  // ── Gestión de metadatos ──────────────────────────────────────────────
+  //
+  // A diferencia de todo lo de arriba, esto no depende de si la pista está
+  // descargada: un fichero importado sin etiquetas o un emparejamiento
+  // equivocado son casos igual de válidos para una pista que nunca se ha
+  // bajado.
+  menu.push({
+    clave: "reassign_metadata",
+    separar: true,
+    etiqueta: t("menu.reassign_metadata"),
+    ejecutar: async () => {
+      const elegido = await elegirCandidato(pista.title);
+      if (!elegido) return;
+      await library.assignMetadata(pista.id, elegido);
+      ctx.alCambiar?.();
+    },
+  });
+  menu.push({
+    clave: "reset_metadata",
+    etiqueta: t("menu.reset_metadata"),
+    ejecutar: async () => {
+      await library.resetMetadata(pista.id);
+      ctx.alCambiar?.();
+    },
+  });
+
+  // La única acción que se lleva playlists, favoritos e historial por
+  // delante: a diferencia de "borrar descarga", esto sí necesita que el
+  // usuario lo confirme antes de que pase.
+  menu.push({
+    clave: "delete_track",
+    peligrosa: true,
+    etiqueta: t("menu.delete_track"),
+    icono: "close",
+    ejecutar: async () => {
+      const seguro = await confirmar(
+        t("menu.delete_track"),
+        t("menu.delete_track_do"),
+        t("menu.delete_track_confirm"),
+      );
+      if (!seguro) return;
+      await library.deleteTrack(pista.id);
+      ctx.alCambiar?.();
+    },
+  });
 
   return menu;
 }

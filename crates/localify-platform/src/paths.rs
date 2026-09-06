@@ -214,6 +214,10 @@ impl AppPaths for LocalifyPaths {
             self.library_dir.join(rel)
         }
     }
+
+    fn audio_rel_path(&self, track_id: &str, extension: &str) -> PathBuf {
+        Self::audio_rel_path(track_id, extension)
+    }
 }
 
 #[cfg(test)]

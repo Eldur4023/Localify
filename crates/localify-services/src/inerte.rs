@@ -46,7 +46,7 @@ use localify_core::domain::download::Priority;
 use localify_core::domain::ids::{
     AlbumId, ArtistId, PlaylistEntryId, PlaylistId, QueueEntryId, TrackId,
 };
-use localify_core::domain::library::{LibraryStats, ScanReport};
+use localify_core::domain::library::{ImportReport, LibraryStats, ScanReport};
 use localify_core::domain::lyrics::Lyrics;
 use localify_core::domain::playlist::{PlaylistDetail, PlaylistSummary};
 use localify_core::domain::queue::{
@@ -146,6 +146,12 @@ impl LibraryService for SinBiblioteca {
         sin_biblioteca()
     }
     async fn last_scan_report(&self) -> CoreResult<Option<ScanReport>> {
+        sin_biblioteca()
+    }
+    async fn import_files(&self, _paths: Vec<PathBuf>) -> CoreResult<ImportReport> {
+        sin_biblioteca()
+    }
+    async fn delete_track(&self, _id: &TrackId) -> CoreResult<()> {
         sin_biblioteca()
     }
 }
@@ -311,6 +317,23 @@ impl MetadataService for SinBiblioteca {
         sin_biblioteca()
     }
     async fn refresh_stale(&self, _limit: u32) -> CoreResult<u32> {
+        sin_biblioteca()
+    }
+    async fn search_candidates(
+        &self,
+        _query: &str,
+        _limit: u8,
+    ) -> CoreResult<Vec<localify_core::domain::track::Track>> {
+        sin_biblioteca()
+    }
+    async fn assign_metadata(
+        &self,
+        _id: &TrackId,
+        _candidate: &localify_core::domain::track::Track,
+    ) -> CoreResult<()> {
+        sin_biblioteca()
+    }
+    async fn reset_metadata(&self, _id: &TrackId) -> CoreResult<()> {
         sin_biblioteca()
     }
 }

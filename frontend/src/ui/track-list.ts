@@ -6,13 +6,17 @@
  * contextual, el arrastre y el teclado se comporten igual en todas, que es la
  * mitad de la sensación de que una aplicación está bien hecha.
  *
- * ## La fila no dice si la canción está descargada
+ * ## La fila sí dice si la canción está descargada
  *
- * Hubo un punto de color que lo indicaba, y una llamada por ventana visible
- * para averiguarlo al desplazarse. Sobraban las dos: la descarga es invisible
- * por diseño, pulsar una fila reproduce en cualquier caso, y un indicador que
- * el usuario no puede accionar solo invita a preguntarse qué habría que hacer
- * con él. Quitarlo se llevó de paso una petición por scroll.
+ * Hubo un tiempo en que no lo decía: un punto de color se quitó junto con una
+ * llamada por ventana visible al desplazarse, y con las dos se fue toda
+ * indicación de estado. Pulsar una fila sigue reproduciendo en cualquier
+ * caso —eso no ha cambiado—, pero dejar al usuario sin saber por qué una
+ * canción no suena todavía es peor que un punto que no se puede accionar.
+ *
+ * El indicador vive por completo de eventos ya existentes
+ * (`downloadProgress`, `availabilityChanged`): nunca se sondea una fila por su
+ * cuenta, así que no se repite el error de antes.
  *
  * ## Las carátulas se reciclan con la fila
  *
@@ -29,8 +33,9 @@
  */
 
 import { player } from "../ipc/client.js";
-import type { TrackRowDto } from "../ipc/types.gen.js";
+import type { AvailabilityDto, TrackRowDto } from "../ipc/types.gen.js";
 import type { PlaybackContextDto } from "../ipc/types.gen.js";
+import { alRecibirTipo } from "../ipc/events.js";
 import { idioma, t } from "../i18n/index.js";
 import { duracion } from "../shell/player.js";
 import { comienzoReciclable, type ComienzoReciclable } from "./cards.js";
@@ -66,6 +71,54 @@ function fechaCorta(segundos: number | null): string {
     FORMATOS.set(loc, formato);
   }
   return formato.format(new Date(segundos * 1000));
+}
+
+/**
+ * Pinta el indicador de estado de descarga de una fila.
+ *
+ * Un porcentaje mientras se descarga, la nube cuando ya está en disco, un
+ * aviso si falló, y nada en el resto de casos: `Absent` no dice nada porque
+ * pulsar reproduce igual, y decir "no descargada" en cada fila de una
+ * biblioteca de cincuenta mil canciones sería ruido, no información.
+ */
+function pintarDisponibilidad(el: HTMLElement, a: AvailabilityDto): void {
+  switch (a.kind) {
+    case "downloading":
+      pintarProgreso(el, a.progress);
+      break;
+    case "local":
+      pintarDescargada(el);
+      break;
+    case "failed":
+      pintarFallida(el, a.reasonKey);
+      break;
+    default:
+      pintarAusente(el);
+  }
+}
+
+function pintarProgreso(el: HTMLElement, percent: number): void {
+  el.className = "track__state track__state--downloading";
+  el.textContent = `${Math.round(percent * 100)}%`;
+  el.title = "";
+}
+
+function pintarDescargada(el: HTMLElement): void {
+  el.className = "track__state track__state--local";
+  el.replaceChildren(icono("cloud-download", 16));
+  el.title = t("tracks.downloaded");
+}
+
+function pintarFallida(el: HTMLElement, reasonKey: string): void {
+  el.className = "track__state track__state--failed";
+  el.replaceChildren(icono("alert", 16));
+  el.title = t(reasonKey);
+}
+
+function pintarAusente(el: HTMLElement): void {
+  el.className = "track__state";
+  el.replaceChildren();
+  el.title = "";
 }
 
 export interface OpcionesLista {
@@ -136,6 +189,7 @@ export function mountTrackList(
       album: HTMLElement | null;
       fecha: HTMLElement | null;
       tiempo: HTMLElement;
+      estado: HTMLElement;
       comienzo: ComienzoReciclable;
     }
   >();
@@ -171,6 +225,7 @@ export function mountTrackList(
       const titulo = trozo("title");
       const artista = trozo("artist");
       const tiempo = trozo("time");
+      const estado = trozo("state");
       const comienzo = comienzoReciclable();
 
       // Título y artista van apilados en una celda, no en dos columnas: es lo
@@ -186,8 +241,8 @@ export function mountTrackList(
       fila.append(numero, ...comienzo.nodos, principal);
       if (album) fila.append(album);
       if (fecha) fila.append(fecha);
-      fila.append(tiempo);
-      piezas.set(fila, { numero, titulo, artista, album, fecha, tiempo, comienzo });
+      fila.append(tiempo, estado);
+      piezas.set(fila, { numero, titulo, artista, album, fecha, tiempo, estado, comienzo });
 
       const mas = document.createElement("button");
       mas.type = "button";
@@ -235,6 +290,9 @@ export function mountTrackList(
         p.titulo.textContent = pista.title;
         p.artista.textContent = pista.artistDisplay;
         p.tiempo.textContent = duracion(pista.durationMs);
+        // Se repinta siempre, incluso al reciclar: una fila reutilizada para
+        // otra pista no debe arrastrar el estado de descarga de la anterior.
+        pintarDisponibilidad(p.estado, pista.availability);
         p.comienzo.pintar(pista.albumId, pista.id);
         if (p.album) p.album.textContent = pista.albumTitle ?? "";
         if (p.fecha) p.fecha.textContent = fechaCorta(pista.addedAt);
@@ -292,6 +350,11 @@ export function mountTrackList(
     reloj.title = t("tracks.col.duration");
     reloj.append(icono("clock", 16));
     fila.append(reloj);
+
+    // Mismo motivo que el hueco de la carátula: la columna de estado no tiene
+    // texto que titular, pero tiene que ocupar su sitio para que "Duración" no
+    // se desplace.
+    fila.append(celda("state", ""));
 
     return fila;
   }
@@ -404,6 +467,30 @@ export function mountTrackList(
 
   lista.el.addEventListener("keydown", alTeclear);
 
+  // ── Progreso de descarga en vivo ──────────────────────────────────────
+  //
+  // Solo estos dos eventos: `downloadProgress` para el porcentaje en marcha, y
+  // `availabilityChanged` para los tres estados terminales (local, fallida,
+  // ausente) que ya llegan acompañando a `downloadCompleted`/`downloadFailed`.
+  // Nunca se sondea `library.availability` desde aquí: sería repetir la
+  // petición por scroll que se quitó una vez.
+  function filaDe(trackId: string): HTMLElement | null {
+    return cuerpo.querySelector<HTMLElement>(
+      `[data-track-id="${CSS.escape(trackId)}"]`,
+    );
+  }
+
+  const dejarProgreso = alRecibirTipo("downloadProgress", (e) => {
+    const fila = filaDe(e.trackId);
+    const p = fila ? piezas.get(fila) : undefined;
+    if (p) pintarProgreso(p.estado, e.percent);
+  });
+  const dejarDisponibilidad = alRecibirTipo("availabilityChanged", (e) => {
+    const fila = filaDe(e.trackId);
+    const p = fila ? piezas.get(fila) : undefined;
+    if (p) pintarDisponibilidad(p.estado, e.availability);
+  });
+
   function refrescar(): void {
     activa = -1;
     opciones.reiniciarOrigen?.();
@@ -416,6 +503,8 @@ export function mountTrackList(
     refrescar,
     destroy(): void {
       lista.el.removeEventListener("keydown", alTeclear);
+      dejarProgreso();
+      dejarDisponibilidad();
       for (const quitar of desmontadores.splice(0)) quitar();
       lista.destroy();
     },

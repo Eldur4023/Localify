@@ -131,6 +131,20 @@ pub trait YoutubeDownloader: Send + Sync + 'static {
     async fn probe(&self, path: &Path) -> CoreResult<MediaInfo>;
 }
 
+/// Metadatos genéricos leídos de un fichero ajeno, para importarlo.
+///
+/// A diferencia de [`TagWriter::read_track_id`], que solo busca la marca
+/// propia, esto lee lo que ya llevara el fichero del usuario: es lo único con
+/// lo que se puede dar de alta una pista que ningún catálogo conoce.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GenericTags {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub track_number: Option<u16>,
+    pub duration: Option<DurationMs>,
+}
+
 /// Etiquetado de ficheros de audio.
 ///
 /// Escribir los tags hace la biblioteca **portable**: sigue siendo válida
@@ -144,6 +158,14 @@ pub trait TagWriter: Send + Sync + 'static {
     /// Lee el `LOCALIFY_SPOTIFY_ID` de un fichero, para recuperar la identidad
     /// de una pista durante un `rescan`.
     async fn read_track_id(&self, path: &Path) -> CoreResult<Option<String>>;
+
+    /// Lee título, artista, álbum, número de pista y duración de un fichero
+    /// ajeno, para importarlo a la biblioteca.
+    ///
+    /// Nunca falla por falta de etiquetas: un fichero sin ninguna etiqueta
+    /// legible devuelve `GenericTags::default()`, y quien llama cae al nombre
+    /// del fichero. Adivinar sería peor que responder vacío.
+    async fn read_generic_tags(&self, path: &Path) -> CoreResult<GenericTags>;
 }
 
 /// Gestión de los binarios externos (yt-dlp, ffmpeg).

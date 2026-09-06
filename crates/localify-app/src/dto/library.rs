@@ -1,6 +1,6 @@
 //! DTOs de biblioteca, playlists, búsqueda, letras e inicio.
 
-use localify_core::domain::library::LibraryStats;
+use localify_core::domain::library::{ImportReport, LibraryStats};
 use localify_core::domain::lyrics::Lyrics;
 use localify_core::domain::playlist::{
     PlaylistDetail, PlaylistEntry, PlaylistSource, PlaylistSummary,
@@ -94,6 +94,26 @@ impl From<LibraryStats> for LibraryStatsDto {
             total_duration_ms: s.total_duration_ms,
             total_bytes: s.total_bytes,
             failed_count: s.failed_count,
+        }
+    }
+}
+
+/// Resultado de importar ficheros propios del usuario.
+#[derive(Debug, Clone, Copy, Default, Serialize, TS)]
+#[ts(export, export_to = "types.gen.ts")]
+#[serde(rename_all = "camelCase")]
+pub struct ImportReportDto {
+    pub files_selected: u32,
+    pub imported: u32,
+    pub skipped_unreadable: u32,
+}
+
+impl From<ImportReport> for ImportReportDto {
+    fn from(r: ImportReport) -> Self {
+        Self {
+            files_selected: r.files_selected,
+            imported: r.imported,
+            skipped_unreadable: r.skipped_unreadable,
         }
     }
 }

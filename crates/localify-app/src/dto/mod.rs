@@ -28,14 +28,14 @@ pub mod player;
 pub mod settings;
 
 pub use catalog::{
-    AlbumDetailDto, AlbumRowDto, ArtistDetailDto, ArtistRefDto, ArtistRowDto, TrackDetailDto,
-    TrackRowDto,
+    AlbumDetailDto, AlbumRefDto, AlbumRowDto, ArtistDetailDto, ArtistRefDto, ArtistRowDto,
+    TrackCandidateDto, TrackDetailDto, TrackRowDto,
 };
 pub use common::{ApiError, AvailabilityDto, PageDto, PageRequestDto};
 pub use events::LocalifyEvent;
 pub use library::{
-    HomeSectionDto, LibraryStatsDto, LyricLineDto, LyricsDto, PlaylistDetailDto, PlaylistEntryDto,
-    PlaylistSummaryDto, SearchResultsDto,
+    HomeSectionDto, ImportReportDto, LibraryStatsDto, LyricLineDto, LyricsDto, PlaylistDetailDto,
+    PlaylistEntryDto, PlaylistSummaryDto, SearchResultsDto,
 };
 pub use player::{PlaybackContextDto, PlayerStateDto, QueueEntryDto, QueueSnapshotDto};
 pub use settings::{ProviderStatusDto, SettingsDto, SettingsPatchDto};

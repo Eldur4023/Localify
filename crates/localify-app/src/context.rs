@@ -476,6 +476,10 @@ fn metadatos(
         // vídeo que se emparejó.
         .con_emparejamientos(Arc::new(
             localify_db::repositories::SqliteYoutubeMatchRepository::new(infra.pool.clone()),
+        ))
+        // Para el nombre de fichero al resetear metadatos.
+        .con_audio(Arc::new(
+            localify_db::repositories::SqliteAudioFileRepository::new(infra.pool.clone()),
         )),
     )
 }

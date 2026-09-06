@@ -1050,6 +1050,58 @@
   color: var(--text-subdued);
 }
 
+/* Reasignar metadatos: más ancho que un diálogo normal, para que el título de
+   un candidato no se corte a media palabra. */
+.dialogo--reasignar {
+  max-width: min(90vw, 560px);
+}
+
+.reasignar__busqueda {
+  display: flex;
+  gap: var(--sp-3);
+}
+
+.reasignar__busqueda .dialogo__input {
+  flex: 1 1 auto;
+}
+
+.reasignar__resultados {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.reasignar__opcion {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.reasignar__opcion:hover,
+.reasignar__opcion:focus-visible {
+  background: var(--bg-tinted);
+}
+
+.reasignar__opcion-titulo {
+  color: var(--text-base);
+}
+
+.reasignar__opcion-detalle {
+  font-size: var(--fs-xs);
+  color: var(--text-subdued);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /*
  * La acción destructiva, separada del resto.
  *

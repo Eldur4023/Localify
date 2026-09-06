@@ -20,7 +20,9 @@ import type {
   AudioDeviceDto,
   EqProfileDto,
   HomeSectionDto,
+  ImportReportDto,
   LibraryStatsDto,
+  TrackCandidateDto,
   LyricsDto,
   PageDto,
   PageRequestDto,
@@ -201,6 +203,26 @@ export const library = {
   albumDetail: (albumId: string) => invoke<AlbumDetailDto>("album_detail", { albumId }),
   artistDetail: (artistId: string) =>
     invoke<ArtistDetailDto>("artist_detail", { artistId }),
+  /** Abre el selector nativo de audio. Vacío si el usuario cancela. */
+  pickImportFiles: () => invoke<string[]>("library_pick_import_files"),
+  /** Importa los ficheros elegidos, para que convivan con lo descargado. */
+  importFiles: (paths: string[]) =>
+    invoke<ImportReportDto>("library_import_files", { paths }),
+  /**
+   * Borra la pista del catálogo entero: playlists, favoritos e historial se
+   * van con ella. A diferencia de `deleteDownload`, no tiene marcha atrás
+   * fácil — pide confirmación antes de llamar a esto.
+   */
+  deleteTrack: (trackId: string) => invoke<void>("library_delete_track", { trackId }),
+  /** Vuelve una pista a "sin identificar". El audio no se toca. */
+  resetMetadata: (trackId: string) =>
+    invoke<void>("library_reset_metadata", { trackId }),
+  /** Candidatos del proveedor activo para reasignar metadatos a mano. */
+  searchCandidates: (query: string, limit: number) =>
+    invoke<TrackCandidateDto[]>("library_search_candidates", { query, limit }),
+  /** Reasigna los metadatos de una pista al candidato elegido. */
+  assignMetadata: (trackId: string, candidate: TrackCandidateDto) =>
+    invoke<void>("library_assign_metadata", { trackId, candidate }),
 };
 
 export const search = {

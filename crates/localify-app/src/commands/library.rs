@@ -7,10 +7,10 @@ use tauri::State;
 
 use crate::context::AppContext;
 use crate::dto::catalog::{
-    AlbumDetailDto, AlbumRowDto, ArtistDetailDto, ArtistRowDto, TrackRowDto,
+    AlbumDetailDto, AlbumRowDto, ArtistDetailDto, ArtistRowDto, TrackCandidateDto, TrackRowDto,
 };
 use crate::dto::common::{ApiError, AvailabilityDto, PageDto, PageRequestDto};
-use crate::dto::library::{LibraryStatsDto, TrackFilterDto, orden_desde_str};
+use crate::dto::library::{ImportReportDto, LibraryStatsDto, TrackFilterDto, orden_desde_str};
 
 type Resultado<T> = Result<T, ApiError>;
 
@@ -148,6 +148,108 @@ pub async fn library_retry_failed(ctx: State<'_, AppContext>) -> Resultado<u32> 
 #[tauri::command]
 pub async fn library_wipe_downloads(ctx: State<'_, AppContext>) -> Resultado<u32> {
     Ok(ctx.library.wipe_downloads().await?)
+}
+
+/// Abre el selector nativo de ficheros de audio, para importar canciones
+/// propias.
+///
+/// Filtrado a los formatos que la biblioteca sabe reproducir y catalogar
+/// (`AudioFormat`): dejar pasar cualquier fichero solo movería el rechazo a
+/// más tarde, cuando ya no hay diálogo que lo explique.
+///
+/// Devuelve una lista vacía si el usuario cancela. Cancelar no es un error.
+#[tauri::command]
+pub async fn library_pick_import_files(app: tauri::AppHandle) -> Resultado<Vec<String>> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter(
+            "audio",
+            &["opus", "webm", "m4a", "mp4", "aac", "mp3", "flac", "ogg", "oga", "wav", "aif", "aiff"],
+        )
+        .pick_files(move |rutas| {
+            let _ = tx.send(rutas);
+        });
+
+    let elegidos = rx.await.map_err(|_| {
+        localify_core::error::CoreError::internal("el selector de ficheros se cerró sin responder")
+    })?;
+
+    Ok(elegidos
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| r.to_string())
+        .collect())
+}
+
+/// Importa los ficheros elegidos a la biblioteca, para que convivan con lo
+/// descargado.
+#[tauri::command]
+pub async fn library_import_files(
+    ctx: State<'_, AppContext>,
+    paths: Vec<String>,
+) -> Resultado<ImportReportDto> {
+    let rutas = paths.into_iter().map(std::path::PathBuf::from).collect();
+    Ok(ctx.library.import_files(rutas).await?.into())
+}
+
+/// Borra la pista del catálogo entero: sus playlists, sus favoritos y su
+/// historial se van con ella. El frontend debe pedir confirmación antes de
+/// llamar a esto — a diferencia de `library_delete_download`, no hay marcha
+/// atrás fácil.
+#[tauri::command]
+pub async fn library_delete_track(
+    ctx: State<'_, AppContext>,
+    track_id: String,
+) -> Resultado<()> {
+    let id = TrackId::parse(&track_id)?;
+    ctx.library.delete_track(&id).await?;
+    Ok(())
+}
+
+/// Vuelve una pista a "sin identificar": título del fichero si lo tiene
+/// descargado, sin artista ni álbum. El audio no se toca.
+#[tauri::command]
+pub async fn library_reset_metadata(
+    ctx: State<'_, AppContext>,
+    track_id: String,
+) -> Resultado<()> {
+    let id = TrackId::parse(&track_id)?;
+    ctx.metadata.reset_metadata(&id).await?;
+    Ok(())
+}
+
+/// Busca candidatos en el proveedor activo para reasignar metadatos a mano.
+///
+/// No persiste nada: son candidatos a elegir, no resultados que ya entraron en
+/// el catálogo.
+#[tauri::command]
+pub async fn library_search_candidates(
+    ctx: State<'_, AppContext>,
+    query: String,
+    limit: u8,
+) -> Resultado<Vec<TrackCandidateDto>> {
+    Ok(ctx
+        .metadata
+        .search_candidates(&query, limit)
+        .await?
+        .into_iter()
+        .map(Into::into)
+        .collect())
+}
+
+/// Reasigna los metadatos de una pista al candidato elegido.
+#[tauri::command]
+pub async fn library_assign_metadata(
+    ctx: State<'_, AppContext>,
+    track_id: String,
+    candidate: TrackCandidateDto,
+) -> Resultado<()> {
+    let id = TrackId::parse(&track_id)?;
+    ctx.metadata.assign_metadata(&id, &candidate.into()).await?;
+    Ok(())
 }
 
 #[tauri::command]
