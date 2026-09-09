@@ -189,6 +189,18 @@ impl PlaylistServiceImpl {
             }
         });
     }
+
+    /// Igual que [`Self::rebalancear_en_segundo_plano`], pero para el orden de
+    /// la lista de playlists en vez del contenido de una.
+    fn rebalancear_playlists_en_segundo_plano(&self) {
+        let repo = Arc::clone(&self.deps.playlists);
+        tokio::spawn(async move {
+            debug!("rebalanceando posiciones de playlists");
+            if let Err(e) = repo.rebalance_playlists().await {
+                warn!(error = %e, "el rebalanceo fallo; se reintentara en el proximo movimiento");
+            }
+        });
+    }
 }
 
 /// Valida y normaliza un nombre de playlist.
@@ -400,6 +412,22 @@ impl PlaylistService for PlaylistServiceImpl {
         // El hueco se ha partido: si ya era estrecho, se renumera después.
         if position::necesita_rebalanceo(antes, despues) {
             self.rebalancear_en_segundo_plano(id);
+        }
+        Ok(())
+    }
+
+    async fn reorder_list(&self, id: &PlaylistId, to_index: usize) -> CoreResult<()> {
+        let (antes, despues) = self.deps.playlists.playlist_neighbors(to_index).await?;
+        let posicion = position::entre(antes, despues);
+
+        self.deps
+            .playlists
+            .set_playlist_position(id, posicion)
+            .await?;
+        self.anunciar(id, PlaylistChangeKind::Reordered);
+
+        if position::necesita_rebalanceo(antes, despues) {
+            self.rebalancear_playlists_en_segundo_plano();
         }
         Ok(())
     }

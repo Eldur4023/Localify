@@ -88,6 +88,10 @@ pub const TERMINOS_VERSION: &[&str] = &[
     "demo",
     "rehearsal",
     "ensayo",
+    // Solo voces: la misma señal que un karaoke, al revés.
+    "acapella",
+    "a capella",
+    "a cappella",
 ];
 
 /// Términos que delatan audio manipulado.
@@ -258,6 +262,14 @@ mod tests {
     fn entre_dos_motivos_manda_el_que_mas_aleja_del_original() {
         // Un directo remezclado esta mas lejos del disco que un directo a secas.
         assert_eq!(clase("Numb (Live Remix)"), ClaseDeVersion::Otra);
+    }
+
+    #[test]
+    fn una_acapella_es_otra_version() {
+        // Misma señal que el karaoke, al revés: solo voces en vez de solo
+        // instrumental.
+        assert_eq!(clase("Faint (Acapella)"), ClaseDeVersion::Otra);
+        assert_eq!(clase("Faint (A Cappella)"), ClaseDeVersion::Otra);
     }
 
     #[test]

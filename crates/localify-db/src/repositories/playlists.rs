@@ -107,8 +107,9 @@ impl PlaylistRepository for SqlitePlaylistRepository {
                 tx.execute(
                     "INSERT INTO playlists (
                          id, name, name_norm, description, cover_path,
-                         source, source_id, created_at, updated_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                         source, source_id, created_at, updated_at, position
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                         COALESCE((SELECT MAX(position) + 1024.0 FROM playlists), 0.0))",
                     params![
                         p.id.to_string(),
                         p.name,
@@ -235,10 +236,10 @@ impl PlaylistRepository for SqlitePlaylistRepository {
     }
 
     async fn list_summaries(&self) -> CoreResult<Vec<PlaylistSummary>> {
+        // Orden manual (ADR-009), no por actividad reciente: la barra lateral
+        // se reordena a mano y se queda donde el usuario la deja.
         let columnas = COLUMNAS_RESUMEN;
-        let sql = format!(
-            "SELECT {columnas} FROM playlists p ORDER BY p.updated_at DESC, p.name_norm ASC"
-        );
+        let sql = format!("SELECT {columnas} FROM playlists p ORDER BY p.position ASC");
         self.pool
             .leer(move |conn| {
                 let mut stmt = conn.prepare_cached(&sql)?;
@@ -483,6 +484,81 @@ impl PlaylistRepository for SqlitePlaylistRepository {
                     tx.execute(
                         "UPDATE playlist_items SET position = ?2 WHERE id = ?1",
                         params![entrada, nueva],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .to_core()
+    }
+
+    async fn playlist_neighbors(&self, index: usize) -> CoreResult<(Option<f64>, Option<f64>)> {
+        let indice = i64::try_from(index).unwrap_or(i64::MAX);
+
+        self.pool
+            .leer(move |conn| {
+                // Igual que `neighbors`, pero sobre la lista de playlists
+                // entera: no hay `playlist_id` que filtre.
+                let mut stmt = conn.prepare_cached(
+                    "SELECT position FROM playlists
+                     ORDER BY position ASC
+                     LIMIT 2 OFFSET ?1",
+                )?;
+
+                let inicio = (indice - 1).max(0);
+                let posiciones: Vec<f64> = stmt
+                    .query_map([inicio], |r| r.get(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                Ok(if indice == 0 {
+                    (None, posiciones.first().copied())
+                } else {
+                    (posiciones.first().copied(), posiciones.get(1).copied())
+                })
+            })
+            .await
+            .to_core()
+    }
+
+    async fn set_playlist_position(&self, id: &PlaylistId, position: f64) -> CoreResult<()> {
+        let id = id.to_string();
+
+        self.pool
+            .escribir(move |tx| {
+                // Un único UPDATE. No toca `updated_at`: eso mide actividad de
+                // contenido, y reordenar en la barra lateral no lo es.
+                let filas = tx.execute(
+                    "UPDATE playlists SET position = ?2 WHERE id = ?1",
+                    params![id, position],
+                )?;
+                if filas == 0 {
+                    return Err(DbError::error_de_mapeo("id", "la playlist no existe"));
+                }
+                Ok(())
+            })
+            .await
+            .to_core()
+    }
+
+    async fn rebalance_playlists(&self) -> CoreResult<()> {
+        self.pool
+            .escribir(move |tx| {
+                let ids: Vec<String> = {
+                    let mut stmt = tx.prepare("SELECT id FROM playlists ORDER BY position ASC")?;
+                    stmt.query_map([], |r| r.get(0))?
+                        .collect::<Result<Vec<_>, _>>()?
+                };
+
+                for (indice, id) in ids.iter().enumerate() {
+                    // Nadie tiene 2^52 playlists.
+                    #[allow(
+                        clippy::cast_precision_loss,
+                        reason = "índice acotado por el tamaño real"
+                    )]
+                    let nueva = indice as f64 * position::PASO;
+                    tx.execute(
+                        "UPDATE playlists SET position = ?2 WHERE id = ?1",
+                        params![id, nueva],
                     )?;
                 }
                 Ok(())
@@ -802,6 +878,153 @@ mod tests {
         assert!(
             mio.cover_albums.is_empty(),
             "estas pistas no tienen album, asi que no hay de donde sacar mosaico"
+        );
+    }
+
+    #[tokio::test]
+    async fn las_playlists_salen_en_orden_de_creacion_por_defecto() {
+        // Sin ningún arrastre de por medio, el orden manual recién migrado
+        // debe seguir pareciéndose al que había: la última creada, al final.
+        let (repo, _tracks, _pool, _g) = ctx().await;
+        for nombre in ["Primera", "Segunda", "Tercera"] {
+            repo.create(&playlist(nombre)).await.expect("crea");
+        }
+
+        let nombres: Vec<String> = repo
+            .list_summaries()
+            .await
+            .expect("lista")
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(nombres, vec!["Primera", "Segunda", "Tercera"]);
+    }
+
+    #[tokio::test]
+    async fn reordenar_una_playlist_ejecuta_un_solo_update() {
+        let (repo, _tracks, pool, _g) = ctx().await;
+        let mut ids = Vec::new();
+        for nombre in ["A", "B", "C"] {
+            let p = playlist(nombre);
+            repo.create(&p).await.expect("crea");
+            ids.push(p.id);
+        }
+
+        // Mueve la última playlist al principio.
+        let (_, siguiente) = repo.playlist_neighbors(0).await.expect("vecinos");
+        let nueva = position::entre(None, siguiente);
+
+        let antes: i64 = pool
+            .leer(|c| Ok(c.query_row("SELECT COUNT(*) FROM playlists", [], |r| r.get(0))?))
+            .await
+            .expect("cuenta");
+
+        repo.set_playlist_position(&ids[2], nueva)
+            .await
+            .expect("mueve");
+
+        let nombres: Vec<String> = repo
+            .list_summaries()
+            .await
+            .expect("lista")
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(nombres, vec!["C", "A", "B"]);
+
+        let despues: i64 = pool
+            .leer(|c| Ok(c.query_row("SELECT COUNT(*) FROM playlists", [], |r| r.get(0))?))
+            .await
+            .expect("cuenta");
+        assert_eq!(antes, despues, "reordenar no debe crear ni borrar filas");
+    }
+
+    #[tokio::test]
+    async fn reordenar_una_playlist_no_toca_su_fecha_de_actividad() {
+        // `updated_at` mide actividad de contenido -se usa para el mosaico de
+        // portadas y para "más escuchadas"-, no la posición en la barra
+        // lateral. Tocarlo aquí movería playlists en otras pantallas sin que
+        // el usuario haya cambiado nada de lo que ven.
+        let (repo, _tracks, pool, _g) = ctx().await;
+        let a = playlist("A");
+        let b = playlist("B");
+        repo.create(&a).await.expect("crea");
+        repo.create(&b).await.expect("crea");
+
+        let id = a.id.to_string();
+        pool.escribir(move |tx| {
+            tx.execute("UPDATE playlists SET updated_at = 1000 WHERE id = ?1", [&id])?;
+            Ok(())
+        })
+        .await
+        .expect("envejece");
+
+        let (_, siguiente) = repo.playlist_neighbors(0).await.expect("vecinos");
+        let nueva = position::entre(None, siguiente);
+        repo.set_playlist_position(&a.id, nueva)
+            .await
+            .expect("mueve");
+
+        let releida = repo.get(&a.id).await.expect("lee").expect("existe");
+        assert_eq!(
+            releida.updated_at.timestamp(),
+            1000,
+            "reordenar no es actividad de contenido"
+        );
+    }
+
+    #[tokio::test]
+    async fn el_rebalanceo_de_playlists_conserva_el_orden() {
+        let (repo, _tracks, pool, _g) = ctx().await;
+        let mut ids = Vec::new();
+        for nombre in ["A", "B", "C", "D"] {
+            let p = playlist(nombre);
+            repo.create(&p).await.expect("crea");
+            ids.push(p.id);
+        }
+
+        // Amontona tres claves en un hueco minúsculo.
+        for (i, id) in ids.iter().take(3).enumerate() {
+            repo.set_playlist_position(id, 1.0 + i as f64 * 1e-9)
+                .await
+                .expect("apila");
+        }
+
+        let orden_antes: Vec<String> = repo
+            .list_summaries()
+            .await
+            .expect("lista")
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+
+        repo.rebalance_playlists().await.expect("rebalancea");
+
+        let orden_despues: Vec<String> = repo
+            .list_summaries()
+            .await
+            .expect("lista")
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(orden_antes, orden_despues, "el orden debe conservarse");
+
+        let separacion_minima: f64 = pool
+            .leer(|c| {
+                Ok(c.query_row(
+                    "SELECT MIN(delta) FROM (
+                        SELECT position - LAG(position) OVER (ORDER BY position) AS delta
+                        FROM playlists
+                     ) WHERE delta IS NOT NULL",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .expect("mide");
+        assert!(
+            separacion_minima > position::EPSILON,
+            "tras rebalancear debe haber margen para nuevas inserciones"
         );
     }
 

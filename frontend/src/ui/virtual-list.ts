@@ -136,6 +136,17 @@ export function mountVirtualList<T>(
   let cargando = false;
   let destruida = false;
 
+  /**
+   * Se incrementa en cada `reset()`, para poder descartar una carga que
+   * arrancó antes del reset y responde después.
+   *
+   * Sin esto, `cargando` por sí sola no basta: si `reset()` llega mientras un
+   * `cargar()` anterior sigue esperando su `loadMore()`, esa respuesta vieja
+   * acaba llenando la lista que el reset acababa de vaciar, con datos de la
+   * consulta anterior (p. ej. el orden de antes de cambiar el criterio).
+   */
+  let generacion = 0;
+
   // Qué se avisó la última vez. Se guardan los dos extremos, no solo el
   // primero: al llegar la primera página el índice inicial sigue siendo cero,
   // y comparando solo ese valor el aviso nunca llegaría. Quien lo usa para
@@ -213,9 +224,12 @@ export function mountVirtualList<T>(
   async function cargar(): Promise<void> {
     if (cargando || agotada || destruida) return;
     cargando = true;
+    const miGeneracion = generacion;
     try {
       const pagina = await options.loadMore();
-      if (destruida) return;
+      // Un reset() de por medio invalida esta respuesta: pertenece a la
+      // consulta anterior, y la lista que llenaría ya no es la que hay.
+      if (destruida || miGeneracion !== generacion) return;
 
       if (!pagina.hasMore) agotada = true;
       if (pagina.items.length > 0) {
@@ -228,7 +242,9 @@ export function mountVirtualList<T>(
       // en el que no vuelva a intentarlo. Se libera el cerrojo y el siguiente
       // scroll reintenta.
     } finally {
-      cargando = false;
+      // Si ya hubo un reset(), `cargando` pertenece a la carga *nueva* que ese
+      // reset lanzó: tocarlo aquí la dejaría creyéndose libre a mitad de vuelo.
+      if (miGeneracion === generacion) cargando = false;
     }
   }
 
@@ -263,12 +279,17 @@ export function mountVirtualList<T>(
     },
 
     reset(): void {
+      generacion += 1;
       items.length = 0;
       agotada = false;
       avisadoDesde = -1;
       avisadoHasta = -1;
       spacer.style.height = "0px";
       el.scrollTop = 0;
+      // Descarta cualquier carga en curso de la generación anterior: sin esto,
+      // el guardián de más arriba vería `cargando` en `true` y esta llamada no
+      // haría nada.
+      cargando = false;
       for (const fila of pool) fila.hidden = true;
       void cargar();
     },

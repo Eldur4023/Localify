@@ -327,6 +327,32 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
   }
 
   /**
+   * Igual que `guardarAudio`, pero sin el repintado completo de `aplicar()`.
+   *
+   * La usa el ecualizador al asentarse (`alAsentarse`, con rebote de 400 ms
+   * mientras se arrastra una banda — ver `equalizer.ts`). Ese guardado puede
+   * llegar con el ratón todavía sobre el deslizador si el gesto dura más de
+   * los 400 ms sin soltar, y un `pintar()` completo destruye y recrea la
+   * pestaña de Audio entera, arrancando el arrastre en marcha de debajo del
+   * cursor. No hace falta: el ecualizador ya mantiene su curva y el selector
+   * de perfil sincronizados por su cuenta (ver el `mostrar()` de más abajo).
+   */
+  async function guardarAudioSilencioso(
+    cambio: Partial<AudioSettingsInputDto>,
+  ): Promise<void> {
+    if (!actual) return;
+    try {
+      actual = await api.patch({
+        ...patchVacio(),
+        audio: { ...audioEnviable(actual), ...cambio },
+      });
+    } catch (e) {
+      mostrarError(t("error.internal"), String(e));
+      pintar();
+    }
+  }
+
+  /**
    * Igual que `guardarAudio`, para la sección de descargas.
    *
    * Devuelve la promesa porque quien elige un fichero de cookies tiene que
@@ -568,7 +594,7 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
           });
         },
         alAsentarse: (p) => {
-          guardarAudio({ eqProfile: { ...p } });
+          void guardarAudioSilencioso({ eqProfile: { ...p } });
           // La lista no tenía "personalizado" hasta ahora: si no se añade, el
           // selector se queda mostrando el perfil de fábrica que se acaba de
           // dejar de usar.
@@ -1141,7 +1167,10 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
 
     if (evento.type === "libraryMoveProgress") {
       migrando = { done: evento.done, total: evento.total };
-      pintar();
+      // Solo se ve en la pestaña General: repintar en cualquier otra
+      // destruiría lo que el usuario esté tocando ahí sin que se note nada a
+      // cambio (la barra de progreso no está en pantalla).
+      if (pestañaActiva === "general") pintar();
       return;
     }
 
@@ -1149,7 +1178,7 @@ export function mountSettingsView(contenedor: HTMLElement): Vista {
       migrando = null;
       void api.get().then((s) => {
         actual = s;
-        pintar();
+        if (pestañaActiva === "general") pintar();
       });
       return;
     }

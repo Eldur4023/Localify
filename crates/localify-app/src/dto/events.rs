@@ -143,6 +143,7 @@ const fn cambio_playlist_a_str(k: PlaylistChangeKind) -> &'static str {
         PlaylistChangeKind::Renamed => "renamed",
         PlaylistChangeKind::Deleted => "deleted",
         PlaylistChangeKind::Items => "items",
+        PlaylistChangeKind::Reordered => "reordered",
     }
 }
 

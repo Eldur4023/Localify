@@ -214,6 +214,9 @@ impl PlaylistService for SinBiblioteca {
     ) -> CoreResult<()> {
         sin_biblioteca()
     }
+    async fn reorder_list(&self, _id: &PlaylistId, _to: usize) -> CoreResult<()> {
+        sin_biblioteca()
+    }
     async fn set_cover(&self, _id: &PlaylistId, _image: &Path) -> CoreResult<()> {
         sin_biblioteca()
     }

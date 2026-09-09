@@ -83,6 +83,8 @@ export function mountBusquedaRapida(contenedor: HTMLElement, router: Router): Bu
   let resultados: TrackRowDto[] = [];
   let activa = -1;
   let temporizador: number | null = null;
+  /** El respiro entre `blur` y `cerrar()` (ver más abajo), para poder cancelarlo. */
+  let cierreTemporizador: number | null = null;
   /**
    * Consulta cuya respuesta seguimos esperando.
    *
@@ -267,12 +269,22 @@ export function mountBusquedaRapida(contenedor: HTMLElement, router: Router): Bu
   entrada.addEventListener("input", alEscribir);
   entrada.addEventListener("keydown", alTeclear);
   entrada.addEventListener("focus", () => {
+    // Cancela el cierre pendiente de un `blur` anterior: sin esto, volver a
+    // enfocar el campo justo tras un clic accidental fuera no evita que el
+    // panel se cierre solo 120 ms después, ya con el campo otra vez enfocado.
+    if (cierreTemporizador !== null) {
+      globalThis.clearTimeout(cierreTemporizador);
+      cierreTemporizador = null;
+    }
     if (resultados.length > 0) panel.hidden = false;
   });
   entrada.addEventListener("blur", () => {
     // Un respiro antes de cerrar: sin él, soltar el ratón sobre una fila llega
     // después del cierre y el clic se pierde.
-    globalThis.setTimeout(cerrar, 120);
+    cierreTemporizador = globalThis.setTimeout(() => {
+      cierreTemporizador = null;
+      cerrar();
+    }, 120);
   });
 
   function etiquetas(): void {
@@ -286,6 +298,7 @@ export function mountBusquedaRapida(contenedor: HTMLElement, router: Router): Bu
     destroy(): void {
       dejarIdioma();
       if (temporizador !== null) globalThis.clearTimeout(temporizador);
+      if (cierreTemporizador !== null) globalThis.clearTimeout(cierreTemporizador);
       caja.remove();
     },
   };

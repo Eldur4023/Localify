@@ -18,7 +18,14 @@ import { ponerImagenDePlaylist } from "../ui/cards.js";
 import { abrirMenu } from "../ui/menu.js";
 import { opcionesDePlaylist } from "../ui/opciones-playlist.js";
 import type { Router } from "../router.js";
-import { arrastrable, zonaDeSoltado, TIPO_PISTAS } from "../ui/dnd.js";
+import {
+  arrastrable,
+  reordenable,
+  zonaDeReordenacion,
+  zonaDeSoltado,
+  TIPO_PISTAS,
+  TIPO_PLAYLIST,
+} from "../ui/dnd.js";
 
 export interface Sidebar {
   /** Vuelve a pedir las playlists. */
@@ -195,11 +202,15 @@ export function mountSidebar(contenedor: HTMLElement, router: Router): Sidebar {
     }
   }
 
+  /** Copia mutable de lo último pintado, para reordenar sin repintar todo. */
+  let ordenActual: PlaylistSummaryDto[] = [];
+
   function pintar(items: readonly PlaylistSummaryDto[]): void {
+    ordenActual = [...items];
     for (const cancelar of soltados.splice(0)) cancelar();
     lista.replaceChildren(liked);
 
-    for (const p of items) {
+    for (const p of ordenActual) {
       const li = document.createElement("li");
       const a = document.createElement("a");
       a.className = "sidebar__item";
@@ -230,6 +241,9 @@ export function mountSidebar(contenedor: HTMLElement, router: Router): Sidebar {
         }),
       );
 
+      // Arrastrar la propia fila reordena la lista de playlists.
+      soltados.push(reordenable(a, () => p.id, TIPO_PLAYLIST));
+
       // Las mismas opciones que en su ficha. Renombrar una playlist obligaba a
       // entrar en ella, volver y comprobar que el cambio se veía; aquí está
       // donde se la está mirando.
@@ -258,14 +272,80 @@ export function mountSidebar(contenedor: HTMLElement, router: Router): Sidebar {
     }
   }
 
+  /**
+   * Cuenta las llamadas a `refrescar()`, para descartar una respuesta vieja.
+   *
+   * Sin esto, borrar o renombrar dos playlists seguidas dispara dos
+   * `playlistChanged` casi a la vez, y si sus dos `api.list()` no vuelven en
+   * el mismo orden en que se lanzaron, la respuesta más vieja pinta encima de
+   * la más nueva: la barra mostraría un instante algo ya borrado, o el nombre
+   * de antes de renombrar.
+   */
+  let peticion = 0;
+
   function refrescar(): void {
+    const miPeticion = (peticion += 1);
     void api
       .list()
-      .then(pintar)
+      .then((items) => {
+        if (miPeticion !== peticion) return;
+        pintar(items);
+      })
       .catch(() => {
         // Sin playlists la barra sigue siendo navegable.
       });
   }
+
+  /**
+   * Arrastrar una playlist sobre otra reordena la barra lateral.
+   *
+   * Igual que en la ficha de una playlist: se mueve el nodo ya existente
+   * (`before`/`append`, sin tocar el resto) en vez de repintar la lista
+   * entera, que es lo que producía el salto al reordenar canciones —aquí no
+   * hay lista virtualizada, pero repintar seguiría destruyendo y recreando
+   * todos los nodos, con el parpadeo de imagen que eso conlleva.
+   */
+  const dejarReordenPlaylists = zonaDeReordenacion(
+    lista,
+    (destino) =>
+      destino instanceof Element
+        ? destino.closest<HTMLElement>(".sidebar__item[data-playlist-id]")
+        : null,
+    (fila) =>
+      [...lista.querySelectorAll<HTMLElement>(".sidebar__item[data-playlist-id]")].indexOf(fila),
+    async (playlistId, indice) => {
+      const desde = ordenActual.findIndex((p) => p.id === playlistId);
+      if (desde < 0) return;
+
+      const anclas = [
+        ...lista.querySelectorAll<HTMLElement>(".sidebar__item[data-playlist-id]"),
+      ];
+      const nodoMovido = anclas[desde]?.closest("li");
+
+      const [movida] = ordenActual.splice(desde, 1);
+      if (movida && nodoMovido) {
+        const destinoFinal = indice > desde ? indice - 1 : indice;
+        ordenActual.splice(destinoFinal, 0, movida);
+
+        const restantes = anclas
+          .filter((_, i) => i !== desde)
+          .map((a) => a.closest("li"));
+        const referencia = restantes[destinoFinal] ?? null;
+        if (referencia) referencia.before(nodoMovido);
+        else lista.append(nodoMovido);
+      }
+
+      // Optimista, como el reordenamiento de canciones: solo se recarga si el
+      // backend falla de verdad (ADR-009, un único `UPDATE`).
+      try {
+        await api.reorderList(playlistId, indice);
+      } catch (error) {
+        console.error("Fallo al reordenar la playlist, recargando", error);
+        refrescar();
+      }
+    },
+    TIPO_PLAYLIST,
+  );
 
   refrescar();
 
@@ -279,7 +359,14 @@ export function mountSidebar(contenedor: HTMLElement, router: Router): Sidebar {
    * aquí nadie lo escuchaba.
    */
   const dejarEventos = alRecibir((evento) => {
-    if (evento.type === "playlistChanged" || evento.type === "playlistImportFinished") {
+    if (evento.type === "playlistImportFinished") {
+      refrescar();
+      return;
+    }
+    // "reordered" ya se aplicó de forma optimista al soltar (más arriba):
+    // repintar aquí sería exactamente el repintado innecesario que el
+    // movimiento optimista evita, solo que un instante después.
+    if (evento.type === "playlistChanged" && evento.kind !== "reordered") {
       refrescar();
     }
   });
@@ -300,6 +387,7 @@ export function mountSidebar(contenedor: HTMLElement, router: Router): Sidebar {
     destroy(): void {
       dejarIdioma();
       dejarEventos();
+      dejarReordenPlaylists();
       for (const cancelar of soltados.splice(0)) cancelar();
       contenedor.replaceChildren();
     },

@@ -115,6 +115,22 @@ pub async fn playlist_reorder(
     Ok(())
 }
 
+/// Reordena una playlist en la barra lateral, entre sus hermanas.
+///
+/// Misma idea que [`playlist_reorder`], una capa más arriba: claves
+/// fraccionarias (ADR-009), así que el frontend también puede aplicar el
+/// movimiento de forma optimista aquí.
+#[tauri::command]
+pub async fn playlist_reorder_list(
+    ctx: State<'_, AppContext>,
+    playlist_id: String,
+    to_index: usize,
+) -> Resultado<()> {
+    let id = PlaylistId::parse(&playlist_id)?;
+    ctx.playlists.reorder_list(&id, to_index).await?;
+    Ok(())
+}
+
 /// Abre el selector de imágenes del sistema.
 ///
 /// Devuelve la ruta elegida, o `None` si se cancela. Es lo **único** que sale

@@ -500,6 +500,12 @@ pub trait PlaylistService: Send + Sync + 'static {
         to_index: usize,
     ) -> CoreResult<()>;
 
+    /// Reordena la playlist **entre sus hermanas**, en la barra lateral.
+    ///
+    /// Misma clave fraccionaria que [`PlaylistService::reorder`] (ADR-009),
+    /// pero sobre la lista de playlists en vez de sobre el contenido de una.
+    async fn reorder_list(&self, id: &PlaylistId, to_index: usize) -> CoreResult<()>;
+
     async fn set_cover(&self, id: &PlaylistId, image: &Path) -> CoreResult<()>;
 
     /// Quita la portada propia y devuelve la playlist al mosaico.

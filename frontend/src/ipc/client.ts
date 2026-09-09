@@ -252,6 +252,9 @@ export const playlists = {
   /** Un solo `UPDATE` en el backend: se puede aplicar de forma optimista. */
   reorder: (playlistId: string, entryId: string, toIndex: number) =>
     invoke<void>("playlist_reorder", { playlistId, entryId, toIndex }),
+  /** Reordena la playlist entre sus hermanas, en la barra lateral. */
+  reorderList: (playlistId: string, toIndex: number) =>
+    invoke<void>("playlist_reorder_list", { playlistId, toIndex }),
   setDescription: (playlistId: string, description: string | null) =>
     invoke<void>("playlist_set_description", { playlistId, description }),
   /**

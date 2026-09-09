@@ -218,8 +218,16 @@ export function mountPlaylistView(contenedor: HTMLElement, ruta: Ruta): Vista {
         }
         trackList.lista.move(desde, indice);
       }
-      await api.reorder(playlistId, entryId, indice);
-      recargar();
+      // Sin recarga si sale bien: ya se pintó el movimiento, y volver a pedirlo
+      // todo al backend es lo que deshacía el gesto suave (reinicia el scroll y
+      // vuelve a poblar la lista virtualizada de cero). Solo hace falta corregir
+      // la vista si el `UPDATE` falla de verdad.
+      try {
+        await api.reorder(playlistId, entryId, indice);
+      } catch (error) {
+        console.error("Fallo al reordenar la playlist, recargando", error);
+        recargar();
+      }
     },
   );
 

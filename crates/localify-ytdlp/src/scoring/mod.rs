@@ -129,7 +129,14 @@ struct Contexto<'a> {
     /// Título completo de Spotify, normalizado. Aquí sí están los términos que
     /// distinguen la versión.
     titulo_spotify_completo: String,
-    artista_principal: String,
+    /// Todos los artistas de la pista, no solo el principal.
+    ///
+    /// En una colaboración, el canal o el título del vídeo pueden nombrar a
+    /// cualquiera de ellos: Spotify no siempre pone primero a quien más suena
+    /// en YouTube (el remixer, el DJ...), así que quedarse solo con
+    /// `artista_principal()` deja sin ninguna señal justo los casos en los
+    /// que el emparejador más la necesita.
+    artistas_norm: Vec<String>,
     album_norm: Option<String>,
     duracion_pista: DurationMs,
 }
@@ -155,10 +162,12 @@ impl<'a> Contexto<'a> {
             canal_norm,
             titulo_spotify: text::search_title(&pista.title),
             titulo_spotify_completo: text::normalize(&pista.title),
-            artista_principal: pista
-                .artista_principal()
+            artistas_norm: pista
+                .artists
+                .iter()
                 .map(|a| text::normalize(&a.name))
-                .unwrap_or_default(),
+                .filter(|n| !n.is_empty())
+                .collect(),
             album_norm: pista.album.as_ref().map(|a| text::normalize(&a.title)),
             duracion_pista: pista.duration,
             candidato,
@@ -194,13 +203,17 @@ impl<'a> Contexto<'a> {
         if self.canal_norm.ends_with(rules::SUFIJO_TOPIC) {
             mejor = mejor.max(rules::BONO_CANAL_TOPIC);
         }
-        // El canal es el del artista: "Queen Official", "queenofficial"…
-        if !self.artista_principal.is_empty()
-            && !self.canal_norm.is_empty()
-            && (self.canal_norm.contains(&self.artista_principal)
-                || text::similarity(&self.canal_norm, &self.artista_principal) > 0.9)
-        {
-            mejor = mejor.max(rules::BONO_CANAL_DEL_ARTISTA);
+        // El canal es el de alguno de los artistas: "Queen Official",
+        // "queenofficial"… En una colaboración puede ser el de cualquiera de
+        // los que suenan, no solo el que Spotify pone primero.
+        if !self.canal_norm.is_empty() {
+            let es_canal_de_algun_artista = self.artistas_norm.iter().any(|artista| {
+                self.canal_norm.contains(artista.as_str())
+                    || text::similarity(&self.canal_norm, artista) > 0.9
+            });
+            if es_canal_de_algun_artista {
+                mejor = mejor.max(rules::BONO_CANAL_DEL_ARTISTA);
+            }
         }
 
         mejor
@@ -223,19 +236,30 @@ impl<'a> Contexto<'a> {
         escalar(efectiva, rules::BONO_TITULO_MAX)
     }
 
+    /// Bonificación por coincidencia de artista.
+    ///
+    /// Se prueba con cada artista de la pista y se queda con el mejor, no con
+    /// la suma: es la misma "mejor señal" que ya usa [`Self::bono_fuente`].
+    /// En una colaboración, el título o el canal del vídeo pueden nombrar a
+    /// cualquiera de los artistas, y descartar a los que no son el primero
+    /// dejaría ese caso sin ninguna bonificación de artista.
     fn bono_artista(&self) -> f32 {
-        if self.artista_principal.is_empty() {
-            return 0.0;
-        }
+        self.artistas_norm
+            .iter()
+            .map(|artista| self.bono_de_un_artista(artista))
+            .fold(0.0_f32, f32::max)
+    }
+
+    fn bono_de_un_artista(&self, artista: &str) -> f32 {
         // El artista puede aparecer en el título o en el canal; vale cualquiera.
-        let en_titulo = self.titulo_norm.contains(&self.artista_principal);
-        let en_canal = self.canal_norm.contains(&self.artista_principal);
+        let en_titulo = self.titulo_norm.contains(artista);
+        let en_canal = self.canal_norm.contains(artista);
 
         if en_titulo || en_canal {
             return rules::BONO_ARTISTA_MAX;
         }
         escalar(
-            text::similarity(&self.canal_norm, &self.artista_principal),
+            text::similarity(&self.canal_norm, artista),
             rules::BONO_ARTISTA_MAX,
         )
     }

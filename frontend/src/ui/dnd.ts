@@ -46,6 +46,9 @@ export const TIPO_PISTAS = "application/x-localify-tracks";
 /** Tipo MIME de un arrastre de entradas de playlist, para reordenar. */
 export const TIPO_ENTRADA = "application/x-localify-entry";
 
+/** Tipo MIME de un arrastre de una playlist entera, para reordenarlas entre sí. */
+export const TIPO_PLAYLIST = "application/x-localify-playlist";
+
 /** Marca un elemento como origen de arrastre de pistas. */
 export function arrastrable(
   el: HTMLElement,
@@ -72,12 +75,22 @@ export function arrastrable(
   };
 }
 
-/** Marca un elemento como entrada reordenable de una playlist. */
-export function reordenable(el: HTMLElement, entryId: () => string): () => void {
+/**
+ * Marca un elemento como entrada reordenable de una playlist.
+ *
+ * `tipo` distingue qué se está arrastrando —una entrada dentro de una
+ * playlist, o una playlist entera en la barra lateral— para que una zona no
+ * reaccione a un arrastre que no es el suyo.
+ */
+export function reordenable(
+  el: HTMLElement,
+  entryId: () => string,
+  tipo: string = TIPO_ENTRADA,
+): () => void {
   el.draggable = true;
 
   const alEmpezar = (e: DragEvent): void => {
-    e.dataTransfer?.setData(TIPO_ENTRADA, entryId());
+    e.dataTransfer?.setData(tipo, entryId());
     if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
     el.classList.add("is-dragging");
   };
@@ -163,6 +176,7 @@ export function zonaDeReordenacion(
   filaDe: (destino: EventTarget | null) => HTMLElement | null,
   indiceDe: (fila: HTMLElement) => number,
   manejar: (entryId: string, indice: number) => void | Promise<void>,
+  tipo: string = TIPO_ENTRADA,
 ): () => void {
   let marcada: HTMLElement | null = null;
 
@@ -172,7 +186,7 @@ export function zonaDeReordenacion(
   };
 
   const alPasar = (e: DragEvent): void => {
-    if (!e.dataTransfer?.types.includes(TIPO_ENTRADA)) return;
+    if (!e.dataTransfer?.types.includes(tipo)) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
 
@@ -187,7 +201,7 @@ export function zonaDeReordenacion(
   };
 
   const alSoltar = (e: DragEvent): void => {
-    const entryId = e.dataTransfer?.getData(TIPO_ENTRADA);
+    const entryId = e.dataTransfer?.getData(tipo);
     const fila = filaDe(e.target);
     const lado = fila ? ladoDeSoltado(fila, e) : "despues";
     limpiar();

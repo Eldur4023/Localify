@@ -235,6 +235,17 @@ pub trait PlaylistRepository: Send + Sync + 'static {
 
     /// Renumera a enteros cuando los huecos se estrechan demasiado.
     async fn rebalance(&self, id: &PlaylistId) -> CoreResult<()>;
+
+    /// Claves de los vecinos de un índice **en la lista de playlists**, no en
+    /// el contenido de una. Es lo que ordena la barra lateral.
+    async fn playlist_neighbors(&self, index: usize) -> CoreResult<(Option<f64>, Option<f64>)>;
+
+    /// Reordena una playlist entre sus hermanas. Un único `UPDATE` (ADR-009).
+    async fn set_playlist_position(&self, id: &PlaylistId, position: f64) -> CoreResult<()>;
+
+    /// Renumera las posiciones de todas las playlists cuando los huecos se
+    /// estrechan demasiado.
+    async fn rebalance_playlists(&self) -> CoreResult<()>;
 }
 
 /// Caché de emparejamientos con YouTube. Borrarla solo cuesta tiempo.

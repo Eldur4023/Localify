@@ -82,6 +82,7 @@ macro_rules! registrar_comandos {
             $crate::commands::playlist::playlist_add_tracks,
             $crate::commands::playlist::playlist_remove_entries,
             $crate::commands::playlist::playlist_reorder,
+            $crate::commands::playlist::playlist_reorder_list,
             $crate::commands::playlist::playlist_import,
             $crate::commands::playlist::playlist_pick_image,
             $crate::commands::playlist::playlist_set_cover,

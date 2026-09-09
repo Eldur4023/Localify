@@ -42,6 +42,8 @@ pub enum PlaylistChangeKind {
     Deleted,
     /// Cambió el contenido: se añadieron, quitaron o reordenaron entradas.
     Items,
+    /// Cambió su posición entre sus hermanas, en la barra lateral.
+    Reordered,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

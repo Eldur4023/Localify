@@ -359,6 +359,59 @@ fn una_cancion_con_live_dentro_de_otra_palabra_no_se_penaliza() {
     );
 }
 
+#[test]
+fn una_colaboracion_encuentra_su_video_aunque_el_canal_sea_del_segundo_artista() {
+    // Spotify pone a Kygo primero, pero el video esta en el canal de Ellie
+    // Goulding: ni el canal ni el titulo nombran a Kygo en ningun sitio. Sin
+    // "- Topic" ni "provided to youtube" de por medio -para no maquillar el
+    // resultado con otra bonificacion-, la unica senal disponible es el
+    // artista, y antes de este cambio solo se miraba al primero de la lista.
+    let p = Track {
+        id: TrackId::nuevo_local(),
+        title: "First Time".to_owned(),
+        album: None,
+        artists: vec![
+            ArtistRef {
+                id: ArtistId::nuevo_local(),
+                name: "Kygo".to_owned(),
+            },
+            ArtistRef {
+                id: ArtistId::nuevo_local(),
+                name: "Ellie Goulding".to_owned(),
+            },
+        ],
+        duration: DurationMs::from_secs(217),
+        track_number: None,
+        disc_number: None,
+        explicit: false,
+        isrc: None,
+        release_date: None,
+        popularity: Some(70),
+        added_at: chrono::Utc::now(),
+    };
+
+    let confianza = elige(
+        &p,
+        &[
+            Candidato::nuevo(
+                "correcto",
+                "First Time (with Ellie Goulding)",
+                "Ellie Goulding",
+                217,
+            )
+            .build(),
+            Candidato::nuevo("ajeno", "Some Other Song", "Random Channel", 217)
+                .vistas(200)
+                .build(),
+        ],
+        "correcto",
+    );
+    assert!(
+        confianza.permite_descarga_automatica(),
+        "el segundo artista de Spotify tambien debe contar como senal de artista"
+    );
+}
+
 // ============================================================================
 // Casos donde lo correcto es NO descargar
 // ============================================================================
