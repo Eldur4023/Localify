@@ -78,12 +78,12 @@ export function mountPlayerBar(contenedor, opciones) {
 	const controles = document.createElement("div");
 	controles.className = "pb__controls";
 	const aleatorio = botonIcono("shuffle", "", () => void alternarAleatorio(), { tamano: 18 });
-	const anterior = botonIcono("previous", "", () => void player.previous(), { tamano: 20 });
-	const tocar = botonIcono("play", "", () => void player.toggle(), {
+	const anterior = botonIcono("previous", "", () => void player.previous().then(pintar), { tamano: 20 });
+	const tocar = botonIcono("play", "", () => void player.toggle().then(pintar), {
 		tamano: 20,
 		clase: "pb__play"
 	});
-	const siguiente = botonIcono("next", "", () => void player.next(), { tamano: 20 });
+	const siguiente = botonIcono("next", "", () => void player.next().then(pintar), { tamano: 20 });
 	const repetir = botonIcono("repeat", "", () => void rotarRepeticion(), { tamano: 18 });
 	controles.append(aleatorio, anterior, tocar, siguiente, repetir);
 	const barra = document.createElement("div");

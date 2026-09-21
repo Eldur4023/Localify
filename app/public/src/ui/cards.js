@@ -12,30 +12,16 @@
 */
 import { icono } from "./icons.js";
 /**
-* Pone `ruta` como fuente de una portada, probando las dos formas en que
-* Tauri sirve un esquema propio según la plataforma.
-*
-* Windows y Android lo sirven como `http://<esquema>.localhost/<ruta>`;
-* macOS y Linux, como `<esquema>://localhost/<ruta>` — está documentado así
-* en el propio código fuente de Tauri, en el aviso de
-* `register_uri_scheme_protocol`. Detectar el sistema operativo desde JS
-* para elegir una sola forma añadiría una dependencia solo para esto; probar
-* la de Windows primero y caer a la otra al fallar cubre las dos sin
-* necesitarla, porque la que no es la de la plataforma actual falla limpio
-* y al instante, no a medias ni con contenido equivocado.
-*
-* `siFallaDelTodo` solo se llama si **ninguna** de las dos formas cargó: ni
-* hay portada, ni es un problema de plataforma.
+* Pone `ruta` como fuente de una portada. `siFallaDelTodo` solo se llama si
+* no hay portada de verdad (404: ni el álbum la tiene, ni hay nada que
+* cachear).
 */
 function asignarSrcConRespaldo(img, ruta, siFallaDelTodo) {
 	img.onerror = () => {
-		img.onerror = () => {
-			img.onerror = null;
-			siFallaDelTodo();
-		};
-		img.src = `/api/cover/${ruta}`;
+		img.onerror = null;
+		siFallaDelTodo();
 	};
-
+	img.src = `/api/cover/${ruta}`;
 }
 /** Filas de tarjetas, con desplazamiento horizontal. */
 export function carrusel(titulo) {

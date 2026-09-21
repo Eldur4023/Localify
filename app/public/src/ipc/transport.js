@@ -63,6 +63,11 @@ const audioInactivo = () => slots[1 - activo];
 
 const BANDAS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
 let cadenaEq = null; // { ctx, filtros, ganancias: [GainNode, GainNode] }
+// Volumen real aplicado al slot activo (ver aplicarVolumenPerceptual): una vez
+// el audio pasa por Web Audio, WebKitGTK deja de respetar el .volume del
+// propio <audio>, así que el "1" de plena ganancia en montarEq/conmutarGapless/
+// iniciarCrossfade tiene que ser este valor, no un literal.
+let volumenPerceptual = 1;
 let gananciasEq = new Float32Array(10);
 
 function montarEq() {
@@ -83,7 +88,7 @@ function montarEq() {
 		const ganancias = slots.map((a, i) => {
 			const fuente = ctx.createMediaElementSource(a);
 			const gain = ctx.createGain();
-			gain.gain.value = i === activo ? 1 : 0;
+			gain.gain.value = i === activo ? volumenPerceptual : 0;
 			fuente.connect(gain);
 			gain.connect(filtros[0]);
 			return gain;
@@ -108,8 +113,18 @@ function aplicarVolumenPerceptual(v) {
 	// original. Se aplica a los dos elementos: el volumen del usuario no
 	// depende de cuál esté activo ahora mismo, y durante un crossfade los
 	// dos están sonando de verdad.
+	//
+	// a.volume solo tiene efecto real si el audio TODAVÍA no pasa por Web
+	// Audio (cadenaEq === null: antes del primer play, o montarEq() falló).
+	// En cuanto createMediaElementSource() engancha el elemento a la cadena
+	// del EQ, WebKitGTK dejar de respetar su .volume -- desde ahí el control
+	// de verdad es el GainNode del slot activo (volumenPerceptual, que
+	// además es el "1" que usan montarEq/conmutarGapless/iniciarCrossfade
+	// como plena ganancia).
 	const vol = Math.min(1, Math.max(0, v)) ** 3;
+	volumenPerceptual = vol;
 	slots.forEach((a) => { a.volume = vol; });
+	if (cadenaEq) cadenaEq.ganancias[activo].gain.value = vol;
 }
 
 // ── Crossfade / gapless ──────────────────────────────────────────────────────
@@ -187,7 +202,7 @@ function conmutarGapless() {
 	if (cadenaEq) {
 		const t = cadenaEq.ctx.currentTime;
 		cadenaEq.ganancias[activo].gain.cancelScheduledValues(t);
-		cadenaEq.ganancias[activo].gain.setValueAtTime(1, t);
+		cadenaEq.ganancias[activo].gain.setValueAtTime(volumenPerceptual, t);
 		cadenaEq.ganancias[1 - activo].gain.cancelScheduledValues(t);
 		cadenaEq.ganancias[1 - activo].gain.setValueAtTime(0, t);
 	}
@@ -216,7 +231,7 @@ function iniciarCrossfade() {
 		cadenaEq.ganancias[activo].gain.linearRampToValueAtTime(0, t + dur);
 		cadenaEq.ganancias[1 - activo].gain.cancelScheduledValues(t);
 		cadenaEq.ganancias[1 - activo].gain.setValueAtTime(0, t);
-		cadenaEq.ganancias[1 - activo].gain.linearRampToValueAtTime(1, t + dur);
+		cadenaEq.ganancias[1 - activo].gain.linearRampToValueAtTime(volumenPerceptual, t + dur);
 	}
 	// La pista "actual" pasa a ser la entrante desde ya (a efectos de
 	// posición/UI): perceptualmente ya es la protagonista. El elemento
@@ -600,8 +615,18 @@ export async function iniciarEqGuardado() {
 			aplicarGanancias();
 		}
 		if (typeof s?.audio?.crossfadeMs === "number") crossfadeMsCache = s.audio.crossfadeMs;
-		// el volumen guardado lo aplica el primer sondeo de estado; aquí solo
-		// montamos el EQ persistido
+	} catch {}
+	// El volumen no vive en "audio" (ajustes) sino en player_state (sesión):
+	// sin esto se abre siempre a plena ganancia hasta que se toca el
+	// control, sin importar en qué volumen se dejara la vez anterior.
+	try {
+		const r = await fetch("/api/invoke", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ cmd: "player_get_state", args: "{}" }),
+		});
+		const estado = await r.json();
+		if (typeof estado?.volume === "number") aplicarVolumenPerceptual(estado.volume);
 	} catch {}
 }
 
