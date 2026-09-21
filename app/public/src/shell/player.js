@@ -264,6 +264,9 @@ export function mountPlayerBar(contenedor, opciones) {
 			case "volumeChanged":
 				refrescar();
 				break;
+			case "positionTick":
+				if (!arrastrando && estado?.status === "playing") pintarPosicion(evento.positionMs, estado?.durationMs ?? 0);
+				break;
 			default: break;
 		}
 	});

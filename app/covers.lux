@@ -85,10 +85,24 @@ get endpoint("/api/cover/album/:id", string id):
 get endpoint("/api/cover/track/:id", string id):
     db_init()
     string destino = os.path_join(covers_dir(), "track-" + id + ".jpg")
-    string yid = youtube_id_de_pista(id)
-    if yid == "":
-        return status(404)
-    bool ok = cachear_imagen(url_miniatura_video(yid), destino)
+    # La portada del álbum es más fiable que la miniatura del vídeo: muchas
+    # miniaturas de "audio oficial" traen la carátula centrada sobre un
+    # lienzo más ancho, con el margen (gris o negro) incrustado en los
+    # propios píxeles -- object-fit: cover no puede recortarlo porque forma
+    # parte de la imagen. Se prueba primero el álbum; el vídeo queda como
+    # respaldo solo si la pista no tiene álbum con portada propia.
+    List<Json> t = await sqlite.query("select album_id from tracks where id = ?", id)
+    string? url = null
+    if len(t) > 0:
+        string album_id = jstr(t[0]["album_id"], "")
+        if album_id != "":
+            url = portada_album_url(album_id)
+    if url == null:
+        string yid = youtube_id_de_pista(id)
+        if yid == "":
+            return status(404)
+        url = url_miniatura_video(yid)
+    bool ok = cachear_imagen(url, destino)
     if not ok or not os.is_file(destino):
         return status(404)
     header("Content-Type", "image/jpeg")

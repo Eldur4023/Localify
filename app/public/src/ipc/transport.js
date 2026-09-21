@@ -127,6 +127,38 @@ function aplicarVolumenPerceptual(v) {
 	if (cadenaEq) cadenaEq.ganancias[activo].gain.value = vol;
 }
 
+/**
+ * Pausa sin esperar a que el decodificador nativo reaccione: la latencia
+ * real de pause() en WebKitGTK/GStreamer varía (buffering interno), así que
+ * además de pausar los dos elementos se corta el GainNode del mezclador en
+ * el acto -- aguas abajo de ese buffering, el silencio es inmediato pase lo
+ * que pase con el decodificador.
+ */
+function pausarInstante() {
+	audioActivo().pause();
+	// Un crossfade puede seguir sonando por debajo (la cola del elemento
+	// que se está apagando): pausar solo el activo dejaría ese resto
+	// audible aunque la interfaz diga "en pausa".
+	if (!audioInactivo().paused) audioInactivo().pause();
+	if (cadenaEq) {
+		const t = cadenaEq.ctx.currentTime;
+		cadenaEq.ganancias.forEach((g) => {
+			g.gain.cancelScheduledValues(t);
+			g.gain.value = 0;
+		});
+	}
+}
+
+/** Contraparte de pausarInstante(): reanuda y restaura la ganancia del slot activo. */
+function reanudarInstante() {
+	audioActivo().play().catch(() => {});
+	if (cadenaEq) {
+		const t = cadenaEq.ctx.currentTime;
+		cadenaEq.ganancias[activo].gain.cancelScheduledValues(t);
+		cadenaEq.ganancias[activo].gain.value = volumenPerceptual;
+	}
+}
+
 // ── Crossfade / gapless ──────────────────────────────────────────────────────
 
 let crossfadeMsCache = 0;
@@ -318,6 +350,17 @@ slots.forEach((a) => {
 		if (cadenaEq && cadenaEq.ctx.state === "suspended") cadenaEq.ctx.resume();
 	});
 	a.addEventListener("loadedmetadata", alCargarMetadata);
+	// La barra de progreso no depende solo del setInterval de player.js: ese
+	// temporizador es JS normal, y WebKitGTK lo puede llegar a congelar (o
+	// espaciarlo mucho) en cuanto la ventana pierde el foco o se minimiza,
+	// aunque el audio siga sonando de verdad (el decodificador no depende
+	// del bucle de eventos de JS). timeupdate lo dispara el propio elemento
+	// según avanza la reproducción, así que sigue llegando pase lo que pase
+	// con los temporizadores.
+	a.addEventListener("timeupdate", (e) => {
+		if (e.target !== audioActivo()) return;
+		emitir("positionTick", { positionMs: Math.round(e.target.currentTime * 1000) });
+	});
 });
 
 /**
@@ -478,13 +521,9 @@ function sincronizarDesde(estado) {
 	const a = audioActivo();
 	const quiere = estado.status === "playing";
 	if (quiere && estado.track?.availability?.kind === "local") {
-		if (a.paused) a.play().catch(() => {});
+		if (a.paused) reanudarInstante();
 	} else if (!quiere) {
-		a.pause();
-		// Un crossfade puede seguir sonando por debajo (la cola del elemento
-		// que se está apagando): pausar solo el activo dejaría ese resto
-		// audible aunque la interfaz diga "en pausa".
-		if (!audioInactivo().paused) audioInactivo().pause();
+		pausarInstante();
 	}
 	if (quiere) void actualizarPrediccion(estado);
 }
@@ -573,16 +612,14 @@ export async function invocar(cmd, args) {
 	// dice "en pausa".
 	if (cmd === "player_toggle") {
 		if (j?.status === "playing" && j?.track?.availability?.kind === "local") {
-			audioActivo().play().catch(() => {});
+			reanudarInstante();
 		} else {
-			audioActivo().pause();
-			if (!audioInactivo().paused) audioInactivo().pause(); // ver comentario en sincronizarDesde
+			pausarInstante();
 		}
 	} else if (cmd === "player_pause") {
-		audioActivo().pause();
-		if (!audioInactivo().paused) audioInactivo().pause();
+		pausarInstante();
 	} else if (cmd === "player_resume" || cmd === "player_play_track") {
-		if (j?.track?.availability?.kind === "local") audioActivo().play().catch(() => {});
+		if (j?.track?.availability?.kind === "local") reanudarInstante();
 	}
 	if (j && typeof j === "object" && "status" in j && "track" in j) {
 		ultimoEstado = j;
