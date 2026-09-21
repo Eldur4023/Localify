@@ -1,0 +1,441 @@
+# queue.lux — Dominio de la cola de reproducción.
+#
+# Puerto del modelo de DOS colas de Localify (crates/localify-core/src/domain/
+# queue.rs + actors/cola.rs):
+#   - cola de usuario ("reproducir a continuación" / "añadir a la cola"):
+#     prioridad absoluta, se consume al reproducirse y sobrevive a cambios
+#     de contexto;
+#   - cola de contexto (álbum/playlist/búsqueda): se regenera al cambiar el
+#     contexto; el orden de reproducción es una permutación estable cuando
+#     shuffle está activo.
+#
+# Todo el estado vive en la fila única de player_state (SQLite): es la única
+# memoria compartida segura entre las 16 hebras del servidor. Las mutaciones
+# usan la columna revision como cerrojo optimista.
+
+# Los imports de módulos son a nivel de proyecto y viven en app.lux.
+
+# ─── PRNG reproducible (sin operadores bit a bit en el lenguaje) ─────────────
+# LCG clásico mod 2^31: misma semilla → misma permutación, suficiente para
+# barajar. (El original usaba xorshift64*; LuxScript no tiene <<, ^ ni >>.)
+
+fn int prng_siguiente(int estado):
+    # (estado * 1103515245 + 12345) mod 2^31: el producto cabe en int64
+    # (2^31 * 2^30.04 < 2^62) así que no hace falta partir la multiplicación
+    return (estado * 1103515245 + 12345) % 2147483648
+
+fn List<int> permutacion_estable(int longitud, int semilla):
+    List<int> indices = []
+    for int i in range(0, longitud):
+        indices.add(i)
+    if longitud < 2:
+        return indices
+    int estado = semilla % 2147483647
+    if estado <= 0:
+        estado = 987654321
+    for int i in range(longitud - 1, 0, -1):
+        estado = prng_siguiente(estado)
+        int j = estado % (i + 1)
+        int tmp = indices[i]
+        indices[i] = indices[j]
+        indices[j] = tmp
+    return indices
+
+# ─── Lectura del estado ──────────────────────────────────────────────────────
+
+class Entrada:
+    string entryId
+    string trackId
+
+    Entrada(string entryId, string trackId)
+
+class EstadoCola:
+    string track_id
+    int position_ms
+    double volume
+    string status
+    string repeat_mode
+    bool shuffle
+    int shuffle_seed
+    string context
+    List<string> context_queue
+    List<int> play_order
+    int queue_index
+    List<Entrada> user_queue
+    List<string> history
+    int revision
+
+fn List<string> parsear_ids(string json_texto):
+    List<string> out = []
+    if json_texto == "" or json_texto == null:
+        return out
+    Json? j = parse_json(json_texto)
+    if j == null:
+        return out
+    List<Json> items = jlist(j)
+    for int i in range(0, len(items)):
+        out.add(jstr(items[i], ""))
+    return out
+
+fn List<Entrada> parsear_entries(string json_texto):
+    List<Entrada> out = []
+    if json_texto == "" or json_texto == null:
+        return out
+    Json? j = parse_json(json_texto)
+    if j == null:
+        return out
+    List<Json> items = jlist(j)
+    for int i in range(0, len(items)):
+        out.add(Entrada(jstr(items[i]["entryId"], ""), jstr(items[i]["trackId"], "")))
+    return out
+
+fn List<int> parsear_orden(string json_texto):
+    List<int> out = []
+    if json_texto == "" or json_texto == null:
+        return out
+    Json? j = parse_json(json_texto)
+    if j == null:
+        return out
+    List<Json> items = jlist(j)
+    for int i in range(0, len(items)):
+        out.add(jint(items[i], 0))
+    return out
+
+fn EstadoCola leer_estado():
+    List<Json> filas = await sqlite.query("select track_id, position_ms, volume, status, repeat_mode, shuffle, shuffle_seed, context, context_queue, play_order, queue_index, user_queue, history, revision from player_state where id = 1")
+    EstadoCola e = EstadoCola("", 0, 1.0, "stopped", "off", false, 0, "null", [], [], 0, [], [], 0)
+    if len(filas) == 0:
+        return e
+    Json f = filas[0]
+    e.track_id = jstr(f["track_id"], "")
+    e.position_ms = jint(f["position_ms"], 0)
+    e.volume = jdbl(f["volume"], 1.0)
+    e.status = jstr(f["status"], "stopped")
+    e.repeat_mode = jstr(f["repeat_mode"], "off")
+    e.shuffle = jint(f["shuffle"], 0) == 1
+    e.shuffle_seed = jint(f["shuffle_seed"], 0)
+    e.context = jstr(f["context"], "null")
+    e.context_queue = parsear_ids(jstr(f["context_queue"], ""))
+    e.play_order = parsear_orden(jstr(f["play_order"], ""))
+    e.queue_index = jint(f["queue_index"], 0)
+    e.user_queue = parsear_entries(jstr(f["user_queue"], ""))
+    e.history = parsear_ids(jstr(f["history"], ""))
+    e.revision = jint(f["revision"], 0)
+    return e
+
+fn List<Json> user_queue_json(EstadoCola e):
+    List<Json> out = []
+    for int i in range(0, len(e.user_queue)):
+        Dict<string, string> d = { "entryId": e.user_queue[i].entryId, "trackId": e.user_queue[i].trackId }
+        out.add(d)
+    return out
+
+# Persistencia con cerrojo optimista sobre revision. Devuelve true si ganó.
+fn bool guardar_estado(EstadoCola e):
+    int tocado = await sqlite.exec(
+        """update player_state set track_id = ?, position_ms = ?, volume = ?, status = ?,
+           repeat_mode = ?, shuffle = ?, shuffle_seed = ?, context = ?, context_queue = ?,
+           play_order = ?, queue_index = ?, user_queue = ?, history = ?, revision = revision + 1,
+           updated_at = unixepoch() where id = 1 and revision = ?""",
+        e.track_id, e.position_ms, e.volume, e.status, e.repeat_mode,
+        e.shuffle ? 1 : 0, e.shuffle_seed, e.context, str(e.context_queue),
+        str(e.play_order), e.queue_index, str(user_queue_json(e)), str(e.history), e.revision)
+    return tocado == 1
+
+# Mutación con reintento: recarga, aplica el cambio y compite por la escritura.
+# Único punto de la CAS sobre player_state — todo mutador de estado pasa por
+# aquí (antes cada llamador copiaba a mano su propio "for intento in range(0,4)").
+# argd sólo lo usa "volume" (el único caso que necesita un double); argn hace
+# de slot entero genérico (ms, índice, posición de cola...) según la acción.
+fn bool mutar_estado(string accion, string arg1, string arg2, int argn, double argd = 0.0):
+    for int intento in range(0, 4):
+        EstadoCola e = leer_estado()
+        bool ok = false
+        if accion == "avanzar":
+            ok = cola_avanzar(e, arg1 == "natural", argn)
+        elif accion == "retroceder":
+            ok = cola_retroceder(e)
+        elif accion == "shuffle":
+            ok = cola_shuffle(e, arg1 == "1")
+        elif accion == "repeat":
+            ok = cola_repeat(e, arg1)
+        elif accion == "quitar_entry":
+            ok = cola_quitar_entry(e, arg1)
+        elif accion == "mover_entry":
+            ok = cola_mover_entry(e, arg1, argn)
+        elif accion == "saltar_entry":
+            ok = cola_saltar_entry(e, arg1)
+        elif accion == "orden_indice":
+            ok = cola_ir_a_indice(e, argn)
+        elif accion == "toggle":
+            # argn: posición en ms a fijar al pausar (-1 = no tocarla)
+            if e.track_id != "":
+                if e.status == "playing":
+                    e.status = "paused"
+                    if argn >= 0:
+                        e.position_ms = argn
+                else:
+                    e.status = "playing"
+                ok = true
+        elif accion == "pause":
+            e.status = "paused"
+            if argn >= 0:
+                e.position_ms = argn
+            ok = true
+        elif accion == "resume":
+            if e.track_id != "":
+                e.status = "playing"
+            ok = true
+        elif accion == "seek":
+            e.position_ms = argn
+            ok = true
+        elif accion == "volume":
+            double v = argd
+            if v < 0.0:
+                v = 0.0
+            if v > 1.0:
+                v = 1.0
+            e.volume = v
+            ok = true
+        elif accion == "clear_user_queue":
+            e.user_queue = []
+            ok = true
+        elif accion == "set_track":
+            registrar_historial(e)
+            e.track_id = arg1
+            e.position_ms = 0
+            e.status = "playing"
+            ok = true
+        if not ok:
+            return true
+        if guardar_estado(e):
+            return true
+    return false
+
+# ─── Cola de contexto ────────────────────────────────────────────────────────
+
+# Regenera la cola de contexto (y su orden de reproducción). La cola de
+# usuario NO se toca: sobrevive a los cambios de contexto, como en Spotify.
+fn bool set_contexto(string context_json, List<string> pistas, string pista_inicial):
+    for int intento in range(0, 4):
+        EstadoCola e = leer_estado()
+        e.context = context_json
+        e.context_queue = pistas
+        e.queue_index = 0
+        if e.shuffle and len(pistas) > 1:
+            e.shuffle_seed = time.now() % 2147483647
+            e.play_order = permutacion_estable(len(pistas), e.shuffle_seed)
+        else:
+            e.play_order = []
+        if pista_inicial != "":
+            for int i in range(0, len(pistas)):
+                if pistas[i] == pista_inicial:
+                    e.queue_index = i
+                    break
+        if pista_inicial != "" and pista_inicial != e.track_id:
+            e.position_ms = 0
+        if guardar_estado(e):
+            return true
+    return false
+
+# Pista en la posición k del recorrido (permutado o natural).
+fn string pista_en_orden(EstadoCola e, int k):
+    if k < 0 or k >= len(e.context_queue):
+        return ""
+    if len(e.play_order) == len(e.context_queue):
+        return e.context_queue[e.play_order[k]]
+    return e.context_queue[k]
+
+# Ancla la pista actual al inicio del recorrido rotando la permutación:
+# "anterior" tiene que funcionar tras reactivar shuffle (el bug documentado
+# del original que la rotación corrige).
+fn void anclar_actual(EstadoCola e):
+    if len(e.play_order) != len(e.context_queue) or len(e.play_order) < 2:
+        return
+    int pos = e.play_order[e.queue_index]
+    List<int> rotada = []
+    for int i in range(0, len(e.play_order)):
+        rotada.add(e.play_order[(pos + i) % len(e.play_order)])
+    e.play_order = rotada
+    e.queue_index = 0
+
+fn void registrar_historial(EstadoCola e):
+    if e.track_id == "":
+        return
+    e.history.add(e.track_id)
+    if len(e.history) > 200:
+        e.history = e.history.slice(len(e.history) - 200)
+
+# ─── Avance y retroceso ──────────────────────────────────────────────────────
+
+# Avanza de pista. `natural` distingue el fin de la canción del salto manual:
+# solo el fin natural repite en modo "track" y cuenta como reproducción.
+# Devuelve true si el estado cambió (siempre escriben algo, salvo error).
+fn bool cola_avanzar(EstadoCola e, bool natural, int ms_reproducidos):
+    registrar_historial(e)
+
+    # historial de reproducciones para estadísticas
+    if e.track_id != "":
+        await sqlite.exec("insert into play_history(id, track_id, played_at, ms_played, completed, context) values(?, ?, unixepoch(), ?, ?, ?)",
+            nuevo_id(), e.track_id, ms_reproducidos, natural ? 1 : 0, e.context)
+
+    # repetición de pista: solo en fin natural
+    if natural and e.repeat_mode == "track" and e.track_id != "":
+        e.position_ms = 0
+        return true
+
+    # 1) la cola de usuario tiene prioridad absoluta
+    if len(e.user_queue) > 0:
+        e.track_id = e.user_queue[0].trackId
+        List<Entrada> resto = []
+        for int i in range(1, len(e.user_queue)):
+            resto.add(e.user_queue[i])
+        e.user_queue = resto
+        e.position_ms = 0
+        return true
+
+    # 2) avance dentro del contexto
+    int n = len(e.context_queue)
+    if n == 0:
+        # sin contexto ni cola: se detiene
+        e.track_id = ""
+        e.position_ms = 0
+        e.status = "stopped"
+        return true
+    if e.queue_index + 1 < n:
+        e.queue_index = e.queue_index + 1
+        e.track_id = pista_en_orden(e, e.queue_index)
+        e.position_ms = 0
+        return true
+    # fin del contexto
+    if e.repeat_mode == "queue":
+        e.queue_index = 0
+        e.track_id = pista_en_orden(e, 0)
+        e.position_ms = 0
+        return true
+    e.track_id = ""
+    e.position_ms = 0
+    e.status = "stopped"
+    return true
+
+fn bool cola_retroceder(EstadoCola e):
+    # la actual vino de la cola de usuario: tirar del historial
+    bool en_historial = false
+    if len(e.history) > 0:
+        en_historial = true
+    if len(e.user_queue) == 0 and len(e.history) > 0 and e.context_queue == []:
+        e.track_id = e.history[len(e.history) - 1]
+        e.history = e.history.slice(0, len(e.history) - 1)
+        e.position_ms = 0
+        return true
+    if e.queue_index > 0 and len(e.context_queue) > 0:
+        e.queue_index = e.queue_index - 1
+        e.track_id = pista_en_orden(e, e.queue_index)
+        e.position_ms = 0
+        return true
+    if e.track_id != "":
+        e.position_ms = 0
+        return true
+    return false
+
+# ─── Controles ───────────────────────────────────────────────────────────────
+
+fn bool cola_shuffle(EstadoCola e, bool activar):
+    if activar == e.shuffle:
+        return true
+    e.shuffle = activar
+    if activar and len(e.context_queue) > 1:
+        e.shuffle_seed = time.now() % 2147483647
+        e.play_order = permutacion_estable(len(e.context_queue), e.shuffle_seed)
+        anclar_actual(e)
+    else:
+        # volver al orden natural conservando la pista actual
+        string actual = pista_en_orden(e, e.queue_index)
+        e.play_order = []
+        e.queue_index = 0
+        for int i in range(0, len(e.context_queue)):
+            if e.context_queue[i] == actual:
+                e.queue_index = i
+                break
+    return true
+
+fn bool cola_repeat(EstadoCola e, string modo):
+    if modo == "off" or modo == "queue" or modo == "track":
+        e.repeat_mode = modo
+        return true
+    return false
+
+# ─── Cola de usuario ─────────────────────────────────────────────────────────
+
+fn void cola_annadir_siguientes(List<string> ids):
+    for int intento in range(0, 4):
+        EstadoCola e = leer_estado()
+        # push_front en orden inverso para que A,B suenen A y luego B
+        for int i in range(len(ids) - 1, -1, -1):
+            e.user_queue = [Entrada(nuevo_id(), ids[i])].concat(e.user_queue)
+        if guardar_estado(e):
+            return
+
+fn void cola_annadir_al_final(List<string> ids):
+    for int intento in range(0, 4):
+        EstadoCola e = leer_estado()
+        for int i in range(0, len(ids)):
+            e.user_queue.add(Entrada(nuevo_id(), ids[i]))
+        if guardar_estado(e):
+            return
+
+fn bool cola_quitar_entry(EstadoCola e, string entry_id):
+    List<Entrada> resto = []
+    for int i in range(0, len(e.user_queue)):
+        if e.user_queue[i].entryId != entry_id:
+            resto.add(e.user_queue[i])
+    e.user_queue = resto
+    return true
+
+fn bool cola_mover_entry(EstadoCola e, string entry_id, int destino):
+    List<Entrada> resto = []
+    Entrada? movida = null
+    for int i in range(0, len(e.user_queue)):
+        if e.user_queue[i].entryId == entry_id:
+            movida = e.user_queue[i]
+        else:
+            resto.add(e.user_queue[i])
+    if movida == null:
+        return false
+    if destino < 0:
+        destino = 0
+    if destino > len(resto):
+        destino = len(resto)
+    List<Entrada> nueva = []
+    for int i in range(0, len(resto)):
+        if i == destino:
+            nueva.add(movida)
+        nueva.add(resto[i])
+    if destino == len(resto):
+        nueva.add(movida)
+    e.user_queue = nueva
+    return true
+
+fn bool cola_saltar_entry(EstadoCola e, string entry_id):
+    for int i in range(0, len(e.user_queue)):
+        if e.user_queue[i].entryId == entry_id:
+            registrar_historial(e)
+            e.track_id = e.user_queue[i].trackId
+            List<Entrada> resto = []
+            for int j in range(0, len(e.user_queue)):
+                if j != i:
+                    resto.add(e.user_queue[j])
+            e.user_queue = resto
+            e.position_ms = 0
+            return true
+    return false
+
+# Saltar a una posición concreta del recorrido del contexto.
+fn bool cola_ir_a_indice(EstadoCola e, int indice):
+    if indice < 0 or indice >= len(e.context_queue):
+        return false
+    registrar_historial(e)
+    e.queue_index = indice
+    e.track_id = pista_en_orden(e, indice)
+    e.position_ms = 0
+    return true

@@ -1,0 +1,664 @@
+# downloads.lux — Obtención de audio: emparejamiento + descarga + finalización.
+#
+# Puerto del DownloadActor de Localify (crates/localify-services/src/actors/
+# download.rs) adaptado al modelo de LuxScript: no hay tareas en segundo
+# plano, así que el pipeline es una MÁQUINA DE ESTADOS que avanza por
+# "ticks". Cualquier petición (el sondeo de estado del frontend, o un
+# /api/downloads explícito) llama a tick_descargas(), que mueve cada trabajo
+# un paso adelante:
+#
+#   queued ──CAS──▶ matching ──▶ downloading ──▶ (borrar fila = done)
+#                    │  plan de consultas      │  yt-dlp -f bestaudio
+#                    │  una consulta por tick  │  progreso por proc.read
+#                    ▼                         ▼
+#                  failed (confianza baja,   reintento con backoff
+#                  ADR-017: nunca se baja)   o vídeo rechazado
+#
+# Los procesos viven en el registro de `proc` (handles persistentes entre
+# peticiones — exactamente el caso de uso para el que el módulo existe); sus
+# handles y los buffers de lectura viven en `state` (SharedState, el único
+# almacén seguro entre las hebras del servidor). El resto, en SQLite.
+
+# ─── Utilidades ──────────────────────────────────────────────────────────────
+
+# Los ids de pista del catálogo de YouTube Music SON ids de vídeo (11 chars):
+# para esos no hay nada que emparejar.
+fn bool es_video_id(string id):
+    if len(id) != 11:
+        return false
+    string alfabeto = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+    for int i in range(0, 11):
+        if not alfabeto.contains(id.slice(i, i + 1)):
+            return false
+    return true
+
+fn string formato_expr():
+    return "bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best"
+
+# Argumentos de autenticación según el origen de cookies configurado.
+fn List<string> args_cookies():
+    string modo = ajuste("cookies_mode", "none")
+    List<string> out = []
+    if modo == "browser":
+        string navegador = ajuste("cookies_browser", "firefox")
+        out.add("--cookies-from-browser")
+        out.add(navegador)
+    elif modo == "file":
+        string ruta = ajuste("cookies_file", "")
+        if ruta != "":
+            out.add("--cookies")
+            out.add(ruta)
+    return out
+
+# ─── API pública ─────────────────────────────────────────────────────────────
+
+# Garantiza que exista un trabajo para la pista (priority immediate la
+# adelanta en la cola). Si ya está descargada, no toca nada.
+fn void asegurar_descarga(string track_id, string prioridad):
+    if track_id == "" or track_id == null:
+        return
+    List<Json> f = await sqlite.query("select track_id from audio_files where track_id = ?", track_id)
+    if len(f) > 0:
+        return
+    string video = es_video_id(track_id) ? track_id : ""
+    await sqlite.exec("""
+        insert into download_jobs(track_id, state, priority, video_id, updated_at)
+        values(?, 'queued', ?, ?, unixepoch())
+        on conflict(track_id) do update set
+            priority = case when excluded.priority = 'immediate' then 'immediate' else download_jobs.priority end,
+            updated_at = unixepoch()
+        """, track_id, prioridad, video == "" ? null : video)
+
+# Lista de trabajos activos (con progreso) para el frontend.
+fn List<Json> lista_descargas():
+    return descargas_activas()
+
+# ─── Promoción de la cola ────────────────────────────────────────────────────
+
+fn int activos_descarga():
+    List<Json> f = await sqlite.query("select count(*) as n from download_jobs where state in ('matching','downloading','finalizing')")
+    return jint(f[0]["n"], 0)
+
+fn bool trabajo_listo_para_reintento(Json j):
+    string estado = jstr(j["state"], "")
+    if estado != "queued":
+        return true
+    int intentos = jint(j["attempts"], 0)
+    int desde = jint(j["updated_at"], 0)
+    # backoff [2s, 8s]: igual que BACKOFF_POR_DEFECTO del original
+    int espera = 2
+    if intentos >= 2:
+        espera = 8
+    return ahora() >= desde + espera
+
+fn void promover_cola():
+    int MAX_CONCURRENTES = 2
+    while activos_descarga() < MAX_CONCURRENTES:
+        List<Json> siguientes = await sqlite.query("""
+            select track_id, video_id, attempts from download_jobs
+            where state = 'queued'
+            order by priority = 'immediate' desc, updated_at asc limit 3
+            """)
+        bool promovido = false
+        for int i in range(0, len(siguientes)):
+            if not trabajo_listo_para_reintento(siguientes[i]):
+                continue
+            string tid = jstr(siguientes[i]["track_id"], "")
+            string vid = jstr(siguientes[i]["video_id"], "")
+            if vid != "":
+                int tocado = await sqlite.exec("update download_jobs set state = 'downloading', started_at = unixepoch(), updated_at = unixepoch() where track_id = ? and state = 'queued'", tid)
+                if tocado == 1:
+                    descargar_iniciar(tid, vid)
+                    promovido = true
+                    break
+            else:
+                int tocado = await sqlite.exec("update download_jobs set state = 'matching', started_at = unixepoch(), updated_at = unixepoch() where track_id = ? and state = 'queued'", tid)
+                if tocado == 1:
+                    promovido = true
+                    break
+        if not promovido:
+            break
+
+# ─── Metadatos para el emparejador ───────────────────────────────────────────
+
+fn DatosPista cargar_datos_pista(string track_id):
+    return datos_de_pista(track_id)
+
+# "conocido": el vídeo que un proveedor ya asocia a la grabación. Solo tiene
+# sentido para pistas cuyo id NO es ya un vídeo (importes de playlists).
+fn string resolver_conocido(DatosPista pista):
+    string artista = ""
+    if len(pista.artistas) > 0:
+        artista = pista.artistas[0]
+    string vid = ytm_resolver_por_metadatos(artista, pista.title, pista.duracion_ms)
+    if vid != "":
+        return vid
+    return mb_resolver(artista, pista.title)
+
+# ─── Plan de consultas: una consulta por tick ────────────────────────────────
+
+fn void matching_iniciar(string tid, Json job):
+    List<Json> vj = await sqlite.query("select video_id from download_jobs where track_id = ?", tid)
+    if len(vj) > 0 and jstr(vj[0]["video_id"], "") != "":
+        int tocado = await sqlite.exec("update download_jobs set state = 'downloading', updated_at = unixepoch() where track_id = ? and state = 'matching'", tid)
+        if tocado == 1:
+            descargar_iniciar(tid, jstr(vj[0]["video_id"], ""))
+        return
+    DatosPista pista = cargar_datos_pista(tid)
+    if pista.title == "":
+        await sqlite.exec("update download_jobs set state = 'failed', last_error = 'track.missing', updated_at = unixepoch() where track_id = ? and state = 'matching'", tid)
+        return
+    string conocido = ""
+    if not es_video_id(tid):
+        await sqlite.exec("update download_jobs set video_id = null, updated_at = unixepoch() where track_id = ?", tid)
+        conocido = resolver_conocido(pista)
+    List<ConsultaYt> plan = plan_de_consultas(pista, conocido)
+    if len(plan) == 0:
+        await sqlite.exec("update download_jobs set state = 'failed', last_error = 'match.nothing_to_search', updated_at = unixepoch() where track_id = ? and state = 'matching'", tid)
+        return
+    List<Json> plan_json = []
+    for int i in range(0, len(plan)):
+        Dict<string, Json> c = {
+            "texto": plan[i].texto, "music": plan[i].music ? 1 : 0,
+            "directa": plan[i].directa ? 1 : 0, "origen": plan[i].origen
+        }
+        plan_json.add(c)
+    state.set("dmp:" + tid, str(plan_json))
+    state.set("dmi:" + tid, "0")
+    state.set("dlm:" + tid, "[]")
+
+fn bool matching_tick(string tid, string estado_actual):
+    # 1) ¿hay proceso en marcha?
+    string hkey = "dlh:" + tid
+    string hval = state.get(hkey, "")
+    if hval == "":
+        # decidir si el matching ya terminó con decisión pendiente
+        return matching_continuar(tid, estado_actual)
+
+    # drenar la salida del proceso en marcha
+    int h = int(hval)
+    string acumulado = state.get("dlout:" + tid, "")
+    while true:
+        string? trozo = await proc.read(h, 65536, 0)
+        if trozo == null or trozo == "":
+            break
+        acumulado = acumulado + trozo
+    state.set("dlout:" + tid, acumulado)
+
+    if proc.alive(h):
+        return true
+
+    # proceso terminado: recoger código y limpiar
+    int? codigo = await proc.wait(h, 5000)
+    proc.close(h)
+    state.remove(hkey)
+
+    string salida = state.get("dlout:" + tid, "")
+    state.remove("dlout:" + tid)
+    bool ok = codigo != null and jint(codigo, 1) == 0
+    if not ok and salida.trim() == "":
+        # una consulta que falla no invalida el plan: pasa a la siguiente
+        return matching_continuar(tid, estado_actual)
+
+    # parsear y acumular candidatos (sin repetir video_id)
+    Json? planj = parse_json(state.get("dmp:" + tid, "[]"))
+    int idx = int(state.get("dmi:" + tid, "0"))
+    if planj == null:
+        return matching_continuar(tid, estado_actual)
+    List<Json> plan = jlist(planj)
+    if idx >= len(plan):
+        return matching_continuar(tid, estado_actual)
+    bool music = jint(plan[idx]["music"], 0) == 1
+    List<Json> acumulados = []
+    Json? prev = parse_json(state.get("dlm:" + tid, "[]"))
+    if prev != null:
+        acumulados = jlist(prev)
+    List<Json> nuevos = parsear_candidatos(salida, music)
+    for int i in range(0, len(nuevos)):
+        string vid = jstr(nuevos[i]["video_id"], "")
+        bool ya = false
+        for int k in range(0, len(acumulados)):
+            if jstr(acumulados[k]["video_id"], "") == vid:
+                ya = true
+        if not ya:
+            acumulados.add(nuevos[i])
+    state.set("dlm:" + tid, str(acumulados))
+
+    # puntuar lo acumulado con los excluidos de siempre
+    DatosPista pista = cargar_datos_pista(tid)
+    List<string> excluidos = []
+    List<Json> rej = await sqlite.query("select video_id from youtube_matches where track_id = ? and rejected = 1", tid)
+    for int i in range(0, len(rej)):
+        excluidos.add(jstr(rej[i]["video_id"], ""))
+    Json? mejor = elegir_mejor(pista, acumulados, excluidos)
+    state.set("dmi:" + tid, str(idx + 1))
+
+    if mejor != null:
+        double score = jdbl(mejor["score"], 0.0)
+        if basta_con(score):
+            return matching_terminar(tid, mejor)
+    return matching_continuar(tid, estado_actual)
+
+# Decide el siguiente paso del matching: más consultas o decisión final.
+fn bool matching_continuar(string tid, string estado_actual):
+    # El default tiene que ser "" (parsea a null: "el plan no existe todavía"),
+    # no "[]" ("[]" es JSON válido — una lista vacía — así que parse_json("[]")
+    # nunca da null, y esta comprobación nunca detectaba "matching_iniciar
+    # todavía no ha corrido": entraba directo por la rama de "plan agotado"
+    # con 0 candidatos, y CUALQUIER pista sin video_id ya conocido fallaba
+    # con match.not_found sin haber lanzado una sola búsqueda.
+    Json? planj = parse_json(state.get("dmp:" + tid, ""))
+    if planj == null:
+        matching_iniciar(tid, { "state": estado_actual })
+        return true
+    List<Json> plan = jlist(planj)
+    int idx = int(state.get("dmi:" + tid, "0"))
+
+    if idx >= len(plan):
+        # plan agotado: decisión con lo acumulado (media se descarga, baja no)
+        DatosPista pista = cargar_datos_pista(tid)
+        List<Json> acumulados = []
+        Json? prev = parse_json(state.get("dlm:" + tid, "[]"))
+        if prev != null:
+            acumulados = jlist(prev)
+        List<string> excluidos = []
+        List<Json> rej = await sqlite.query("select video_id from youtube_matches where track_id = ? and rejected = 1", tid)
+        for int i in range(0, len(rej)):
+            excluidos.add(jstr(rej[i]["video_id"], ""))
+        Json? mejor = elegir_mejor(pista, acumulados, excluidos)
+        state.remove("dmp:" + tid)
+        state.remove("dmi:" + tid)
+        state.remove("dlm:" + tid)
+        if mejor != null and jstr(mejor["confidence"], "") != "low":
+            return matching_terminar(tid, mejor)
+        string err = mejor == null ? "match.not_found" : "match.low_confidence"
+        await sqlite.exec("update download_jobs set state = 'failed', last_error = ?, updated_at = unixepoch() where track_id = ? and state = 'matching'", err, tid)
+        return true
+
+    # lanzar la consulta idx (un proceso por tick, no bloquea el handler)
+    #
+    # SIN --flat-playlist a propósito: con él, yt-dlp no manda "duration" en
+    # absoluto para resultados de búsqueda — y parsear_candidatos() descarta
+    # cualquier candidato sin duración (es lo que scoring.lux necesita para
+    # el factor de duración). Con --flat-playlist puesto, la búsqueda
+    # devolvía candidatos de verdad pero TODOS se tiraban por "sin duración",
+    # así que elegir_mejor() nunca tenía nada que puntuar y cualquier pista
+    # sin un vídeo ya conocido (todo lo que no viene directo de YouTube
+    # Music) fallaba siempre con "match.not_found".
+    ConsultaYt q = ConsultaYt(jstr(plan[idx]["texto"], ""), jint(plan[idx]["music"], 0) == 1, jint(plan[idx]["directa"], 0) == 1, jstr(plan[idx]["origen"], ""))
+    List<string> args = [objetivo_consulta(q), "--dump-json", "--no-warnings", "--ignore-errors", "--playlist-end", "10", "--socket-timeout", "15"]
+    List<string> cookies = args_cookies()
+    for int i in range(0, len(cookies)):
+        args.add(cookies[i])
+    state.set("dlout:" + tid, "")
+    int h = proc.start("yt-dlp", args)
+    state.set("dlh:" + tid, str(h))
+    return true
+
+# matching_terminar: registra la decisión y arranca la descarga.
+fn bool matching_terminar(string tid, Json mejor):
+    string video_id = jstr(mejor["video_id"], "")
+    await sqlite.exec("""
+        insert into youtube_matches(id, track_id, video_id, title, channel, from_music, score, confidence, breakdown, created_at)
+        values(?, ?, ?, ?, ?, 0, ?, ?, ?, unixepoch())
+        on conflict(track_id, video_id) do update set score = excluded.score, confidence = excluded.confidence, breakdown = excluded.breakdown
+        """, nuevo_id(), tid, video_id, jstr(mejor["title"], ""), jstr(mejor["channel"], ""),
+        jdbl(mejor["score"], 0.0), jstr(mejor["confidence"], ""), str(mejor["reasons"]))
+    state.remove("dmp:" + tid)
+    state.remove("dmi:" + tid)
+    state.remove("dlm:" + tid)
+    int tocado = await sqlite.exec("update download_jobs set state = 'downloading', video_id = ?, updated_at = unixepoch() where track_id = ? and state = 'matching'", video_id, tid)
+    if tocado == 1:
+        descargar_iniciar(tid, video_id)
+    return true
+
+# ─── Descarga ────────────────────────────────────────────────────────────────
+
+fn void descargar_iniciar(string tid, string video_id):
+    garantizar_biblioteca()
+    string destino = os.path_join(biblioteca_raiz(), ".tmp", tid + ".webm")
+    List<string> args = [
+        "https://www.youtube.com/watch?v=" + video_id,
+        "-f", formato_expr(),
+        "-o", destino,
+        "--no-post-overwrites", "--newline", "--progress",
+        "--progress-template", "LOCALIFY|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s",
+        "--no-warnings", "--no-playlist", "--socket-timeout", "15"
+    ]
+    List<string> cookies = args_cookies()
+    for int i in range(0, len(cookies)):
+        args.add(cookies[i])
+    string err_file = os.path_join(biblioteca_raiz(), ".tmp", tid + ".err")
+    int h = proc.start("yt-dlp", args, { "stderr": err_file })
+    state.set("dlh:" + tid, str(h))
+    state.set("dlp:" + tid, "")
+    await sqlite.exec("update download_jobs set tmp_path = ?, bytes_done = 0, bytes_total = null, updated_at = unixepoch() where track_id = ?", destino, tid)
+
+fn void descargar_tick(string tid):
+    string hval = state.get("dlh:" + tid, "")
+    if hval == "":
+        # reinicio de la app: el handle se perdió; reencolar
+        await sqlite.exec("update download_jobs set state = 'queued', updated_at = unixepoch() where track_id = ? and state = 'downloading'", tid)
+        return
+    int h = int(hval)
+
+    # drenar líneas de progreso
+    string pendiente = state.get("dlp:" + tid, "")
+    int bytes_done = 0
+    int bytes_total = 0
+    List<Json> cur = await sqlite.query("select bytes_done, bytes_total from download_jobs where track_id = ?", tid)
+    if len(cur) > 0:
+        bytes_done = jint(cur[0]["bytes_done"], 0)
+        bytes_total = jint(cur[0]["bytes_total"], 0)
+    bool cambio = false
+    while true:
+        string? trozo = await proc.read(h, 65536, 0)
+        if trozo == null or trozo == "":
+            break
+        pendiente = pendiente + trozo
+        List<string> lineas = pendiente.split("\n")
+        pendiente = lineas[len(lineas) - 1]
+        for int i in range(0, len(lineas) - 1):
+            Json bytes_actuales = parsear_linea_progreso(lineas[i])
+            if jint(jget(bytes_actuales, "done"), 0) > 0:
+                bytes_done = jint(jget(bytes_actuales, "done"), 0)
+                bytes_total = jint(jget(bytes_actuales, "total"), 0)
+                cambio = true
+    state.set("dlp:" + tid, pendiente)
+    if cambio:
+        await sqlite.exec("update download_jobs set bytes_done = ?, bytes_total = ?, updated_at = unixepoch() where track_id = ?", bytes_done, bytes_total > 0 ? bytes_total : null, tid)
+
+    if proc.alive(h):
+        return
+
+    int? codigo = await proc.wait(h, 5000)
+    proc.close(h)
+    state.remove("dlh:" + tid)
+    state.remove("dlp:" + tid)
+
+    bool ok = codigo != null and jint(codigo, 1) == 0
+    List<Json> f = await sqlite.query("select tmp_path, attempts from download_jobs where track_id = ?", tid)
+    if len(f) == 0:
+        return
+    string destino = jstr(f[0]["tmp_path"], "")
+    int intentos = jint(f[0]["attempts"], 0)
+
+    if ok and os.is_file(destino) and os.file_size(destino) >= 16384:
+        await sqlite.exec("update download_jobs set state = 'finalizing', updated_at = unixepoch() where track_id = ?", tid)
+        return
+
+    # fallo: leer el .err para el motivo y decidir reintentar o rendirse
+    string motivo = ""
+    string err_file = os.path_join(biblioteca_raiz(), ".tmp", tid + ".err")
+    string? err = await os.read_file(err_file)
+    if err != null:
+        motivo = err.trim()
+        if len(motivo) > 400:
+            motivo = motivo.slice(len(motivo) - 400)
+    os.remove_file(err_file)
+
+    string video_id = ""
+    List<Json> v = await sqlite.query("select video_id from download_jobs where track_id = ?", tid)
+    if len(v) > 0:
+        video_id = jstr(v[0]["video_id"], "")
+
+    bool error_proveedor = motivo.contains("Sign in to confirm") or motivo.contains("HTTP Error 403") or motivo.contains("unavailable")
+    if error_proveedor and video_id != "":
+        # el vídeo no sirve: rechazarlo y volver a emparejar con otro
+        await sqlite.exec("update youtube_matches set rejected = 1 where track_id = ? and video_id = ?", tid, video_id)
+        await sqlite.exec("update download_jobs set state = 'queued', video_id = null, attempts = attempts + 1, last_error = 'download.provider_rejected', updated_at = unixepoch() where track_id = ?", tid)
+        os.remove_file(destino)
+        return
+
+    if intentos + 1 >= 3:
+        await sqlite.exec("update download_jobs set state = 'failed', attempts = attempts + 1, last_error = ?, updated_at = unixepoch() where track_id = ?", motivo == "" ? "download.failed" : "download.failed: " + motivo, tid)
+        os.remove_file(destino)
+        return
+    await sqlite.exec("update download_jobs set state = 'queued', attempts = attempts + 1, last_error = ?, updated_at = unixepoch() where track_id = ?", motivo == "" ? "download.retry" : "download.retry: " + motivo, tid)
+    os.remove_file(destino)
+
+# "LOCALIFY|hechos|total|estimado" → {done, total}
+fn Json parsear_linea_progreso(string linea):
+    if not linea.starts_with("LOCALIFY|"):
+        return { "done": 0, "total": 0 }
+    List<string> partes = linea.split("|")
+    if len(partes) < 3:
+        return { "done": 0, "total": 0 }
+    int hecho = int_pode(partes[1])
+    int total = int_pode(partes[2])
+    if total <= 0:
+        total = int_pode(partes[3])
+    return { "done": hecho, "total": total }
+
+# int() sobre string posiblemente vacío o "NA" de yt-dlp.
+fn int int_pode(string s):
+    if s == "" or s == "NA" or s == "None":
+        return 0
+    for int i in range(0, len(s)):
+        if "0123456789".index_of(s.slice(i, i + 1)) < 0:
+            return 0
+    return int(s)
+
+# ─── Finalización: verificar, remuxear, etiquetar, mover ────────────────────
+
+fn void finalizar(string tid):
+    List<Json> f = await sqlite.query("""
+        select j.tmp_path, t.title, t.artist_display, t.isrc, t.track_number,
+               al.title as album, al.release_date
+        from download_jobs j
+        join tracks t on t.id = j.track_id
+        left join albums al on al.id = t.album_id
+        where j.track_id = ?
+        """, tid)
+    if len(f) == 0:
+        await sqlite.exec("delete from download_jobs where track_id = ?", tid)
+        return
+    string origen = jstr(f[0]["tmp_path"], "")
+    string titulo = jstr(f[0]["title"], "")
+    string artista = jstr(f[0]["artist_display"], "")
+    string album = jstr(f[0]["album"], "")
+    string isrc = jstr(f[0]["isrc"], "")
+    int pista_num = jint(f[0]["track_number"], 0)
+    string fecha = jstr(f[0]["release_date"], "")
+
+    if not os.is_file(origen):
+        await sqlite.exec("update download_jobs set state = 'failed', last_error = 'finalize.missing_file', updated_at = unixepoch() where track_id = ?", tid)
+        return
+
+    # extensión y códec reales (ffprobe; si falta, se confía en el nombre)
+    string ext = "webm"
+    string codec = ""
+    Json? info = ffprobe_info(origen)
+    if info != null:
+        List<Json> streams = jlist(jget(info, "streams"))
+        if len(streams) > 0:
+            codec = jstr(streams[0]["codec_name"], "")
+        string contenedor = jstr(jget(jget(info, "format"), "format_name"), "")
+        if contenedor.contains("matroska") or contenedor.contains("webm"):
+            ext = "webm"
+        elif contenedor.contains("mov") or contenedor.contains("mp4") or contenedor.contains("m4a"):
+            ext = "m4a"
+        elif contenedor.contains("ogg"):
+            ext = "ogg"
+        elif contenedor.contains("mp3"):
+            ext = "mp3"
+
+    # destino_para (remux.rs): WebM con Opus no es un .opus de verdad.
+    string ext_final = ext
+    bool remux = false
+    if ext == "webm" and (codec == "opus" or codec == "vorbis"):
+        ext_final = codec == "opus" ? "opus" : "ogg"
+        remux = true
+    elif ext == "webm":
+        ext_final = "webm"
+
+    string shard = shard_de(tid)
+    garantizar_biblioteca()
+    string dir_destino = os.path_join(biblioteca_raiz(), "audio", shard)
+    os.make_dir(dir_destino)
+    string destino_abs = os.path_join(dir_destino, tid + "." + ext_final)
+    string rel = "audio/" + shard + "/" + tid + "." + ext_final
+
+    if remux and hay_binario("ffmpeg"):
+        List<string> args = ["-y", "-i", origen, "-c", "copy", "-vn"]
+        # etiquetas en el mismo pase: título, artista, álbum, pista, fecha, ISRC
+        args.add("-map_metadata")
+        args.add("-1")
+        args.add("-metadata")
+        args.add("title=" + titulo)
+        if artista != "":
+            args.add("-metadata")
+            args.add("artist=" + artista)
+        if album != "":
+            args.add("-metadata")
+            args.add("album=" + album)
+        if pista_num > 0:
+            args.add("-metadata")
+            args.add("track=" + str(pista_num))
+        if fecha != "":
+            args.add("-metadata")
+            args.add("date=" + fecha)
+        if isrc != "":
+            args.add("-metadata")
+            args.add("isrc=" + isrc)
+        args.add(destino_abs)
+        Json r = await os.run("ffmpeg", args)
+        if jint(r["status"], 1) != 0:
+            os.remove_file(destino_abs)
+            await sqlite.exec("update download_jobs set state = 'failed', last_error = 'finalize.remux_failed', updated_at = unixepoch() where track_id = ?", tid)
+            return
+    else:
+        # sin ffmpeg: el fichero tal cual (suenan igual; identidad por nombre)
+        if destino_abs != origen:
+            await os.copy_file(origen, destino_abs, true)
+
+    # verificación de duración con ffprobe (±2000 ms, TAMANO_MINIMO 16 KB)
+    int duracion_real_ms = 0
+    Json? info2 = ffprobe_info(destino_abs)
+    if info2 != null:
+        double seg = jdbl(jget(jget(info2, "format"), "duration"), 0.0)
+        duracion_real_ms = int(seg * 1000.0)
+    List<Json> esperada = await sqlite.query("select duration_ms from tracks where id = ?", tid)
+    int esperado_ms = 0
+    if len(esperada) > 0:
+        esperado_ms = jint(esperada[0]["duration_ms"], 0)
+    if ffprobe_disponible() and esperado_ms > 0 and duracion_real_ms > 0:
+        int dif = duracion_real_ms - esperado_ms
+        if dif < 0:
+            dif = -dif
+        if dif > 2000:
+            os.remove_file(destino_abs)
+            await sqlite.exec("update download_jobs set state = 'failed', last_error = 'verify.duration_mismatch', updated_at = unixepoch() where track_id = ?", tid)
+            return
+
+    await sqlite.exec("""
+        insert into audio_files(track_id, rel_path, format, codec, size_bytes, duration_ms, source, youtube_id, verified_at)
+        values(?, ?, ?, ?, ?, ?, 'youtube', ?, unixepoch())
+        on conflict(track_id) do update set rel_path = excluded.rel_path, format = excluded.format,
+            codec = excluded.codec, size_bytes = excluded.size_bytes, duration_ms = excluded.duration_ms,
+            youtube_id = excluded.youtube_id, verified_at = excluded.verified_at
+        """, tid, rel, ext_final, codec, os.file_size(destino_abs), duracion_real_ms > 0 ? duracion_real_ms : null,
+        seleccionar_youtube_id(tid))
+
+    os.remove_file(origen)
+    await sqlite.exec("delete from download_jobs where track_id = ?", tid)
+
+# shard: los 2 primeros caracteres alfanuméricos del id (ruta_relativa).
+fn string shard_de(string id):
+    string alfa = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    string out = ""
+    for int i in range(0, len(id)):
+        if len(out) == 2:
+            break
+        string c = id.slice(i, i + 1)
+        if alfa.contains(c):
+            out = out + c
+    if out == "":
+        out = "xx"
+    if len(out) == 1:
+        out = out + "x"
+    return out.lower()
+
+fn string seleccionar_youtube_id(string tid):
+    if es_video_id(tid):
+        return tid
+    List<Json> m = await sqlite.query("select video_id from youtube_matches where track_id = ? order by score desc limit 1", tid)
+    if len(m) > 0:
+        return jstr(m[0]["video_id"], "")
+    return ""
+
+# ─── Herramientas externas ───────────────────────────────────────────────────
+
+fn bool ffprobe_disponible():
+    if state.get("ffprobe_ok", "") != "":
+        return state.get("ffprobe_ok", "") == "1"
+    Json r = await os.run("which", ["ffprobe"])
+    bool ok = jint(r["status"], 1) == 0 and jstr(r["stdout"], "").trim() != ""
+    state.set("ffprobe_ok", ok ? "1" : "0")
+    return ok
+
+fn bool hay_binario(string nombre):
+    Json r = await os.run("which", [nombre])
+    return jint(r["status"], 1) == 0 and jstr(r["stdout"], "").trim() != ""
+
+fn Json? ffprobe_info(string ruta):
+    if not ffprobe_disponible():
+        return null
+    Json r = await os.run("ffprobe", ["-v", "error", "-show_entries", "format=duration,format_name:stream=codec_name", "-of", "json", ruta])
+    if jint(r["status"], 1) != 0:
+        return null
+    return parse_json(jstr(r["stdout"], ""))
+
+# ─── El tick ─────────────────────────────────────────────────────────────────
+
+fn List<Json> tick_descargas():
+    db_init()
+
+    # trabajos en marcha sin handle (la app se reinició): reencolar o fallar
+    List<Json> zombis = await sqlite.query("select track_id, state, attempts from download_jobs where state in ('matching','downloading')")
+    for int i in range(0, len(zombis)):
+        string tid = jstr(zombis[i]["track_id"], "")
+        if state.get("dlh:" + tid, "") == "":
+            int intentos = jint(zombis[i]["attempts"], 0)
+            if intentos + 1 >= 3:
+                await sqlite.exec("update download_jobs set state = 'failed', attempts = attempts + 1, last_error = 'download.interrupted', updated_at = unixepoch() where track_id = ?", tid)
+            else:
+                await sqlite.exec("update download_jobs set state = 'queued', attempts = attempts + 1, last_error = 'download.interrupted', updated_at = unixepoch() where track_id = ?", tid)
+
+    # límite de tiempo: un proceso atascado más de 15 minutos se mata y reencola
+    List<Json> atascados = await sqlite.query("select track_id, state from download_jobs where state in ('matching','downloading') and started_at is not null and started_at < ?", ahora() - 900)
+    for int i in range(0, len(atascados)):
+        string tid = jstr(atascados[i]["track_id"], "")
+        string hval = state.get("dlh:" + tid, "")
+        if hval != "":
+            int h = int(hval)
+            proc.kill(h)
+            await proc.wait(h, 5000)
+            proc.close(h)
+            state.remove("dlh:" + tid)
+        await sqlite.exec("update download_jobs set state = 'queued', attempts = attempts + 1, last_error = 'download.timeout', updated_at = unixepoch() where track_id = ?", tid)
+
+    promover_cola()
+
+    List<Json> matching = await sqlite.query("select track_id from download_jobs where state = 'matching' order by updated_at limit 4")
+    for int i in range(0, len(matching)):
+        matching_tick(jstr(matching[i]["track_id"], ""), "matching")
+
+    List<Json> bajando = await sqlite.query("select track_id from download_jobs where state = 'downloading' order by updated_at limit 4")
+    for int i in range(0, len(bajando)):
+        descargar_tick(jstr(bajando[i]["track_id"], ""))
+
+    List<Json> finalizando = await sqlite.query("select track_id from download_jobs where state = 'finalizing' order by updated_at limit 4")
+    for int i in range(0, len(finalizando)):
+        finalizar(jstr(finalizando[i]["track_id"], ""))
+
+    return descargas_activas()
+
+get endpoint("/api/downloads"):
+    db_init()
+    return { "jobs": tick_descargas(), "ffprobe": ffprobe_disponible() }
+
+post endpoint("/api/downloads/retry/:id", string id):
+    db_init()
+    await sqlite.exec("update download_jobs set state = 'queued', attempts = 0, last_error = null, updated_at = unixepoch() where track_id = ? and state = 'failed'", id)
+    return { "ok": true }

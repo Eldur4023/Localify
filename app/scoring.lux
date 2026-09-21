@@ -1,0 +1,435 @@
+# scoring.lux — Puntuación de candidatos de YouTube.
+#
+# Puerto de crates/localify-ytdlp/src/scoring/{mod.rs,rules.rs}. Lógica pura:
+# entra una pista del catálogo y un candidato de yt-dlp, sale una puntuación
+# con su desglose. La fórmula:
+#
+#   puntuacion = clamp(BASE + bonos - penalizaciones, 0, 100) * factor_duracion
+#
+# El factor de duración es multiplicativo a propósito: ninguna cantidad de
+# bonos rescata un candidato que dura medio minuto más que la pista.
+
+# ─── Pesos (rules.rs) ────────────────────────────────────────────────────────
+
+fn double regla_base():
+    return 30.0
+
+fn double bono_youtube_music():
+    return 30.0
+
+fn double bono_canal_topic():
+    return 28.0
+
+fn double bono_provided_to_youtube():
+    return 25.0
+
+fn double bono_canal_del_artista():
+    return 22.0
+
+fn double regla_bono_album():
+    return 10.0
+
+fn double bono_titulo_max():
+    return 20.0
+
+fn double bono_artista_max():
+    return 15.0
+
+fn double umbral_similitud():
+    return 0.55
+
+fn double penaliza_directo():
+    return 45.0
+
+fn double penaliza_version():
+    return 40.0
+
+fn double penaliza_manipulado():
+    return 40.0
+
+fn double penaliza_videoclip():
+    return 8.0
+
+fn double penaliza_recopilatorio():
+    return 60.0
+
+fn double penaliza_sin_recorrido():
+    return 15.0
+
+fn double penaliza_falta_requerido():
+    return 35.0
+
+fn int vistas_minimas():
+    return 1000
+
+fn int duracion_recopilatorio_ms():
+    return 600000
+
+fn int duracion_pista_normal_ms():
+    return 480000
+
+# Umbral de confianza de localify-core/domain/download.rs.
+fn double umbral_alta():
+    return 75.0
+
+fn double umbral_media():
+    return 55.0
+
+# factor_duracion: decreciente por tramos.
+fn double factor_duracion(int diferencia_ms):
+    if diferencia_ms <= 2000:
+        return 1.0
+    if diferencia_ms <= 5000:
+        return 0.9
+    if diferencia_ms <= 10000:
+        return 0.7
+    if diferencia_ms <= 20000:
+        return 0.4
+    if diferencia_ms <= 45000:
+        return 0.15
+    return 0.0
+
+fn double clampar(double v, double lo, double hi):
+    if v < lo:
+        return lo
+    if v > hi:
+        return hi
+    return v
+
+fn double escalar(double simi, double maximo):
+    if simi < umbral_similitud():
+        return 0.0
+    double normalizada = (simi - umbral_similitud()) / (1.0 - umbral_similitud())
+    return clampar(normalizada, 0.0, 1.0) * maximo
+
+# ─── Contexto de una comparación ─────────────────────────────────────────────
+
+class ContextoPuntuacion:
+    string titulo_norm
+    string canal_norm
+    string descripcion_norm
+    string texto_completo
+    string titulo_busqueda
+    string titulo_completo
+    List<string> artistas_norm
+    string album_norm
+    int diferencia_ms
+    int duracion_pista
+    bool from_youtube_music
+    bool provided_to_youtube
+    int view_count
+
+    ContextoPuntuacion():
+        this.titulo_norm = ""
+        this.canal_norm = ""
+        this.descripcion_norm = ""
+        this.texto_completo = ""
+        this.titulo_busqueda = ""
+        this.titulo_completo = ""
+        this.artistas_norm = []
+        this.album_norm = ""
+        this.diferencia_ms = 0
+        this.duracion_pista = 0
+        this.from_youtube_music = false
+        this.provided_to_youtube = false
+        this.view_count = 0
+
+# Datos de la pista que el scorer necesita, leídos de la BD una vez.
+class DatosPista:
+    string id
+    string title
+    string album_titulo
+    int duracion_ms
+    string isrc
+    List<string> artistas
+
+    DatosPista():
+        this.id = ""
+        this.title = ""
+        this.album_titulo = ""
+        this.duracion_ms = 0
+        this.isrc = ""
+        this.artistas = []
+
+fn DatosPista datos_de_pista(string track_id):
+    DatosPista d = DatosPista()
+    d.id = track_id
+    List<Json> f = await sqlite.query("""
+        select t.title, t.duration_ms, t.isrc, al.title as album
+        from tracks t left join albums al on al.id = t.album_id where t.id = ?
+        """, track_id)
+    if len(f) == 0:
+        return d
+    d.title = jstr(f[0]["title"], "")
+    d.duracion_ms = jint(f[0]["duration_ms"], 0)
+    d.isrc = jstr(f[0]["isrc"], "")
+    d.album_titulo = jstr(f[0]["album"], "")
+    List<Json> ars = await sqlite.query("""
+        select ar.name from track_artists ta join artists ar on ar.id = ta.artist_id
+        where ta.track_id = ? order by ta.position
+        """, track_id)
+    for int i in range(0, len(ars)):
+        d.artistas.add(jstr(ars[i]["name"], ""))
+    return d
+
+# ─── Puntuación de un candidato ──────────────────────────────────────────────
+# cand: Dict con video_id, title, channel, description, duration_ms,
+# view_count, from_music, provided_to_youtube.
+
+fn ContextoPuntuacion contexto_de(DatosPista pista, Json cand):
+    ContextoPuntuacion c = ContextoPuntuacion()
+    c.titulo_norm = normalizar(jstr(cand["title"], ""))
+    c.canal_norm = normalizar(jstr(cand["channel"], ""))
+    c.descripcion_norm = normalizar(jstr(cand["description"], ""))
+    c.texto_completo = c.titulo_norm + " " + c.canal_norm + " " + c.descripcion_norm
+    c.titulo_busqueda = titulo_busqueda(pista.title)
+    c.titulo_completo = normalizar(pista.title)
+    c.artistas_norm = []
+    for int i in range(0, len(pista.artistas)):
+        string n = normalizar(pista.artistas[i])
+        if n != "":
+            c.artistas_norm.add(n)
+    c.album_norm = normalizar(pista.album_titulo)
+    int dur_cand = jint(cand["duration_ms"], 0)
+    c.diferencia_ms = dur_cand > pista.duracion_ms ? dur_cand - pista.duracion_ms : pista.duracion_ms - dur_cand
+    c.duracion_pista = pista.duracion_ms
+    c.from_youtube_music = jint(cand["from_music"], 0) == 1
+    c.provided_to_youtube = jint(cand["provided_to_youtube"], 0) == 1 or c.descripcion_norm.contains("provided to youtube by")
+    c.view_count = jint(cand["view_count"], 0)
+    return c
+
+fn double bono_fuente(ContextoPuntuacion c):
+    double mejor = 0.0
+    if c.from_youtube_music:
+        mejor = bono_youtube_music()
+    if c.provided_to_youtube and bono_provided_to_youtube() > mejor:
+        mejor = bono_provided_to_youtube()
+    if c.canal_norm.ends_with("topic") and bono_canal_topic() > mejor:
+        mejor = bono_canal_topic()
+    if c.canal_norm != "":
+        for int i in range(0, len(c.artistas_norm)):
+            bool es = c.canal_norm.contains(c.artistas_norm[i]) or similitud(c.canal_norm, c.artistas_norm[i]) > 0.9
+            if es and bono_canal_del_artista() > mejor:
+                mejor = bono_canal_del_artista()
+    return mejor
+
+fn double bono_titulo(ContextoPuntuacion c):
+    double s = similitud(c.titulo_norm, c.titulo_busqueda)
+    if c.titulo_busqueda != "" and c.titulo_norm.contains(c.titulo_busqueda) and s < 0.95:
+        s = 0.95
+    return escalar(s, bono_titulo_max())
+
+fn double bono_artista(ContextoPuntuacion c):
+    double mejor = 0.0
+    for int i in range(0, len(c.artistas_norm)):
+        double b = 0.0
+        if c.titulo_norm.contains(c.artistas_norm[i]) or c.canal_norm.contains(c.artistas_norm[i]):
+            b = bono_artista_max()
+        else:
+            b = escalar(similitud(c.canal_norm, c.artistas_norm[i]), bono_artista_max())
+        if b > mejor:
+            mejor = b
+    return mejor
+
+fn double bono_album(ContextoPuntuacion c):
+    if c.album_norm == "" or len(c.album_norm) < 5:
+        return 0.0
+    if c.texto_completo.contains(c.album_norm):
+        return regla_bono_album()
+    return 0.0
+
+# aplicar_grupo: penaliza como mucho una vez por grupo; el mismo término en
+# candidato y en el título de la pista anula el grupo entero.
+class GrupoResultado:
+    double penalizacion
+    string motivo
+
+    GrupoResultado(double penalizacion, string motivo):
+        this.penalizacion = penalizacion
+        this.motivo = motivo
+
+fn GrupoResultado aplicar_grupo(ContextoPuntuacion c, List<string> terminos, double castigo, string etiqueta):
+    string sobra = ""
+    string falta = ""
+    for int i in range(0, len(terminos)):
+        bool en_candidato = contiene_termino(c.titulo_norm, terminos[i])
+        bool en_pista = contiene_termino(c.titulo_completo, terminos[i])
+        if en_candidato and en_pista:
+            return GrupoResultado(0.0, "")
+        if en_candidato and sobra == "":
+            sobra = terminos[i]
+        if (not en_candidato) and en_pista and falta == "":
+            falta = terminos[i]
+    if sobra != "":
+        return GrupoResultado(castigo, etiqueta + "." + sobra)
+    if falta != "":
+        return GrupoResultado(penaliza_falta_requerido(), "missing." + falta)
+    return GrupoResultado(0.0, "")
+
+fn double penalizaciones(ContextoPuntuacion c, List<string> motivos):
+    double total = 0.0
+    GrupoResultado g
+
+    g = aplicar_grupo(c, terminos_directo(), penaliza_directo(), "live")
+    total = total + g.penalizacion
+    if g.motivo != "":
+        motivos.add(g.motivo)
+
+    g = aplicar_grupo(c, terminos_version(), penaliza_version(), "version")
+    total = total + g.penalizacion
+    if g.motivo != "":
+        motivos.add(g.motivo)
+
+    g = aplicar_grupo(c, terminos_manipulado(), penaliza_manipulado(), "altered")
+    total = total + g.penalizacion
+    if g.motivo != "":
+        motivos.add(g.motivo)
+
+    # videoclips: solo si el candidato lo dice (la pista no pide nada)
+    List<string> clips = terminos_videoclip()
+    for int i in range(0, len(clips)):
+        if contiene_termino(c.titulo_norm, clips[i]):
+            total = total + penaliza_videoclip()
+            motivos.add("videoclip." + clips[i])
+            break
+
+    # recopilatorio: por duración desmesurada o vocabulario
+    bool largo = c.diferencia_ms + c.duracion_pista > duracion_recopilatorio_ms() and c.duracion_pista < duracion_pista_normal_ms()
+    bool dice = false
+    List<string> recops = terminos_recopilatorio()
+    for int i in range(0, len(recops)):
+        if contiene_termino(c.titulo_norm, recops[i]) and not contiene_termino(c.titulo_completo, recops[i]):
+            dice = true
+    if largo or dice:
+        total = total + penaliza_recopilatorio()
+        motivos.add("compilation")
+
+    # sin recorrido: canal desconocido con muy pocas reproducciones
+    bool sin_recorrido = c.view_count > 0 and c.view_count < vistas_minimas()
+    bool canal_desconocido = not c.canal_norm.ends_with("topic") and not c.provided_to_youtube and not c.from_youtube_music
+    if sin_recorrido and canal_desconocido:
+        total = total + penaliza_sin_recorrido()
+        motivos.add("low_reach")
+
+    return total
+
+# puntuar: candidato → dict con score/confidence/breakdown.
+fn Json puntuar(DatosPista pista, Json cand):
+    ContextoPuntuacion c = contexto_de(pista, cand)
+    List<string> motivos = []
+
+    if c.diferencia_ms > 45000:
+        return { "score": 0.0, "confidence": "low", "reasons": ["duration.discarded"] }
+
+    double fd = factor_duracion(c.diferencia_ms)
+    double bruto = regla_base() + bono_fuente(c) + bono_titulo(c) + bono_artista(c) + bono_album(c) - penalizaciones(c, motivos) # bono_album es la funcion de contexto
+    double total = clampar(bruto, 0.0, 100.0) * fd
+
+    string confianza = "low"
+    if total >= umbral_alta():
+        confianza = "high"
+    elif total >= umbral_media():
+        confianza = "medium"
+    return { "score": total, "confidence": confianza, "reasons": motivos }
+
+# elegir_mejor: puntúa todos, desempata por video_id (determinismo entre
+# ejecuciones) y devuelve el mejor.
+fn Json? elegir_mejor(DatosPista pista, List<Json> candidatos, List<string> excluidos):
+    Json? mejor = null
+    double mejor_score = -1.0
+    string mejor_id = ""
+    for int i in range(0, len(candidatos)):
+        string vid = jstr(candidatos[i]["video_id"], "")
+        if excluidos.contains(vid):
+            continue
+        Json r = puntuar(pista, candidatos[i])
+        double s = jdbl(r["score"], 0.0)
+        bool gana = s > mejor_score or (s == mejor_score and vid < mejor_id)
+        if gana or mejor == null:
+            mejor = { "video_id": vid, "score": s, "confidence": jstr(r["confidence"], "low"), "reasons": r["reasons"], "title": jstr(candidatos[i]["title"], ""), "channel": jstr(candidatos[i]["channel"], "") }
+            mejor_score = s
+            mejor_id = vid
+    return mejor
+
+# ─── Plan de consultas (search.rs) ───────────────────────────────────────────
+
+class ConsultaYt:
+    string texto
+    bool music
+    bool directa
+    string origen
+
+    ConsultaYt(string texto, bool music, bool directa, string origen):
+        this.texto = texto
+        this.music = music
+        this.directa = directa
+        this.origen = origen
+
+fn List<ConsultaYt> plan_de_consultas(DatosPista pista, string conocido):
+    List<ConsultaYt> plan = []
+
+    if conocido != "":
+        plan.add(ConsultaYt("https://www.youtube.com/watch?v=" + conocido, false, true, "catalogo"))
+
+    string artista = ""
+    if len(pista.artistas) > 0:
+        artista = pista.artistas[0]
+    string titulo = titulo_busqueda(pista.title)
+
+    if pista.isrc != "":
+        plan.add(ConsultaYt("\"" + pista.isrc + "\"", false, false, "isrc"))
+
+    if artista != "" and titulo != "":
+        plan.add(ConsultaYt(artista + " " + titulo, true, false, "music"))
+        if len(pista.album_titulo) >= 5:
+            plan.add(ConsultaYt(artista + " - " + titulo + " " + pista.album_titulo, false, false, "album"))
+        plan.add(ConsultaYt(artista + " " + titulo + " topic", false, false, "topic"))
+        plan.add(ConsultaYt(artista + " - " + titulo, false, false, "general"))
+    elif titulo != "":
+        plan.add(ConsultaYt(titulo, false, false, "solo_titulo"))
+
+    return plan
+
+fn bool basta_con(double puntuacion):
+    return puntuacion >= umbral_alta()
+
+# ─── Parseo de la salida de yt-dlp ───────────────────────────────────────────
+# NDJSON: un objeto por línea. Sin duración no se puede validar: se descarta.
+
+fn List<Json> parsear_candidatos(string stdout, bool desde_music):
+    List<Json> out = []
+    List<string> lineas = stdout.split("\n")
+    for int i in range(0, len(lineas)):
+        string linea = lineas[i].trim()
+        if linea == "" or not linea.starts_with("{"):
+            continue
+        Json? j = parse_json(linea)
+        if j == null:
+            continue
+        string id = jstr(j["id"], "")
+        double segundos = jdbl(j["duration"], 0.0)
+        if id == "" or segundos <= 0.0:
+            continue
+        string canal = jstr(j["channel"], "")
+        if canal == "":
+            canal = jstr(j["uploader"], "")
+        Dict<string, Json> cand = {
+            "video_id": id,
+            "title": jstr(j["title"], ""),
+            "channel": canal,
+            "description": jstr(j["description"], ""),
+            "duration_ms": int(segundos * 1000.0),
+            "view_count": jint(j["view_count"], 0),
+            "from_music": desde_music ? 1 : 0,
+            "provided_to_youtube": jstr(j["description"], "").lower().contains("provided to youtube by") ? 1 : 0
+        }
+        out.add(cand)
+    return out
+
+# Objetivo de la consulta para yt-dlp (download.rs::buscar).
+fn string objetivo_consulta(ConsultaYt q):
+    if q.directa:
+        return q.texto
+    if q.music:
+        return "https://music.youtube.com/search?q=" + http.url_encode(q.texto)
+    return "ytsearch10:" + q.texto

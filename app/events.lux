@@ -1,0 +1,112 @@
+# events.lux — Snapshot de eventos para el bombeo del frontend.
+#
+# En Localify existía un bus `broadcast<DomainEvent>` puenteado a la WebView.
+# Aquí no hay canal push desde el backend, así que el transporte del frontend
+# sondea este endpoint cada segundo y SINTETIZA los mismos eventos (mismos
+# nombres, mismos payloads) por diferenciación. La búsqueda remota pendiente
+# se ejecuta aquí: es el único "segundo plano" que el modelo de Lux permite.
+
+# El "timestamps.start" que Discord usa para el contador de tiempo tiene que
+# ser un instante FIJO en el pasado, no recalcularse en cada poll: e.position_ms
+# se queda congelado mientras suena (solo pausa/seek lo tocan), así que
+# "ahora() - position_ms/1000" da un valor distinto cada segundo si se
+# recalcula sin más — el contador de Discord iría más rápido que el real.
+# Se ancla la primera vez que se ve esta combinación (pista, position_ms) y
+# se reutiliza mientras no cambie.
+fn int discord_ancla_inicio(string track_id, int position_ms):
+    string clave_actual = track_id + ":" + str(position_ms)
+    if state.get("discord_anchor_key", "") == clave_actual:
+        return int(state.get("discord_anchor_start", "0"))
+    int inicio = ahora() - int(position_ms / 1000)
+    state.set("discord_anchor_key", clave_actual)
+    state.set("discord_anchor_start", str(inicio))
+    return inicio
+
+post endpoint("/api/events/poll"):
+    db_init()
+    tick_descargas()
+
+    List<Json> ready = []
+    string rq = state.get("remote_query", "")
+    if rq != "":
+        state.remove("remote_query")
+        Json? trabajo = parse_json(rq)
+        if trabajo != null:
+            string q = jstr(trabajo["q"], "")
+            if q != "":
+                ytm_buscar_pistas(q, 15)
+            ready.add({ "queryId": jint(trabajo["queryId"], 0) })
+
+    EstadoCola e = leer_estado()
+    List<Json> marcas = await sqlite.query("""
+        select coalesce(max(cast(value as integer)), 0) as nunca from settings where key like 'stamp_%'
+        """)
+    List<Json> sellos = await sqlite.query("select key, value from settings where key in ('stamp_library','stamp_playlists','stamp_settings','playlists_change_kind')")
+    string s_lib = ""
+    string s_pl = ""
+    string s_aj = ""
+    string s_pl_kind = ""
+    for int i in range(0, len(sellos)):
+        string k = jstr(sellos[i]["key"], "")
+        if k == "stamp_library":
+            s_lib = jstr(sellos[i]["value"], "")
+        elif k == "stamp_playlists":
+            s_pl = jstr(sellos[i]["value"], "")
+        elif k == "stamp_settings":
+            s_aj = jstr(sellos[i]["value"], "")
+        elif k == "playlists_change_kind":
+            s_pl_kind = jstr(sellos[i]["value"], "")
+
+    Json estado = estado_dto()
+    # MPRIS (teclas multimedia, "ahora suena" del escritorio): un push por
+    # poll, igual de a menudo que todo lo demás aquí. window.mpris_update
+    # es un no-op si no hay hook nativo instalado (lux --check en CI, por
+    # ejemplo), así que no hace falta comprobar nada antes de llamarlo.
+    Json? pista_actual = jget(estado, "track")
+    window.mpris_update({
+        "trackId": e.track_id,
+        "title": pista_actual == null ? "" : jstr(pista_actual["title"], ""),
+        "artist": pista_actual == null ? "" : jstr(pista_actual["artistDisplay"], ""),
+        "album": pista_actual == null ? "" : jstr(pista_actual["albumTitle"], ""),
+        "artUrl": "",
+        "durationMs": jint(jget(estado, "durationMs"), 0),
+        "positionMs": e.position_ms,
+        "status": e.status,
+        "volume": e.volume,
+        "shuffle": e.shuffle,
+        "repeat": e.repeat_mode
+    })
+
+    Json integraciones = jget(ajustes_estructurados(), "integrations")
+    bool discord_on = integraciones != null and jget(integraciones, "discordEnabled") == true
+    string discord_client_id = discord_on ? jstr(jget(integraciones, "discordClientId"), "") : ""
+    window.discord_update({
+        "clientId": discord_client_id,
+        "details": pista_actual == null ? "" : jstr(pista_actual["title"], ""),
+        "state": pista_actual == null ? "" : jstr(pista_actual["artistDisplay"], ""),
+        "playing": e.status == "playing",
+        "startEpochS": pista_actual == null ? 0 : discord_ancla_inicio(e.track_id, e.position_ms)
+    })
+
+    return {
+        "revision": e.revision,
+        "trackId": e.track_id,
+        "status": e.status,
+        "volume": e.volume,
+        "repeat": e.repeat_mode,
+        "shuffle": e.shuffle,
+        "libraryPath": biblioteca_raiz(),
+        "libraryStamp": s_lib,
+        "playlistStamp": s_pl,
+        "playlistChangeKind": s_pl_kind,
+        "settingsStamp": s_aj,
+        "downloads": descargas_activas(),
+        "remoteReady": ready,
+        "estado": estado
+    }
+
+# Diálogo nativo de fichero: lo resuelve la propia ventana GTK. Solo se llama
+# desde la UI (es decir, con ventana viva).
+post endpoint("/api/native/open-file"):
+    string ruta = await window.open_file()
+    return { "path": ruta }

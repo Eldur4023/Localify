@@ -1,0 +1,139 @@
+# playlists.lux — Utilidades de listas de reproducción e importación.
+#
+# Puerto de commands/playlist.rs + playlists.rs de Localify. Las rutas REST
+# /api/playlists/* que vivían aquí nunca las llama el frontend: la UI habla
+# enteramente por /api/invoke (api_comandos.lux tiene su propia
+# implementación de cada comando playlist_*, con los mismos DTOs). Lo que
+# queda aquí son las funciones que SÍ reutiliza ese código vivo: reordenar
+# (el mismo truco de claves fraccionarias, ADR-009) e importar desde
+# YouTube Music o Spotify.
+
+# List no tiene inserción por índice: reconstruir.
+fn List<string> insertar_en(List<string> base, int idx, string valor):
+    List<string> out = []
+    for int i in range(0, len(base)):
+        if i == idx:
+            out.add(valor)
+        out.add(base[i])
+    if idx >= len(base):
+        out.add(valor)
+    return out
+
+fn string extraer_id_lista(string url):
+    int p = url.index_of("list=")
+    if p < 0:
+        return ""
+    string resto = url.slice(p + 5)
+    string id = ""
+    for int i in range(0, len(resto)):
+        string c = resto.slice(i, i + 1)
+        if c == "&" or c == "#" or c == "?":
+            break
+        id = id + c
+    return id
+
+fn string extraer_id_spotify(string url):
+    int p = url.index_of("spotify.com/playlist/")
+    if p < 0:
+        return ""
+    string resto = url.slice(p + len("spotify.com/playlist/"))
+    string id = ""
+    for int i in range(0, len(resto)):
+        string c = resto.slice(i, i + 1)
+        if c == "?" or c == "#" or c == "/":
+            break
+        id = id + c
+    return id
+
+# Importar una lista de YouTube Music: browse VL+id, guarda las pistas (sus
+# ids SON videos) y crea la playlist. Nada se descarga al importar.
+fn Json importar_lista_ytm(string id_lista):
+    Json? r = ytm_navegar("VL" + id_lista)
+    if r == null:
+        return { "error": "no se pudo leer la lista" }
+    List<Json> elementos = elementos_de_lista(r)
+    Json? titulo_nodo = buscar_uno(r, "musicResponsiveHeaderRenderer")
+    string titulo = titulo_nodo == null ? "Importada" : texto_de(jget(titulo_nodo, "title"))
+    if titulo == "":
+        titulo = "Importada " + id_lista
+    if len(elementos) == 0:
+        return { "error": "la lista está vacía o es privada" }
+    string pid = nuevo_id()
+    await sqlite.exec("insert into playlists(id, name, name_norm, source, source_id, created_at, updated_at) values(?, ?, ?, 'ytmusic_import', ?, unixepoch(), unixepoch())",
+        pid, titulo, normalizar(titulo), id_lista)
+    double pos = 0.0
+    int n = 0
+    for int i in range(0, len(elementos)):
+        PistaCatalogo p = ytm_cancion(elementos[i])
+        if p.id == "" or p.title == "":
+            continue
+        p.track_number = 0
+        guardar_pista(p)
+        pos = pos + 1.0
+        await sqlite.exec("insert into playlist_items(id, playlist_id, track_id, position, added_at) values(?, ?, ?, ?, unixepoch())",
+            nuevo_id(), pid, p.id, pos)
+        n = n + 1
+    return { "id": pid, "imported": n }
+
+# Importar una playlist pública de Spotify por su página embed (sin
+# credenciales): el HTML lleva un <script id="__NEXT_DATA__"> con el JSON.
+fn Json importar_lista_spotify(string id_sp):
+    Dict<string, string> cabeceras = { "User-Agent": agente_navegador() }
+    Json? r = null
+    try:
+        r = await http.get("https://open.spotify.com/embed/playlist/" + id_sp, cabeceras)
+    catch e:
+        return { "error": "no se pudo descargar la página" }
+    if r == null or jint(jget(r, "status"), 0) != 200:
+        return { "error": "no se pudo descargar la página" }
+    string html = jstr(jget(r, "body"), "")
+    string marca = "__NEXT_DATA__\" type=\"application/json\">"
+    int ini = html.index_of(marca)
+    if ini < 0:
+        return { "error": "no se encontraron datos de la lista" }
+    ini = ini + len(marca)
+    int fin = html.slice(ini).index_of("</script>")
+    if fin < 0:
+        return { "error": "no se encontraron datos de la lista" }
+    Json? datos = parse_json(html.slice(ini, ini + fin))
+    if datos == null:
+        return { "error": "datos ilegibles" }
+    # Spotify movió esto de props.pageState a props.pageProps.state en algún
+    # momento de 2024/2025 (comprobado contra la página real): el import
+    # llevaba tiempo devolviendo "datos ilegibles" para toda lista pública.
+    Json entidad = jget(jget(jget(datos, "props"), "pageProps"), "state")["data"]["entity"]
+    string titulo = jstr(entidad["name"], "")
+    if titulo == "":
+        titulo = "Importada de Spotify"
+    List<Json> lista = jlist(jget(entidad, "trackList"))
+    string pid = nuevo_id()
+    await sqlite.exec("insert into playlists(id, name, name_norm, source, source_id, created_at, updated_at) values(?, ?, ?, 'spotify_import', ?, unixepoch(), unixepoch())",
+        pid, titulo, normalizar(titulo), id_sp)
+    double pos = 0.0
+    int n = 0
+    for int i in range(0, len(lista)):
+        string uri = jstr(lista[i]["uri"], "")
+        if not uri.starts_with("spotify:track:"):
+            continue
+        string sid = uri.slice(len("spotify:track:"))
+        string t = jstr(lista[i]["title"], "")
+        int dur = jint(lista[i]["duration"], 0)
+        if sid == "" or t == "":
+            continue
+        # las pistas de Spotify no son videos: se guardan con su id y el
+        # emparejador las resolverá al descargar
+        #
+        # La página ya no manda un array "artists" por pista: el nombre viene
+        # embebido en "subtitle" ("KAROL G, Judeline, rusowsky"), separado por
+        # comas con un espacio de non-breaking (U+00A0) en vez de uno normal.
+        string artistas = jstr(lista[i]["subtitle"], "").replace(" ", " ")
+        await sqlite.exec("""
+            insert into tracks(id, title, title_norm, duration_ms, artist_display, artist_norm, metadata_at)
+            values(?, ?, ?, ?, ?, ?, unixepoch())
+            on conflict(id) do nothing
+            """, sid, t, normalizar(t), dur, artistas, normalizar(artistas))
+        pos = pos + 1.0
+        await sqlite.exec("insert or ignore into playlist_items(id, playlist_id, track_id, position, added_at) values(?, ?, ?, ?, unixepoch())",
+            nuevo_id(), pid, sid, pos)
+        n = n + 1
+    return { "id": pid, "imported": n }

@@ -1,0 +1,28 @@
+app:
+    port 8790
+
+    session:
+        secret "secreto-de-tests-suficientemente-length"
+        secure false
+
+    jwt:
+        secret "secreto-jwt-de-tests"
+        issuer "tests"
+
+get endpoint("/__ping__"):
+    return { "ok": true }
+
+get endpoint("/quien"):
+    return { "user": session.user, "role": session.role }
+
+group("/admin"):
+    require session.role == "admin" else status(403)
+
+    get endpoint("/panel"):
+        return { "panel": true }
+
+group("/api"):
+    require jwt.valid else status(401)
+
+    get endpoint("/yo"):
+        return { "sub": jwt.claims["sub"] }

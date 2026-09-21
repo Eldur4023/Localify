@@ -1,0 +1,375 @@
+# json.lux — Parser JSON en LuxScript.
+#
+# El runtime sabe serializar (str(dict) produce JSON) pero no expone
+# Value::parse_json al lenguaje: las dos fuentes de JSON crudo que necesita
+# esta app son el NDJSON de yt-dlp (--dump-json --flat-playlist) y la salida
+# de ffprobe, y ambas llegan como string por proc/os.run. Este parser cubre
+# JSON completo (objetos, arrays, strings con escapes, números, true/false/
+# null).
+#
+# Trabaja byte a byte con slice(i, i+1): el contenido UTF-8 de los strings se
+# copia byte a byte y por tanto atraviesa intacto. Los escapes \uXXXX se
+# resuelven con tablas literales (ver json_caracter_de) porque el lenguaje no
+# ofrece chr()/ord() ni literales hex.
+#
+# Límite conocido: codepoints fuera de las tablas (emojis, escrituras no
+# latinas escapadas como \uXXXX) degeneran a '?'. El catálogo no se ve
+# afectado: los títulos de YouTube Music llegan ya parseados por el módulo
+# http, en UTF-8 crudo.
+
+# ASCII imprimibles: chr(32)..chr(126), en orden (para resolver \u0020-\u007E).
+fn string tabla_ascii():
+    return " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+
+# Latin-1 (0xA0..0xFF = 160..255): 96 caracteres separados por '|' para poder
+# trocearlos con split. Los codepoints 128..159 son caracteres de control que
+# nadie tiene en un título: se emiten '?'. ATENCIÓN al editar la tabla: incluye
+# un guion suave invisible (U+00AD) entre ¬ y ® — regenerarla a mano pierde la
+# alineación.
+fn List<string> tabla_latin1():
+    return " |¡|¢|£|¤|¥|¦|§|¨|©|ª|«|¬|­|®|¯|°|±|²|³|´|µ|¶|·|¸|¹|º|»|¼|½|¾|¿|À|Á|Â|Ã|Ä|Å|Æ|Ç|È|É|Ê|Ë|Ì|Í|Î|Ï|Ð|Ñ|Ò|Ó|Ô|Õ|Ö|×|Ø|Ù|Ú|Û|Ü|Ý|Þ|ß|à|á|â|ã|ä|å|æ|ç|è|é|ê|ë|ì|í|î|ï|ð|ñ|ò|ó|ô|õ|ö|÷|ø|ù|ú|û|ü|ý|þ|ÿ".split("|")
+
+fn string json_caracter_de(int cp):
+    if cp >= 32 and cp <= 126:
+        return tabla_ascii().slice(cp - 32, cp - 32 + 1)
+    if cp >= 160 and cp <= 255:
+        return tabla_latin1()[cp - 160]
+    if cp == 8212:
+        return "—"
+    if cp == 8211:
+        return "–"
+    if cp == 8216 or cp == 8217:
+        return "'"
+    if cp == 8220 or cp == 8221:
+        return "\""
+    if cp == 8230:
+        return "…"
+    if cp == 8226:
+        return "•"
+    if cp == 9834:
+        return "♪"
+    if cp == 9835:
+        return "♫"
+    if cp == 9829:
+        return "♥"
+    if cp == 9733:
+        return "★"
+    if cp == 10003:
+        return "✓"
+    if cp == 8482:
+        return "™"
+    if cp == 8249:
+        return "‹"
+    if cp == 8250:
+        return "›"
+    if cp == 171:
+        return "«"
+    if cp == 187:
+        return "»"
+    return "?"
+
+fn int json_hex(string c):
+    return "0123456789abcdef".index_of(c.lower())
+
+# ─── Cursor ──────────────────────────────────────────────────────────────────
+
+class JCursor:
+    string s
+    int i
+    # El JSON real tiene valores `null` legítimos ("authors":null en la
+    # respuesta de Spotify, por ejemplo): json_valor() los devuelve como el
+    # `null` de LuxScript, EXACTAMENTE el mismo valor que usa para señalar
+    # "no pude parsear esto". Sin esta bandera, json_objeto()/json_array()
+    # confundían un campo null válido con un fallo de sintaxis y tiraban el
+    # documento entero — cualquier JSON real con un solo campo null (algo
+    # rutinario) fallaba por completo.
+    bool fallo
+
+    JCursor(string s):
+        this.s = s
+        this.i = 0
+        this.fallo = false
+
+    fn string? peek():
+        if this.i >= len(this.s):
+            return null
+        return this.s.slice(this.i, this.i + 1)
+
+    fn string next():
+        string c = this.s.slice(this.i, this.i + 1)
+        this.i = this.i + 1
+        return c
+
+    fn void skip_ws():
+        while this.i < len(this.s):
+            string c = this.s.slice(this.i, this.i + 1)
+            if c == " " or c == "\n" or c == "\t" or c == "\r":
+                this.i = this.i + 1
+            else:
+                break
+
+    fn bool comer(string lit):
+        if this.s.slice(this.i).starts_with(lit):
+            this.i = this.i + len(lit)
+            return true
+        return false
+
+# ─── Parser ──────────────────────────────────────────────────────────────────
+
+fn bool json_es_digito(string c):
+    return "0123456789".index_of(c) >= 0
+
+fn Json? json_string_valor(JCursor c):
+    c.next()
+    string out = ""
+    while c.i < len(c.s):
+        string ch = c.next()
+        if ch == "\"":
+            return out
+        if ch == "\\":
+            string e = c.next()
+            if e == "n":
+                out = out + "\n"
+            elif e == "t":
+                out = out + "\t"
+            elif e == "r":
+                out = out + "\r"
+            elif e == "b":
+                out = out + " "
+            elif e == "f":
+                out = out + " "
+            elif e == "u":
+                int cp = 0
+                for int k in range(0, 4):
+                    int v = json_hex(c.next())
+                    if v < 0:
+                        c.fallo = true
+                        return null
+                    cp = cp * 16 + v
+                out = out + json_caracter_de(cp)
+            else:
+                out = out + e
+        else:
+            out = out + ch
+    c.fallo = true
+    return null
+
+fn Json? json_numero(JCursor c):
+    string txt = ""
+    while c.i < len(c.s):
+        string? p = c.peek()
+        if p == null:
+            break
+        if json_es_digito(p) or p == "-" or p == "+" or p == "." or p == "e" or p == "E":
+            txt = txt + p
+            c.next()
+        else:
+            break
+    if txt == "" or txt == "-":
+        c.fallo = true
+        return null
+    bool es_double = txt.contains(".") or txt.contains("e") or txt.contains("E")
+    if not es_double:
+        return int(txt)
+    # Mantisa y exponente a mano: el lenguaje no tiene float() ni notación
+    # científica en los literales.
+    string mantisa = txt
+    int expo = 0
+    int pe = txt.index_of("e")
+    if pe < 0:
+        pe = txt.index_of("E")
+    if pe >= 0:
+        mantisa = txt.slice(0, pe)
+        string es = txt.slice(pe + 1)
+        bool neg = false
+        if es.starts_with("-"):
+            neg = true
+            es = es.slice(1)
+        elif es.starts_with("+"):
+            es = es.slice(1)
+        int ev = 0
+        for int k in range(0, len(es)):
+            string dch = es.slice(k, k + 1)
+            if not json_es_digito(dch):
+                c.fallo = true
+                return null
+            ev = ev * 10 + "0123456789".index_of(dch)
+        expo = neg ? -ev : ev
+    bool negm = false
+    if mantisa.starts_with("-"):
+        negm = true
+        mantisa = mantisa.slice(1)
+    string parte_ent = mantisa
+    string parte_frac = ""
+    int pp = mantisa.index_of(".")
+    if pp >= 0:
+        parte_ent = mantisa.slice(0, pp)
+        parte_frac = mantisa.slice(pp + 1)
+    double acum = 0.0
+    for int k in range(0, len(parte_ent)):
+        acum = acum * 10.0 + "0123456789".index_of(parte_ent.slice(k, k + 1))
+    double frac = 0.0
+    double escala = 0.1
+    for int k in range(0, len(parte_frac)):
+        frac = frac + "0123456789".index_of(parte_frac.slice(k, k + 1)) * escala
+        escala = escala / 10.0
+    double valor = acum + frac
+    if negm:
+        valor = -valor
+    for int k in range(0, expo):
+        valor = valor * 10.0
+    for int k in range(0, -expo):
+        valor = valor / 10.0
+    return valor
+
+fn Json? json_array(JCursor c):
+    c.next()
+    c.skip_ws()
+    List<Json> out = []
+    string? p = c.peek()
+    if p == "]":
+        c.next()
+        return out
+    while c.i < len(c.s):
+        c.skip_ws()
+        Json? v = json_valor(c)
+        if c.fallo:
+            return null
+        out.add(v)
+        c.skip_ws()
+        string? q = c.peek()
+        if q == ",":
+            c.next()
+        elif q == "]":
+            c.next()
+            return out
+        else:
+            c.fallo = true
+            return null
+    c.fallo = true
+    return null
+
+fn Json? json_objeto(JCursor c):
+    c.next()
+    c.skip_ws()
+    Dict<string, Json> out = {}
+    string? p = c.peek()
+    if p == "}":
+        c.next()
+        return out
+    while c.i < len(c.s):
+        c.skip_ws()
+        if c.peek() != "\"":
+            c.fallo = true
+            return null
+        string? kr = json_string_valor(c)
+        if kr == null:
+            return null
+        string k = kr
+        c.skip_ws()
+        if c.peek() != ":":
+            c.fallo = true
+            return null
+        c.next()
+        c.skip_ws()
+        Json? v = json_valor(c)
+        if c.fallo:
+            return null
+        out[k] = v
+        c.skip_ws()
+        string? q = c.peek()
+        if q == ",":
+            c.next()
+        elif q == "}":
+            c.next()
+            return out
+        else:
+            c.fallo = true
+            return null
+    c.fallo = true
+    return null
+
+fn Json? json_valor(JCursor c):
+    c.skip_ws()
+    string? p = c.peek()
+    if p == null:
+        c.fallo = true
+        return null
+    if p == "{":
+        return json_objeto(c)
+    if p == "[":
+        return json_array(c)
+    if p == "\"":
+        return json_string_valor(c)
+    if p == "t":
+        if c.comer("true"):
+            return true
+        c.fallo = true
+        return null
+    if p == "f":
+        if c.comer("false"):
+            return false
+        c.fallo = true
+        return null
+    if p == "n":
+        if c.comer("null"):
+            # El valor JSON `null` de verdad: no es un fallo de parseo, así
+            # que c.fallo se queda como estaba (false salvo que algo previo
+            # ya lo hubiera marcado).
+            return null
+        c.fallo = true
+        return null
+    if p == "-" or json_es_digito(p):
+        return json_numero(c)
+    c.fallo = true
+    return null
+
+# Punto de entrada: parsea un documento JSON completo. Devuelve null tanto si
+# el JSON es inválido como si el documento entero es el literal `null` — esa
+# ambigüedad es aceptable aquí (ninguna llamada real de esta app espera un
+# documento de nivel superior que sea `null`), a diferencia de json_valor()
+# internamente, donde SÍ hay que distinguirlo (ver JCursor.fallo).
+fn Json? parse_json(string s):
+    JCursor c = JCursor(s)
+    Json? v = json_valor(c)
+    if c.fallo:
+        return null
+    c.skip_ws()
+    if c.i != len(c.s):
+        return null
+    return v
+
+# ─── Acceso tolerante a valores dinámicos ────────────────────────────────────
+
+fn Json jget(Json j, string key):
+    if j == null:
+        return null
+    return j[key]
+
+fn List<Json> jlist(Json j):
+    if j == null:
+        return []
+    return j
+
+fn string jstr(Json j, string def):
+    if j == null:
+        return def
+    return str(j)
+
+fn int jint(Json j, int def):
+    if j == null:
+        return def
+    return int(j)
+
+fn double jdbl(Json j, double def):
+    if j == null:
+        return def
+    # ffprobe manda sus campos numéricos (format.duration incluido) como
+    # string JSON ("355.031000"), no como número — "j * 1.0" explota ahí con
+    # "arithmetic between string and float". Pasar por str()+parse_json()
+    # normaliza los dos casos (string numérico y número de verdad) por la
+    # misma ruta sin necesitar saber de antemano cuál llegó.
+    Json? n = parse_json(str(j))
+    if n == null:
+        return def
+    return n * 1.0

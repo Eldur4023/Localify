@@ -1,0 +1,75 @@
+{
+  "name": "lux-script",
+  "displayName": "Lux Script",
+  "description": "Syntax highlighting, diagnostics and completion for Lux Script (.lux)",
+  "version": "0.3.0",
+  "publisher": "lux",
+  "license": "SEE LICENSE IN ../../LICENSE",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:lux"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "lux",
+        "aliases": [
+          "Lux Script",
+          "lux"
+        ],
+        "extensions": [
+          ".lux"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "lux",
+        "scopeName": "source.lux",
+        "path": "./syntaxes/lux.tmLanguage.json"
+      }
+    ],
+    "themes": [
+      {
+        "label": "Lux Dark",
+        "uiTheme": "vs-dark",
+        "path": "./themes/lux-dark-color-theme.json"
+      }
+    ],
+    "configuration": {
+      "title": "Lux Script",
+      "properties": {
+        "lux.compilerPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the 'lux' compiler binary, used for diagnostics. Leave empty to auto-detect: tries '<workspace>/build/lux' first, then 'lux' on PATH. Only needed if neither applies."
+        }
+      }
+    },
+    "configurationDefaults": {
+      "[lux]": {
+        "editor.semanticHighlighting.enabled": false
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p . && npm run compile --prefix server",
+    "watch": "tsc -p . --watch"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "@types/vscode": "^1.75.0",
+    "@types/node": "^20.0.0"
+  }
+}

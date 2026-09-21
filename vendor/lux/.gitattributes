@@ -1,0 +1,13 @@
+# The test scripts are run by bash —inside WSL, in the case of a Windows box
+# with the repo mounted on /mnt/c— and bash does NOT tolerate carriage returns:
+# a file with CRLF fails with "$'\r': command not found" on the first line.
+#
+# Without this, on a Windows clone with core.autocrlf=true they are checked out
+# with CRLF and the suite does not start.  Worse: git keeps seeing them as
+# clean, because it normalizes when comparing, so the problem never shows up in
+# `git status` and is hard to spot.
+*.sh text eol=lf
+
+# The same for whatever is loaded from bash or from a database client.
+*.lux text eol=lf
+*.sql  text eol=lf

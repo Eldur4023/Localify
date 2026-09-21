@@ -1,0 +1,63 @@
+# settings.lux — Ajustes persistentes y estado de las herramientas externas.
+#
+# Los ajustes de Localify vivían en settings.json + la tabla settings; aquí
+# todo va en la tabla. Las herramientas (yt-dlp/ffmpeg/ffprobe) se buscan en
+# el PATH igual que Localify hacía con sus sidecars.
+
+get endpoint("/api/settings"):
+    db_init()
+    List<Json> filas = await sqlite.query("select key, value from settings")
+    Dict<string, Json> valores = {}
+    for int i in range(0, len(filas)):
+        valores[jstr(filas[i]["key"], "")] = jstr(filas[i]["value"], "")
+    Json r_yt = await os.run("which", ["yt-dlp"])
+    Json r_ff = await os.run("which", ["ffmpeg"])
+    Json r_fp = await os.run("which", ["ffprobe"])
+    return {
+        "libraryPath": biblioteca_raiz(),
+        "cookiesMode": ajuste("cookies_mode", "none"),
+        "cookiesBrowser": ajuste("cookies_browser", "firefox"),
+        "cookiesFile": ajuste("cookies_file", ""),
+        "schemaVersion": jstr(valores["schema_version"], ""),
+        "tools": {
+            "ytdlp": jint(r_yt["status"], 1) == 0,
+            "ffmpeg": jint(r_ff["status"], 1) == 0,
+            "ffprobe": jint(r_fp["status"], 1) == 0
+        }
+    }
+
+class PeticionAjuste:
+    string? key
+    string? value
+
+post endpoint("/api/settings", PeticionAjuste p):
+    db_init()
+    if p.key == null or p.key == "":
+        return status(400)
+    string valor = p.value == null ? "" : p.value
+    # la ruta de biblioteca se valida y prepara al cambiarla
+    if p.key == "library_path":
+        os.make_dir(os.path_join(valor, "audio"))
+        os.make_dir(os.path_join(valor, "covers"))
+        os.make_dir(os.path_join(valor, ".tmp"))
+    ajuste_poner(p.key, valor)
+    return { "ok": true }
+
+post endpoint("/api/settings/test-cookies"):
+    db_init()
+    string modo = ajuste("cookies_mode", "none")
+    if modo == "none":
+        return { "ok": false, "message": "sin cookies configuradas" }
+    List<string> extra = args_cookies()
+    if len(extra) == 0:
+        return { "ok": false, "message": "modo de cookies sin argumentos" }
+    Json r = await os.run("yt-dlp", ["--dump-json", "--flat-playlist", "--playlist-end", "1"] + extra + ["ytsearch1:test"])
+    bool ok = jint(r["status"], 1) == 0 and jstr(r["stdout"], "").trim() != ""
+    return { "ok": ok, "message": ok ? "cookies funcionando" : jstr(r["stderr"], "").trim().slice(0, 200) }
+
+post endpoint("/api/settings/update-ytdlp"):
+    db_init()
+    Json r = await os.run("yt-dlp", ["-U"])
+    bool ok = jint(r["status"], 1) == 0
+    string salida = jstr(r["stdout"], "") + jstr(r["stderr"], "")
+    return { "ok": ok, "message": salida.trim().slice(0, 300) }

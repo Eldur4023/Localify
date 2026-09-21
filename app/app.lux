@@ -1,0 +1,37 @@
+# app.lux — Localify para Lux.
+#
+# Puerto de la app de escritorio Localify (Rust/Tauri) al stack Lux:
+# LuxScript + ventana nativa GTK/WebKit + HTTP loopback. La lógica de
+# resolución (YouTube Music + MusicBrainz + yt-dlp) está reescrita en
+# LuxScript; la reproducción de audio la hace el elemento <audio> del
+# WebView servido por /audio/:id con soporte Range.
+
+# Los imports son a nivel de proyecto: TODOS los módulos nativos usados por
+# los demás .lux de este directorio se declaran aquí.
+import sqlite
+import window
+import os
+import time
+import hash
+import proc
+import http
+import math
+
+app:
+    name      "Localify"
+    templates "./templates"
+    static    "/static" -> "./public"
+
+    window:
+        title     "Localify"
+        width     1280
+        height    820
+        resizable true
+        icon      "./icon.png"
+
+    sqlite:
+        file "./data/localify.db"
+        pool 4
+
+get endpoint("/"):
+    return render("index.html")

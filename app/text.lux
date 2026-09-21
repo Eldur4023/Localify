@@ -1,0 +1,316 @@
+# text.lux — Normalización canónica de texto.
+#
+# Puerto de crates/localify-core/src/text.rs de Localify: minúsculas → quitar
+# diacríticos → todo lo no alfanumérico actúa como separador → colapsar
+# espacios. Toda la app (columnas *_norm, búsqueda local y scorer de YouTube)
+# pasa por aquí, igual que en el original.
+
+# Pares literal → ASCII para diacríticos (lower() del runtime ya es consciente
+# de Unicode para la mayoría: "Camión".lower() = "camión"; pero no baja Ø y
+# compañia, por eso van también las mayúsculas).
+fn List<string> diacriticos():
+    return ["á", "a", "é", "e", "í", "i", "ó", "o", "ú", "u", "ü", "u", "ñ", "n", "ç", "c", "ý", "y", "à", "a", "è", "e", "ì", "i", "ò", "o", "ù", "u", "â", "a", "ê", "e", "î", "i", "ô", "o", "û", "u", "ã", "a", "õ", "o", "ä", "a", "ë", "e", "ï", "i", "ö", "o", "å", "a", "æ", "a", "œ", "o", "ø", "o", "đ", "d", "ð", "d", "ł", "l", "ħ", "h", "ŧ", "t", "ß", "s", "Ø", "o", "Đ", "d", "Ð", "d", "Ł", "l", "Ħ", "h", "Ŧ", "t", "Æ", "a", "Œ", "o"]
+
+# Puntuación y símbolos Unicode frecuentes en títulos: separadores, igual que
+# cualquier signo ASCII (Rust usaba is_alphanumeric(); lo no latino que NO
+# está aquí —cirílico, kana, kanji— atraviesa como letra).
+fn List<string> separadores_unicode():
+    return ["–", "—", "'", "'", "\"", "\"", "…", "‹", "›", "«", "»", "·", "♪", "♫", "♥", "★", "©", "™", "®", "✓", "¿", "¡", "¦", "§", "¨", "¯", "´", "¸", "×", "÷", "¬", "°", "±", "¶", "¤", "¢", "£", "¥", "€"]
+
+# Los 95 imprimibles ASCII (32..126): un byte que esté aquí y no en la lista
+# alfanumérica es signo, y por tanto separador.
+fn string tabla_ascii_127():
+    return " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+
+fn bool ascii_printable(string c):
+    return tabla_ascii_127().index_of(c) >= 0
+
+# Longitud de la secuencia UTF-8 que empieza en `i`: bytes consecutivos que no
+# son ASCII imprimible ni tab/salto (aproximación suficiente — los controles
+# ASCII sueltos son inexistentes en títulos reales).
+fn int largo_utf8(string s, int i):
+    int j = i
+    int n = len(s)
+    int largo = 0
+    while j < n and largo < 4:
+        string b = s.slice(j, j + 1)
+        if ascii_printable(b) or b == "\t" or b == "\n" or b == "\r":
+            break
+        largo = largo + 1
+        j = j + 1
+    if largo == 0:
+        return 1
+    return largo
+
+# Divide una consulta ya pasada por normalizar() en términos no vacíos, como
+# mucho max_terminos de ellos — una búsqueda "Artista Canción" necesita que
+# CADA palabra aparezca en algún sitio (título, artista o álbum), no que la
+# frase completa aparezca tal cual en un único campo: "Yellow by Coldplay"
+# nunca contendría la subcadena literal "coldplay yellow".
+fn List<string> terminos_de(string q_normalizada, int max_terminos):
+    List<string> crudos = q_normalizada.split(" ")
+    List<string> out = []
+    for int i in range(0, len(crudos)):
+        if crudos[i] != "" and len(out) < max_terminos:
+            out.add(crudos[i])
+    return out
+
+fn string normalizar(string entrada):
+    string bajado = entrada.lower()
+    string sin = bajado
+    List<string> pares = diacriticos()
+    for int i in range(0, len(pares), 2):
+        sin = sin.replace(pares[i], pares[i + 1])
+
+    string alfa = "abcdefghijklmnopqrstuvwxyz0123456789"
+    string out = ""
+    bool espacio_pendiente = false
+    int n = len(sin)
+    int i = 0
+    while i < n:
+        string c = sin.slice(i, i + 1)
+        int largo = 1
+        if not (alfa.contains(c) or ascii_printable(c) or c == "\t" or c == "\n" or c == "\r"):
+            # byte de arranque de una secuencia UTF-8 no ASCII
+            largo = largo_utf8(sin, i)
+            c = sin.slice(i, i + largo)
+        if largo > 1 or alfa.contains(c):
+            bool es_separador = false
+            if largo > 1:
+                List<string> seps = separadores_unicode()
+                for int si in range(0, len(seps)):
+                    if c == seps[si]:
+                        es_separador = true
+            if es_separador:
+                espacio_pendiente = true
+            else:
+                if espacio_pendiente and out != "":
+                    out = out + " "
+                espacio_pendiente = false
+                out = out + c
+        else:
+            espacio_pendiente = true
+        i = i + largo
+    return out
+
+# ─── Título de búsqueda ──────────────────────────────────────────────────────
+
+fn List<string> sufijos_ruido():
+    return ["remaster", "remastered", "deluxe", "deluxe edition", "expanded edition", "special edition", "anniversary edition", "bonus track", "bonus track version", "single version", "album version", "radio edit", "explicit", "explicit version", "mono", "stereo"]
+
+fn bool es_anyo(string p):
+    if len(p) != 4:
+        return false
+    for int i in range(0, 4):
+        if "0123456789".index_of(p.slice(i, i + 1)) < 0:
+            return false
+    return true
+
+fn string titulo_busqueda(string titulo):
+    string normalizado = normalizar(titulo)
+    List<string> crudo = normalizado.split(" ")
+    List<string> palabras = []
+    for int i in range(0, len(crudo)):
+        if crudo[i] != "":
+            palabras.add(crudo[i])
+
+    List<string> ruido = sufijos_ruido()
+    bool cambio = true
+    while cambio:
+        cambio = false
+        int n = len(palabras)
+
+        if n >= 2 and es_anyo(palabras[n - 1]) and ruido.contains(palabras[n - 2]):
+            palabras.remove_at(n - 1)
+            cambio = true
+
+        for int k in range(3, 0, -1):
+            if len(palabras) > k:
+                string cola = ""
+                for int w in range(len(palabras) - k, len(palabras)):
+                    if w > len(palabras) - k:
+                        cola = cola + " "
+                    cola = cola + palabras[w]
+                if ruido.contains(cola):
+                    for int b in range(0, k):
+                        palabras.remove_at(len(palabras) - 1)
+                    cambio = true
+                    break
+
+    string out = ""
+    for int i in range(0, len(palabras)):
+        if i > 0:
+            out = out + " "
+        out = out + palabras[i]
+    return out
+
+# ─── Similitud Jaro-Winkler ─────────────────────────────────────────────────
+# Puerto de text::similarity, byte a byte sobre textos ya normalizados.
+
+fn double similitud(string a, string b):
+    if a == "" and b == "":
+        return 1.0
+    if a == "" or b == "":
+        return 0.0
+
+    int la = len(a)
+    int lb = len(b)
+    # Ojo: '/' es división real (double) y el tipo declarado no convierte en
+    # runtime — int() explícito para que range() reciba enteros.
+    int ventana = int((la > lb ? la : lb) / 2) - 1
+    if ventana < 0:
+        ventana = 0
+
+    List<int> a_match = []
+    List<int> b_match = []
+    for int i in range(0, la):
+        a_match.add(0)
+    for int j in range(0, lb):
+        b_match.add(0)
+
+    int coincidencias = 0
+    for int i in range(0, la):
+        int inicio = i - ventana
+        if inicio < 0:
+            inicio = 0
+        int fin = i + ventana + 1
+        if fin > lb:
+            fin = lb
+        for int j in range(inicio, fin):
+            if b_match[j] == 0 and b.slice(j, j + 1) == a.slice(i, i + 1):
+                a_match[i] = 1
+                b_match[j] = 1
+                coincidencias = coincidencias + 1
+                break
+
+    if coincidencias == 0:
+        return 0.0
+
+    int transposiciones = 0
+    int k = 0
+    for int i in range(0, la):
+        if a_match[i] == 0:
+            continue
+        while b_match[k] == 0:
+            k = k + 1
+        if a.slice(i, i + 1) != b.slice(k, k + 1):
+            transposiciones = transposiciones + 1
+        k = k + 1
+
+    double m = coincidencias
+    double jaro = (m / la + m / lb + (m - transposiciones / 2.0) / m) / 3.0
+
+    int prefijo = 0
+    int tope = 4
+    if tope > la:
+        tope = la
+    if tope > lb:
+        tope = lb
+    while prefijo < tope and a.slice(prefijo, prefijo + 1) == b.slice(prefijo, prefijo + 1):
+        prefijo = prefijo + 1
+
+    return jaro + prefijo * 0.1 * (1.0 - jaro)
+
+# ─── Términos como palabra completa ──────────────────────────────────────────
+# Puerto de scoring::contiene_termino: "live" no coincide dentro de "alive".
+# Los textos llegan ya normalizados (palabras separadas por un espacio).
+
+fn bool contiene_termino(string texto, string termino):
+    if termino == "" or texto == "":
+        return false
+    List<string> palabras = texto.split(" ")
+    List<string> buscadas = termino.split(" ")
+    int nb = 0
+    for int i in range(0, len(buscadas)):
+        if buscadas[i] != "":
+            nb = nb + 1
+    if nb == 0 or len(palabras) < nb:
+        return false
+    for int i in range(0, len(palabras) - nb + 1):
+        bool ok = true
+        int w = i
+        for int j in range(0, len(buscadas)):
+            if buscadas[j] != "":
+                if palabras[w] != buscadas[j]:
+                    ok = false
+                w = w + 1
+        if ok:
+            return true
+    return false
+
+# ─── Vocabulario de versiones ────────────────────────────────────────────────
+# Puerto de localify-core/src/domain/versiones.rs. Va normalizado.
+
+fn List<string> terminos_directo():
+    return ["live", "en vivo", "en directo", "directo", "concert", "concierto", "unplugged", "session", "sessions", "tiny desk"]
+
+fn List<string> terminos_version():
+    return ["cover", "karaoke", "instrumental", "remix", "mashup", "nightcore", "tribute", "parodia", "parody", "reaction", "backing track", "playback", "midi", "acoustic", "acustico", "demo", "rehearsal", "ensayo", "acapella", "a capella", "a cappella"]
+
+fn List<string> terminos_manipulado():
+    return ["slowed", "reverb", "sped up", "speed up", "bass boosted", "bass boost", "8d", "9d", "16d", "lofi", "lo fi", "pitched", "daycore"]
+
+fn List<string> terminos_videoclip():
+    return ["official video", "music video", "videoclip", "video oficial", "video musical"]
+
+fn List<string> terminos_recopilatorio():
+    return ["full album", "album completo", "greatest hits", "grandes exitos", "mix", "megamix", "compilation", "recopilacion", "playlist", "best of", "todas sus canciones"]
+
+fn bool lista_lo_dice(List<string> terminos, string texto):
+    for int i in range(0, len(terminos)):
+        if contiene_termino(texto, terminos[i]):
+            return true
+    return false
+
+# clase_de_version: qué clase de grabación declara ser un título.
+fn string clase_de_version(string titulo):
+    string t = normalizar(titulo)
+    if lista_lo_dice(terminos_recopilatorio(), t):
+        return "recopilatorio"
+    if lista_lo_dice(terminos_manipulado(), t):
+        return "manipulado"
+    if lista_lo_dice(terminos_version(), t):
+        return "otra"
+    if lista_lo_dice(terminos_directo(), t):
+        return "directo"
+    return "original"
+
+# titulo_canonico: recorta por la cola los añadidos "(...)", "[...]", " - ..."
+# mientras el añadido sea una variante. Puerto de versiones::titulo_canonico.
+fn string titulo_canonico(string titulo):
+    string base = titulo
+    bool cambio = true
+    while cambio:
+        cambio = false
+        int corte = ultimo_corte(base)
+        if corte < 0:
+            break
+        string izquierda = base.slice(0, corte)
+        string resto = base.slice(corte)
+        if clase_de_version(resto) == "original" or izquierda.trim() == "":
+            break
+        base = izquierda
+        cambio = true
+    return titulo_busqueda(base)
+
+fn int ultimo_corte(string titulo):
+    int mejor = -1
+    int p = titulo.index_of("(")
+    while p >= 0:
+        if p > mejor:
+            mejor = p
+        int nx = titulo.slice(p + 1).index_of("(")
+        p = nx < 0 ? -1 : p + 1 + nx
+    p = titulo.index_of("[")
+    while p >= 0:
+        if p > mejor:
+            mejor = p
+        int nx = titulo.slice(p + 1).index_of("[")
+        p = nx < 0 ? -1 : p + 1 + nx
+    p = titulo.index_of(" - ")
+    while p >= 0:
+        if p > mejor:
+            mejor = p
+        int nx = titulo.slice(p + 1).index_of(" - ")
+        p = nx < 0 ? -1 : p + 1 + nx
+    return mejor

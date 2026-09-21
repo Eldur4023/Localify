@@ -1,0 +1,178 @@
+# covers.lux — Portadas: caché en disco + proxy a las URLs del proveedor.
+#
+# Igual que el protocolo cover:// de Localify: la portada del álbum se
+# descarga UNA vez a <biblioteca>/covers/ y desde entonces se sirve del
+# fichero. Las de pista suelta son miniaturas del vídeo (i.ytimg.com).
+
+fn string covers_dir():
+    string d = os.path_join(biblioteca_raiz(), "covers")
+    os.make_dir(d)
+    return d
+
+# Descarga una imagen a la caché (bytes del body → fichero). Devuelve true
+# si el fichero quedó disponible.
+fn bool cachear_imagen(string url, string destino):
+    if os.is_file(destino) and os.file_size(destino) > 100:
+        return true
+    Dict<string, string> cabeceras = { "User-Agent": agente_navegador() }
+    Json? r = null
+    try:
+        r = await http.get(url, cabeceras)
+    catch e:
+        return false
+    if r == null:
+        return false
+    if jint(jget(r, "status"), 0) != 200:
+        return false
+    Json body = jget(r, "body")
+    if body == null:
+        return false
+    string bytes = jstr(body, "")
+    if len(bytes) < 100:
+        return false
+    return await os.write_file(destino, bytes)
+
+# miniatura de un vídeo de YouTube.
+fn string url_miniatura_video(string video_id):
+    return "https://i.ytimg.com/vi/" + video_id + "/hqdefault.jpg"
+
+# youtube_id de una pista: video-id directo, audio_files.youtube_id o la
+# mejor coincidencia registrada.
+fn string youtube_id_de_pista(string tid):
+    if es_video_id(tid):
+        return tid
+    List<Json> f = await sqlite.query("select youtube_id from audio_files where track_id = ?", tid)
+    if len(f) > 0:
+        string yid = jstr(f[0]["youtube_id"], "")
+        if yid != "":
+            return yid
+    List<Json> m = await sqlite.query("select video_id from youtube_matches where track_id = ? order by score desc limit 1", tid)
+    if len(m) > 0:
+        return jstr(m[0]["video_id"], "")
+    return ""
+
+fn string? portada_album_url(string album_id):
+    List<Json> f = await sqlite.query("select cover_url from albums where id = ?", album_id)
+    if len(f) > 0:
+        string u = jstr(f[0]["cover_url"], "")
+        if u != "":
+            return u
+    return null
+
+fn string? portada_album_url_fallback(string album_id):
+    # sin cover_url: la miniatura de la primera pista con vídeo conocido
+    List<Json> t = await sqlite.query("select id from tracks where album_id = ? order by disc_number, track_number limit 5", album_id)
+    for int i in range(0, len(t)):
+        string yid = youtube_id_de_pista(jstr(t[i]["id"], ""))
+        if yid != "":
+            return url_miniatura_video(yid)
+    return null
+
+get endpoint("/api/cover/album/:id", string id):
+    db_init()
+    string destino = os.path_join(covers_dir(), "album-" + id + ".jpg")
+    string? url = portada_album_url(id)
+    if url == null:
+        url = portada_album_url_fallback(id)
+    if url == null:
+        return status(404)
+    bool ok = cachear_imagen(url, destino)
+    if not ok or not os.is_file(destino):
+        return status(404)
+    header("Content-Type", "image/jpeg")
+    return send_file(destino, covers_dir())
+
+get endpoint("/api/cover/track/:id", string id):
+    db_init()
+    string destino = os.path_join(covers_dir(), "track-" + id + ".jpg")
+    string yid = youtube_id_de_pista(id)
+    if yid == "":
+        return status(404)
+    bool ok = cachear_imagen(url_miniatura_video(yid), destino)
+    if not ok or not os.is_file(destino):
+        return status(404)
+    header("Content-Type", "image/jpeg")
+    return send_file(destino, covers_dir())
+
+# Portada de playlist: la sube el usuario (multipart) o se borra.
+post endpoint("/api/cover/playlist/:id", string id, File imagen):
+    db_init()
+    string d = covers_dir()
+    # save() escribe con nombre seguro y devuelve el nombre final
+    string nombre = imagen.save(d)
+    if nombre == "":
+        return status(500)
+    string destino = os.path_join(d, "playlist-" + id + ".jpg")
+    await os.move(os.path_join(d, nombre), destino)
+    await sqlite.exec("update playlists set cover_path = ?, updated_at = unixepoch() where id = ?", "covers/playlist-" + id + ".jpg", id)
+    return { "ok": true }
+
+fn Json? portada_playlist_respuesta(string id):
+    List<Json> f = await sqlite.query("select cover_path from playlists where id = ?", id)
+    if len(f) > 0:
+        string rel = jstr(f[0]["cover_path"], "")
+        if rel != "":
+            string abs = os.path_join(biblioteca_raiz(), rel)
+            if os.is_file(abs):
+                header("Content-Type", "image/jpeg")
+                return send_file(abs, biblioteca_raiz())
+    # sin portada propia: la del álbum de la primera pista
+    List<Json> p = await sqlite.query("select track_id from playlist_items where playlist_id = ? order by position limit 1", id)
+    if len(p) > 0:
+        List<Json> t = await sqlite.query("select album_id from tracks where id = ?", jstr(p[0]["track_id"], ""))
+        if len(t) > 0 and jstr(t[0]["album_id"], "") != "":
+            List<Json> a = await sqlite.query("select cover_url from albums where id = ?", jstr(t[0]["album_id"], ""))
+            if len(a) > 0 and jstr(a[0]["cover_url"], "") != "":
+                string destino = os.path_join(covers_dir(), "album-" + jstr(t[0]["album_id"], "") + ".jpg")
+                bool ok = cachear_imagen(jstr(a[0]["cover_url"], ""), destino)
+                if ok and os.is_file(destino):
+                    header("Content-Type", "image/jpeg")
+                    return send_file(destino, covers_dir())
+    return status(404)
+
+get endpoint("/api/cover/playlist/:id", string id):
+    db_init()
+    return await portada_playlist_respuesta(id)
+
+delete endpoint("/api/cover/playlist/:id", string id):
+    db_init()
+    await sqlite.exec("update playlists set cover_path = null, updated_at = unixepoch() where id = ?", id)
+    os.remove_file(os.path_join(covers_dir(), "playlist-" + id + ".jpg"))
+    return { "ok": true }
+
+# ─── Formas del frontend original ────────────────────────────────────────────
+# ui/cards.js construye /api/cover/<ruta> con rutas "track/<id>",
+# "artist/<id>", "playlist/<id>" y el id de álbum pelado. Alias de las rutas
+# de arriba con esas formas.
+
+get endpoint("/api/cover/albums/:id", string id):
+    List<Json> f = await sqlite.query("select cover_url from albums where id = ?", id)
+    if len(f) == 0 or jstr(f[0]["cover_url"], "") == "":
+        return status(404)
+    string destino = os.path_join(covers_dir(), "album-" + id + ".jpg")
+    bool ok = cachear_imagen(jstr(f[0]["cover_url"], ""), destino)
+    if not ok or not os.is_file(destino):
+        return status(404)
+    header("Content-Type", "image/jpeg")
+    return send_file(destino, covers_dir())
+
+get endpoint("/api/cover/:id", string id):
+    # id pelado = álbum (los prefijos track/artist/playlist caen arriba por
+    # ser más específicos)
+    List<Json> f = await sqlite.query("select cover_url from albums where id = ?", id)
+    if len(f) == 0 or jstr(f[0]["cover_url"], "") == "":
+        return status(404)
+    string destino = os.path_join(covers_dir(), "album-" + id + ".jpg")
+    bool ok = cachear_imagen(jstr(f[0]["cover_url"], ""), destino)
+    if not ok or not os.is_file(destino):
+        return status(404)
+    header("Content-Type", "image/jpeg")
+    return send_file(destino, covers_dir())
+
+get endpoint("/api/cover/playlists/:id", string id):
+    return await portada_playlist_respuesta(id)
+
+get endpoint("/api/cover/artist/:id", string id):
+    # el catálogo de YouTube Music no trae fotos de artista (sin Wikidata):
+    # 404 y la UI muestra el icono de reserva, igual que el original
+    return status(404)

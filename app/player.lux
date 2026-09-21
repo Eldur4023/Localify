@@ -1,0 +1,186 @@
+# player.lux — Reproductor y cola: snapshot de estado y servicio de audio.
+#
+# Puerto de commands/player.rs de Localify. La reproducción la materializa el
+# elemento <audio> del WebView sobre /audio/:id (send_file soporta Range/206,
+# así que el seeking funciona). La mayoría de las rutas REST /api/player/* y
+# /api/queue/* que vivían aquí nunca las llama el frontend: la UI habla
+# enteramente por /api/invoke (api_comandos.lux tiene su propia
+# implementación de cada comando player_*/queue_*, con la misma máquina de
+# estados de queue.lux). Lo que queda es lo que SÍ reutiliza ese código vivo:
+# el snapshot de estado (estado_jugador/snapshot_cola, que forman la
+# respuesta de /api/invoke y de /api/events/poll), las rutas que sí sigue
+# llamando el cliente o MPRIS (toggle/next/ended/previous/pause/resume/seek)
+# y el servicio de audio.
+
+fn List<string> ids_de_filas(List<Json> filas):
+    List<string> out = []
+    for int i in range(0, len(filas)):
+        out.add(jstr(filas[i]["id"], ""))
+    return out
+
+# ─── Snapshot de estado ──────────────────────────────────────────────────────
+
+# Snapshot de la cola: actual + cola de usuario + ventana del contexto.
+fn Json snapshot_cola(EstadoCola e):
+    int VENTANA = 50
+    List<Json> contexto = []
+    int desde = e.queue_index + 1
+    int hasta = desde + VENTANA
+    if hasta > len(e.context_queue):
+        hasta = len(e.context_queue)
+    for int i in range(desde, hasta):
+        Json p = pista_por_id(pista_en_orden(e, i))
+        if p != null:
+            contexto.add(p)
+    List<Json> user = []
+    for int i in range(0, len(e.user_queue)):
+        Json p = pista_por_id(e.user_queue[i].trackId)
+        Dict<string, Json> d = { "entryId": e.user_queue[i].entryId, "track": p }
+        user.add(d)
+    Json? ctx = parse_json(e.context)
+    return {
+        "revision": e.revision,
+        "current": pista_por_id(e.track_id),
+        "userQueue": user,
+        "contextQueue": contexto,
+        "context": ctx
+    }
+
+# Descargas activas resumidas (para que la UI muestre progreso).
+fn List<Json> descargas_activas():
+    List<Json> f = await sqlite.query("""
+        select j.track_id, j.state, j.priority, j.bytes_done, j.bytes_total, j.video_id,
+               j.last_error, j.attempts,
+               t.title, t.artist_display, t.duration_ms
+        from download_jobs j join tracks t on t.id = j.track_id
+        where j.state in ('queued','matching','downloading','finalizing')
+        order by j.priority, j.updated_at
+        """)
+    List<Json> out = []
+    for int i in range(0, len(f)):
+        Json r = f[i]
+        int hecho = jint(r["bytes_done"], 0)
+        int total = jint(r["bytes_total"], 0)
+        int pct = 0
+        if total > 0:
+            pct = int((hecho * 100.0) / total)
+        out.add({
+            "trackId": jstr(r["track_id"], ""),
+            "state": jstr(r["state"], ""),
+            "priority": jstr(r["priority"], ""),
+            "bytesDone": hecho,
+            "bytesTotal": total,
+            "percent": pct,
+            "attempts": jint(r["attempts"], 0),
+            "lastError": jstr(r["last_error"], ""),
+            "title": jstr(r["title"], ""),
+            "artistDisplay": jstr(r["artist_display"], ""),
+            "durationMs": jint(r["duration_ms"], 0)
+        })
+    return out
+
+fn Json estado_jugador():
+    EstadoCola e = leer_estado()
+    return {
+        "track": pista_por_id(e.track_id),
+        "status": e.status,
+        "positionMs": e.position_ms,
+        "volume": e.volume,
+        "repeat": e.repeat_mode,
+        "shuffle": e.shuffle,
+        "revision": e.revision,
+        "queue": snapshot_cola(e),
+        "downloads": descargas_activas()
+    }
+
+# ─── Endpoints de avance (los únicos que sigue llamando el cliente: el resto
+# de comandos player_*/queue_* pasan por /api/invoke → api_comandos.lux) ────
+
+post endpoint("/api/player/toggle"):
+    db_init()
+    mutar_estado("toggle", "", "", -1)
+    return estado_jugador()
+
+# pause/resume/seek: el cliente habla por /api/invoke (player_pause,
+# player_resume, player_seek), pero MPRIS (mpris.cpp) llama a estas rutas
+# REST directamente — un relé de control de sesión ajeno al frontend, no
+# código muerto aunque ningún fetch() de la UI lo mencione.
+post endpoint("/api/player/pause"):
+    db_init()
+    mutar_estado("pause", "", "", -1)
+    return estado_jugador()
+
+post endpoint("/api/player/resume"):
+    db_init()
+    mutar_estado("resume", "", "", 0)
+    return estado_jugador()
+
+class PeticionAvance:
+    int? msPlayed
+
+post endpoint("/api/player/next", PeticionAvance p):
+    db_init()
+    mutar_estado("avanzar", "skip", "", p.msPlayed == null ? 0 : p.msPlayed)
+    EstadoCola e = leer_estado()
+    if e.track_id != "":
+        asegurar_descarga(e.track_id, "immediate")
+    return estado_jugador()
+
+post endpoint("/api/player/ended", PeticionAvance p):
+    # Fin natural: repite en modo "track" y cuenta como reproducción completa.
+    db_init()
+    mutar_estado("avanzar", "natural", "", p.msPlayed == null ? 0 : p.msPlayed)
+    EstadoCola e = leer_estado()
+    if e.track_id != "":
+        asegurar_descarga(e.track_id, "immediate")
+    return estado_jugador()
+
+post endpoint("/api/player/previous", PeticionAvance p):
+    db_init()
+    # Regla de los 3 segundos de Spotify: por encima, reinicia la actual.
+    if p.msPlayed != null and p.msPlayed > 3000:
+        mutar_estado("seek", "", "", 0)
+    else:
+        mutar_estado("retroceder", "", "", 0)
+        EstadoCola e = leer_estado()
+        if e.track_id != "":
+            asegurar_descarga(e.track_id, "immediate")
+    return estado_jugador()
+
+class PeticionSeek:
+    int? positionMs
+
+post endpoint("/api/player/seek", PeticionSeek p):
+    db_init()
+    mutar_estado("seek", "", "", p.positionMs == null ? 0 : p.positionMs)
+    return estado_jugador()
+
+# ─── Servicio de audio ───────────────────────────────────────────────────────
+
+fn string mime_audio(string formato):
+    if formato == "opus" or formato == "ogg":
+        return "audio/ogg"
+    if formato == "webm":
+        return "audio/webm"
+    if formato == "m4a":
+        return "audio/mp4"
+    if formato == "mp3":
+        return "audio/mpeg"
+    if formato == "flac":
+        return "audio/flac"
+    if formato == "wav":
+        return "audio/wav"
+    return "application/octet-stream"
+
+get endpoint("/audio/:id", string id):
+    db_init()
+    List<Json> f = await sqlite.query("select rel_path, format from audio_files where track_id = ?", id)
+    if len(f) == 0:
+        return status(404)
+    string rel = jstr(f[0]["rel_path"], "")
+    string abs = ruta_audio_abs(rel)
+    if not os.is_file(abs):
+        return status(404)
+    header("Content-Type", mime_audio(jstr(f[0]["format"], "")))
+    header("Accept-Ranges", "bytes")
+    return send_file(abs, biblioteca_raiz())

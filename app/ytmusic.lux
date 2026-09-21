@@ -1,0 +1,451 @@
+# ytmusic.lux — Cliente de la API InnerTube de YouTube Music.
+#
+# Puerto de crates/localify-ytmusic (innertube.rs + parseo.rs). Se navega el
+# JSON dinámicamente igual que el original: sin contrato, un campo que
+# desaparezca se pierde solo en vez de tumbar la búsqueda entera.
+
+# ─── Cliente ─────────────────────────────────────────────────────────────────
+
+fn string agente_navegador():
+    return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+fn Dict<string, string> contexto_cliente():
+    return {
+        "clientName": "WEB_REMIX",
+        "clientVersion": "1.20240101.01.00",
+        "hl": "es",
+        "gl": "US"
+    }
+
+fn string filtro_params(string filtro):
+    if filtro == "albumes":
+        return "EgWKAQIYAWoMEA4QChADEAQQCRAF"
+    if filtro == "artistas":
+        return "EgWKAQIgAWoMEA4QChADEAQQCRAF"
+    if filtro == "listas":
+        return "EgWKAQIoAWoMEA4QChADEAQQCRAF"
+    return "EgWKAQIIAWoMEA4QChADEAQQCRAF"
+
+# POST a un endpoint de youtubei; devuelve el body parseado o null.
+fn Json? innertube_post(string url, Dict cuerpo):
+    Dict<string, string> cabeceras = { "User-Agent": agente_navegador() }
+    Json? respuesta = null
+    try:
+        respuesta = await http.post(url, cuerpo, cabeceras)
+    catch e:
+        return null
+    if respuesta == null:
+        return null
+    if jint(jget(respuesta, "status"), 0) != 200:
+        return null
+    return jget(respuesta, "body")
+
+fn Json? ytm_buscar(string consulta, string filtro):
+    Dict contexto = { "client": contexto_cliente() }
+    Dict cuerpo = {
+        "context": contexto,
+        "query": consulta,
+        "params": filtro_params(filtro)
+    }
+    return innertube_post("https://music.youtube.com/youtubei/v1/search", cuerpo)
+
+fn Json? ytm_navegar(string browse_id):
+    Dict cuerpo = {
+        "context": { "client": contexto_cliente() },
+        "browseId": browse_id
+    }
+    return innertube_post("https://music.youtube.com/youtubei/v1/browse", cuerpo)
+
+fn Json? ytm_reproductor(string video_id):
+    Dict cuerpo = {
+        "context": { "client": contexto_cliente() },
+        "videoId": video_id
+    }
+    return innertube_post("https://music.youtube.com/youtubei/v1/player", cuerpo)
+
+# ─── Navegación del JSON ─────────────────────────────────────────────────────
+# buscar_todos: todos los nodos bajo la clave `nombre`, a cualquier
+# profundidad (la ruta canónica cambia según el diseño que sirva YouTube).
+
+fn void buscar_todos_rec(Json nodo, string nombre, List<Json> out):
+    if nodo == null:
+        return
+    if len(out) > 400:
+        return
+    # el nodo puede ser Dict, List o un valor hoja: el lenguaje no tiene
+    # typeof, así que el tipo se descubre por despacho en runtime y el
+    # error de "no es esto" es la señal
+    try:
+        for string clave in nodo:
+            Json v = nodo[clave]
+            if clave == nombre:
+                out.add(v)
+            buscar_todos_rec(v, nombre, out)
+    catch e:
+        try:
+            int n = len(nodo)
+            for int i in range(0, n):
+                Json v = nodo[i]
+                buscar_todos_rec(v, nombre, out)
+        catch e2:
+            int hoja = 0
+
+fn List<Json> buscar_todos(Json raiz, string nombre):
+    List<Json> out = []
+    buscar_todos_rec(raiz, nombre, out)
+    return out
+
+fn Json? buscar_uno(Json raiz, string nombre):
+    List<Json> todos = buscar_todos(raiz, nombre)
+    if len(todos) == 0:
+        return null
+    return todos[0]
+
+fn List<Json> elementos_de_lista(Json raiz):
+    return buscar_todos(raiz, "musicResponsiveListItemRenderer")
+
+# texto_de: concatena los tramos de un nodo { runs: [{ text }] }.
+fn string texto_de(Json nodo):
+    if nodo == null:
+        return ""
+    List<Json> runs = jlist(jget(nodo, "runs"))
+    string out = ""
+    for int i in range(0, len(runs)):
+        out = out + jstr(runs[i]["text"], "")
+    return out
+
+# columna: textos de la columna flexible n (0 título, 1 subtítulo).
+fn string columna(Json elemento, int n):
+    List<Json> flex = jlist(jget(elemento, "flexColumns"))
+    if n >= len(flex):
+        return ""
+    return texto_de(jget(flex[n], "musicResponsiveListItemFlexColumnRenderer")["text"])
+
+# tramos: pares (texto, id) de la columna n; el id viene del browseId o del
+# videoId del endpoint de navegación del tramo.
+class Tramo:
+    string texto
+    string id
+
+    Tramo(string texto, string id)
+
+fn List<Tramo> tramos(Json elemento, int n):
+    List<Tramo> out = []
+    List<Json> flex = jlist(jget(elemento, "flexColumns"))
+    if n >= len(flex):
+        return out
+    Json texto = jget(jget(flex[n], "musicResponsiveListItemFlexColumnRenderer"), "text")
+    List<Json> runs = jlist(jget(texto, "runs"))
+    for int i in range(0, len(runs)):
+        string t = jstr(runs[i]["text"], "")
+        Json nav = jget(runs[i], "navigationEndpoint")
+        string id = jstr(jget(jget(nav, "browseEndpoint"), "browseId"), "")
+        if id == "":
+            id = jstr(jget(jget(nav, "watchEndpoint"), "videoId"), "")
+        out.add(Tramo(t, id))
+    return out
+
+# video_id de un elemento de canción.
+fn string video_id_de(Json elemento):
+    string v = jstr(jget(jget(elemento, "playlistItemData"), "videoId"), "")
+    if v != "":
+        return v
+    Json overlay = jget(jget(jget(elemento, "overlay"), "musicItemThumbnailOverlayRenderer"), "content")
+    Json boton = jget(jget(overlay, "musicPlayButtonRenderer"), "playNavigationEndpoint")
+    return jstr(jget(jget(boton, "watchEndpoint"), "videoId"), "")
+
+# browse_id (álbum, artista, lista).
+fn string browse_id_de(Json elemento):
+    return jstr(jget(jget(jget(elemento, "navigationEndpoint"), "browseEndpoint"), "browseId"), "")
+
+# duracion_ms: "5:29" o "1:02:03" → ms. Exige al menos dos partes: un número
+# suelto es un año, no una duración.
+fn int duracion_ms_de(string texto):
+    List<string> partes = texto.trim().split(":")
+    if len(partes) < 2 or len(partes) > 3:
+        return 0
+    int total = 0
+    for int i in range(0, len(partes)):
+        string p = partes[i].trim()
+        if p == "":
+            return 0
+        for int k in range(0, len(p)):
+            if "0123456789".index_of(p.slice(k, k + 1)) < 0:
+                return 0
+        total = total * 60 + int(p)
+    return total * 1000
+
+# miniatura: la de mayor anchura declarada.
+fn string miniatura(Json elemento):
+    Json nodo = jget(jget(jget(elemento, "thumbnail"), "musicThumbnailRenderer"), "thumbnail")
+    List<Json> minis = jlist(jget(nodo, "thumbnails"))
+    string mejor = ""
+    int mejor_ancho = -1
+    for int i in range(0, len(minis)):
+        int ancho = jint(minis[i]["width"], 0)
+        if ancho > mejor_ancho:
+            mejor_ancho = ancho
+            mejor = jstr(minis[i]["url"], "")
+    return mejor
+
+# reproducciones: "2,1 M reproducciones" / "1.1B plays" / "348" → número.
+fn int reproducciones_de(string texto):
+    string limpio = texto.trim()
+    string cifras = ""
+    for int i in range(0, len(limpio)):
+        string c = limpio.slice(i, i + 1)
+        if "0123456789".contains(c) or c == "," or c == ".":
+            cifras = cifras + c
+        else:
+            break
+    if cifras == "":
+        return 0
+    string normalizado = cifras.replace(",", ".")
+    List<string> partes = normalizado.split(".")
+    double valor = int(partes[0]) * 1.0
+    if len(partes) > 1 and partes[1] != "":
+        valor = valor + int(partes[1].slice(0, 1)) * 0.1
+    string resto = limpio.slice(len(cifras)).trim()
+    double mult = 1.0
+    if resto.starts_with("K") or resto.starts_with("k"):
+        mult = 1000.0
+    elif resto.starts_with("M"):
+        mult = 1000000.0
+    elif resto.starts_with("B") or resto.starts_with("b"):
+        mult = 1000000000.0
+    elif resto.starts_with("mil"):
+        mult = 1000.0
+    return int(valor * mult)
+
+# popularidad logarítmica 0-100 (el orden de magnitud es lo que se compara).
+fn int popularidad_de(int reps):
+    if reps <= 0:
+        return 0
+    double escala = math.log(reps * 1.0) / math.log(10.0) / 10.0
+    if escala < 0.0:
+        escala = 0.0
+    if escala > 1.0:
+        escala = 1.0
+    return int(escala * 100.0 + 0.5)
+
+# ─── Conversión al catálogo ──────────────────────────────────────────────────
+
+# Extrae artistas/álbum/duración/año de las columnas del subtítulo,
+# clasificando por identificador (UC=artista, MPRE=álbum), no por posición.
+class Subtitulo:
+    List<string> artista_ids
+    List<string> artista_nombres
+    string album_id
+    string album_titulo
+    int duracion_ms
+    int anyo
+
+    Subtitulo():
+        this.artista_ids = []
+        this.artista_nombres = []
+        this.album_id = ""
+        this.album_titulo = ""
+        this.duracion_ms = 0
+        this.anyo = 0
+
+fn int anyo_valido(string limpio):
+    if len(limpio) != 4:
+        return 0
+    for int k in range(0, 4):
+        if "0123456789".index_of(limpio.slice(k, k + 1)) < 0:
+            return 0
+    int a = int(limpio)
+    if a < 1900 or a > 2100:
+        return 0
+    return a
+
+fn Subtitulo leer_subtitulo(Json elemento, int n1, int n2):
+    Subtitulo s = Subtitulo()
+    List<int> columnas = [n1, n2]
+    for int ci in range(0, len(columnas)):
+        List<Tramo> ts = tramos(elemento, columnas[ci])
+        for int i in range(0, len(ts)):
+            string texto = ts[i].texto.trim()
+            string id = ts[i].id
+            if id.starts_with("UC") and texto != "":
+                s.artista_ids.add(id)
+                s.artista_nombres.add(texto)
+            elif id.starts_with("MPRE") and s.album_id == "":
+                s.album_id = id
+                s.album_titulo = texto
+            elif texto != "":
+                int d = duracion_ms_de(texto)
+                if d > 0:
+                    if s.duracion_ms == 0:
+                        s.duracion_ms = d
+                else:
+                    int a = anyo_valido(texto)
+                    if a != 0 and s.anyo == 0:
+                        s.anyo = a
+    return s
+
+# cancion: elemento → DTO de pista del catálogo.
+class PistaCatalogo:
+    string id
+    string title
+    string album_id
+    string album_titulo
+    List<string> artista_ids
+    List<string> artista_nombres
+    int duration_ms
+    int popularity
+    string cover_url
+    int track_number
+    int anyo
+
+    PistaCatalogo():
+        this.id = ""
+        this.title = ""
+        this.album_id = ""
+        this.album_titulo = ""
+        this.artista_ids = []
+        this.artista_nombres = []
+        this.duration_ms = 0
+        this.popularity = 0
+        this.cover_url = ""
+        this.track_number = 0
+        this.anyo = 0
+
+fn PistaCatalogo ytm_cancion(Json elemento):
+    PistaCatalogo p = PistaCatalogo()
+    p.id = video_id_de(elemento)
+    p.title = columna(elemento, 0).trim()
+    if p.id == "" or p.title == "":
+        return p
+    Subtitulo s = leer_subtitulo(elemento, 1, 2)
+    p.album_id = s.album_id
+    p.album_titulo = s.album_titulo
+    p.artista_ids = s.artista_ids
+    p.artista_nombres = s.artista_nombres
+    p.duration_ms = s.duracion_ms
+    p.anyo = s.anyo
+    p.popularity = popularidad_de(reproducciones_de(columna(elemento, 2)))
+    if p.popularity == 0:
+        p.popularity = popularidad_de(reproducciones_de(columna(elemento, 1)))
+    return p
+
+# ─── Persistencia del catálogo ───────────────────────────────────────────────
+
+# Duración mínima: una pista de catálogo sin duración no se puede validar al
+# emparejar, pero se guarda igual (el fichero descargado dirá la real).
+fn void guardar_pista(PistaCatalogo p):
+    if p.id == "" or p.title == "":
+        return
+    string artistas_display = ""
+    for int i in range(0, len(p.artista_nombres)):
+        if i > 0:
+            artistas_display = artistas_display + ", "
+        artistas_display = artistas_display + p.artista_nombres[i]
+
+    if p.album_id != "":
+        await sqlite.exec("""
+            insert into albums(id, title, title_norm, release_date, total_tracks, cover_url, metadata_at)
+            values(?, ?, ?, ?, null, ?, unixepoch())
+            on conflict(id) do update set title = excluded.title, cover_url = coalesce(excluded.cover_url, cover_url)
+            """, p.album_id, p.album_titulo, normalizar(p.album_titulo), p.anyo == 0 ? null : str(p.anyo) + "-01-01", p.cover_url == "" ? null : p.cover_url)
+        for int i in range(0, len(p.artista_ids)):
+            await sqlite.exec("insert or ignore into album_artists(album_id, artist_id, position) values(?, ?, ?)", p.album_id, p.artista_ids[i], i)
+
+    for int i in range(0, len(p.artista_ids)):
+        await sqlite.exec("""
+            insert into artists(id, name, name_norm, metadata_at) values(?, ?, ?, unixepoch())
+            on conflict(id) do update set name = excluded.name, name_norm = excluded.name_norm
+            """, p.artista_ids[i], p.artista_nombres[i], normalizar(p.artista_nombres[i]))
+
+    await sqlite.exec("""
+        insert into tracks(id, title, title_norm, album_id, duration_ms, track_number, artist_display, artist_norm, metadata_at)
+        values(?, ?, ?, ?, ?, ?, ?, ?, unixepoch())
+        on conflict(id) do update set
+            title = excluded.title, title_norm = excluded.title_norm,
+            album_id = coalesce(excluded.album_id, tracks.album_id),
+            duration_ms = case when excluded.duration_ms > 0 then excluded.duration_ms else tracks.duration_ms end,
+            track_number = coalesce(excluded.track_number, tracks.track_number),
+            artist_display = case when excluded.artist_display != '' then excluded.artist_display else tracks.artist_display end,
+            artist_norm = case when excluded.artist_norm != '' then excluded.artist_norm else tracks.artist_norm end,
+            metadata_at = unixepoch()
+        """, p.id, p.title, normalizar(p.title), p.album_id == "" ? null : p.album_id,
+        p.duration_ms, p.track_number == 0 ? null : p.track_number,
+        artistas_display, normalizar(artistas_display))
+
+    for int i in range(0, len(p.artista_ids)):
+        await sqlite.exec("insert or ignore into track_artists(track_id, artist_id, position) values(?, ?, ?)", p.id, p.artista_ids[i], i)
+
+# pista_de_reproductor: para un videoId suelto (artista sin id de canal
+# dedicado a música, relecturas del catálogo).
+fn void ytm_pista_de_video(string video_id):
+    List<Json> ex = await sqlite.query("select id from tracks where id = ?", video_id)
+    if len(ex) > 0:
+        return
+    Json? r = ytm_reproductor(video_id)
+    if r == null:
+        return
+    Json d = jget(r, "videoDetails")
+    if d == null:
+        return
+    PistaCatalogo p = PistaCatalogo()
+    p.id = video_id
+    p.title = jstr(d["title"], "").trim()
+    if p.title == "":
+        return
+    p.duration_ms = jint(d["lengthSeconds"], 0) * 1000
+    string canal = jstr(d["channelId"], "")
+    string autor = jstr(d["author"], "")
+    if canal != "" and autor != "":
+        p.artista_ids.add(canal)
+        p.artista_nombres.add(autor)
+    guardar_pista(p)
+
+# ─── Búsqueda de pistas para el frontend ─────────────────────────────────────
+
+# ytm_buscar_pistas: busca en YouTube Music y persiste lo encontrado.
+# Devuelve los ids de pistas creadas/encontradas.
+fn List<string> ytm_buscar_pistas(string consulta, int limite):
+    Json? r = ytm_buscar(consulta, "canciones")
+    if r == null:
+        return []
+    List<Json> elementos = elementos_de_lista(r)
+    List<string> ids = []
+    # Cada guardar_pista() son varios INSERT/UPSERT seguidos; sin transacción
+    # cada uno es su propio commit con fsync — con 20 resultados y un par de
+    # artistas cada uno son cientos de escrituras sueltas. Envolver toda la
+    # tanda en una única transacción no cambia el número de sentencias, pero
+    # convierte esos cientos de fsync en uno solo.
+    await sqlite.begin()
+    for int i in range(0, len(elementos)):
+        if len(ids) >= limite:
+            break
+        PistaCatalogo p = ytm_cancion(elementos[i])
+        if p.id == "" or p.title == "":
+            continue
+        guardar_pista(p)
+        ids.add(p.id)
+    await sqlite.commit()
+    return ids
+
+# resolve_recording del proveedor YtMusic: busca "{artista} {título}" y exige
+# duración compatible (±10 s); una duración desconocida en cualquier lado no
+# descarta.
+fn string ytm_resolver_por_metadatos(string artista, string titulo, int duracion_ms):
+    string consulta = artista + " " + titulo
+    Json? r = ytm_buscar(consulta, "canciones")
+    if r == null:
+        return ""
+    List<Json> elementos = elementos_de_lista(r)
+    for int i in range(0, len(elementos)):
+        PistaCatalogo p = ytm_cancion(elementos[i])
+        if p.id == "" or p.title == "":
+            continue
+        bool compatible = true
+        if duracion_ms > 0 and p.duration_ms > 0:
+            int dif = p.duration_ms - duracion_ms
+            if dif < 0:
+                dif = -dif
+            compatible = dif <= 10000
+        if compatible:
+            return p.id
+    return ""

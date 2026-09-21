@@ -1,0 +1,628 @@
+# api_invoke.lux — Despachador de comandos con el dialecto EXACTO de Localify.
+#
+# El frontend original habla con `invoke(comando, args)` (comandos Tauri) y
+# espera DTOs con formas concretas (TrackRowDto, PlayerStateDto,
+# QueueSnapshotDto…, ver crates/localify-app/src/dto/*.rs). Esta ruta es la
+# frontera: recibe {cmd, args}, ejecuta la misma lógica que mis rutas REST y
+# responde con las formas del original. Así la UI es una copia 1:1 y la
+# única diferencia sigue siendo el transporte.
+
+# ─── DTOs del catálogo ───────────────────────────────────────────────────────
+
+# La consulta canónica añade el artista principal y la disponibilidad (con el
+# job de descarga) tal y como TrackRowDto los espera.
+fn string sql_pista_dto():
+    return """
+    select t.id, t.title, t.album_id, al.title as album_title, t.duration_ms,
+           t.track_number, t.disc_number, t.explicit, t.artist_display, t.added_at,
+           case when f.track_id is null then 0 else 1 end as favorite,
+           coalesce(hp.cnt, 0) as play_count,
+           (select ta.artist_id from track_artists ta where ta.track_id = t.id order by ta.position limit 1) as artist_id,
+           case
+               when af.track_id is not null then 'local'
+               when dj.state = 'downloading' then 'downloading'
+               when dj.state = 'failed' then 'failed'
+               when dj.state is not null then 'absent'
+               else 'absent'
+           end as avail_kind,
+           af.format as avail_format,
+           af.size_bytes as avail_bytes,
+           case when dj.bytes_total is not null and dj.bytes_total > 0 and dj.bytes_done is not null
+                then cast(dj.bytes_done as real) / dj.bytes_total else 0 end as avail_progress,
+           coalesce(dj.last_error, 'download.failed') as avail_reason,
+           coalesce(dj.attempts, 0) as avail_attempts
+    from tracks t
+    left join albums al on al.id = t.album_id
+    left join audio_files af on af.track_id = t.id
+    left join favorites f on f.track_id = t.id
+    left join download_jobs dj on dj.track_id = t.id
+    left join (select track_id, count(*) as cnt from play_history group by track_id) hp on hp.track_id = t.id
+    """ + " "
+
+# availability: AvailabilityDto con tag "kind" (common.rs).
+fn Json disponibilidad_dto(Json f):
+    string tipo = jstr(f["avail_kind"], "absent")
+    if tipo == "local":
+        return { "kind": "local", "format": jstr(f["avail_format"], "opus"), "bytes": jint(f["avail_bytes"], 0) }
+    if tipo == "downloading":
+        double p = jdbl(f["avail_progress"], 0.0)
+        return { "kind": "downloading", "progress": p, "playable": false }
+    if tipo == "failed":
+        return { "kind": "failed", "reasonKey": jstr(f["avail_reason"], "download.failed"), "attempts": jint(f["avail_attempts"], 0) }
+    return { "kind": "absent" }
+
+# TrackRowDto (catalog.rs): id, title, artistDisplay, artistId, albumId,
+# albumTitle, durationMs, availability, isFavorite, explicit, addedAt.
+fn Json track_row_dto(Json f):
+    string anyadido = ""
+    if jget(f, "added_at") != null:
+        anyadido = jstr(f["added_at"], "")
+    Dict<string, Json> d = {
+        "id": jstr(f["id"], ""),
+        "title": jstr(f["title"], ""),
+        "artistDisplay": jstr(f["artist_display"], ""),
+        "artistId": f["artist_id"],
+        "albumId": f["album_id"],
+        "albumTitle": f["album_title"],
+        "durationMs": jint(f["duration_ms"], 0),
+        "availability": disponibilidad_dto(f),
+        "isFavorite": jint(f["favorite"], 0) == 1,
+        "explicit": jint(f["explicit"], 0) == 1,
+        "addedAt": f["added_at"]
+    }
+    return d
+
+fn Json? track_row_por_id(string id):
+    List<Json> filas = await sqlite.query(sql_pista_dto() + " where t.id = ?", id)
+    if len(filas) == 0:
+        return null
+    return track_row_dto(filas[0])
+
+# Batching de track_row_por_id: una sola consulta "in (...)" en vez de un
+# round trip por pista. cola_dto() reconstruía su ventana pista a pista en
+# cada acción del reproductor y cada refresco del panel de cola.
+fn Dict<string, Json> track_rows_por_ids(List<string> ids):
+    Dict<string, Json> out = {}
+    if len(ids) == 0:
+        return out
+    List<Json> filas = await sqlite.query(sql_pista_dto() + " where t.id in " + ids_sql_lista(ids))
+    for int i in range(0, len(filas)):
+        out[jstr(filas[i]["id"], "")] = track_row_dto(filas[i])
+    return out
+
+fn List<Json> track_rows_de(List<Json> filas):
+    List<Json> out = []
+    for int i in range(0, len(filas)):
+        out.add(track_row_dto(filas[i]))
+    return out
+
+# AlbumRowDto: id, title, artistDisplay, year, cover, trackCount, localCount.
+# El identificador de portada lo resuelve el frontend contra /api/cover/.
+fn Json album_row_dto(Json a):
+    string anyo = jstr(a["release_date"], "")
+    if len(anyo) >= 4:
+        anyo = anyo.slice(0, 4)
+    else:
+        anyo = ""
+    return {
+        "id": jstr(a["id"], ""),
+        "title": jstr(a["title"], ""),
+        "artistDisplay": jstr(a["artist_display"], ""),
+        "year": anyo == "" ? null : int(anyo),
+        "cover": jstr(a["id"], "") == "" ? null : "albums/" + jstr(a["id"], ""),
+        "trackCount": jint(a["n_tracks"], 0),
+        "localCount": jint(a["n_disponibles"], 0)
+    }
+
+# ArtistRowDto: id, name, imageUrl, trackCount, localTrackCount.
+fn Json artist_row_dto(Json a):
+    return {
+        "id": jstr(a["id"], ""),
+        "name": jstr(a["name"], ""),
+        "imageUrl": null,
+        "trackCount": jint(a["n_tracks"], 0),
+        "localTrackCount": jint(a["n_disponibles"], 0)
+    }
+
+# ─── DTOs del reproductor ────────────────────────────────────────────────────
+
+fn Json contexto_dto():
+    EstadoCola e = leer_estado()
+    Json? ctx = parse_json(e.context)
+    if ctx == null:
+        return null
+    return ctx
+
+# PlayerStateDto: track, status, positionMs, durationMs, bufferedMs, volume,
+# repeat, shuffle, context.
+fn Json estado_dto():
+    EstadoCola e = leer_estado()
+    Json? pista = track_row_por_id(e.track_id)
+    int duracion = pista == null ? 0 : jint(pista["durationMs"], 0)
+    Json? ctx = parse_json(e.context)
+    return {
+        "track": pista,
+        "status": e.status,
+        "positionMs": e.position_ms,
+        "durationMs": duracion,
+        "bufferedMs": pista != null and e.status == "playing" ? duracion : 0,
+        "volume": e.volume,
+        "repeat": e.repeat_mode,
+        "shuffle": e.shuffle,
+        "context": ctx
+    }
+
+# QueueSnapshotDto: revision, current {entryId, track}, userQueue,
+# contextQueue (ventana), context, contextLabelKey.
+fn string etiqueta_contexto(Json? ctx):
+    if ctx == null:
+        return null
+    string kind = jstr(ctx["kind"], "single")
+    if kind == "album":
+        return "context.album"
+    if kind == "playlist":
+        return "context.playlist"
+    if kind == "artist":
+        return "context.artist"
+    if kind == "liked":
+        return "context.liked"
+    if kind == "library":
+        return "context.library"
+    if kind == "search":
+        return "context.search"
+    if kind == "recommendation":
+        return "context.recommendation"
+    return "context.single"
+
+fn Json cola_dto():
+    EstadoCola e = leer_estado()
+    int VENTANA = 50
+    int desde = e.queue_index + 1
+    int hasta = desde + VENTANA
+    if hasta > len(e.context_queue):
+        hasta = len(e.context_queue)
+
+    List<string> ids = []
+    for int i in range(desde, hasta):
+        ids.add(pista_en_orden(e, i))
+    for int i in range(0, len(e.user_queue)):
+        ids.add(e.user_queue[i].trackId)
+    if e.track_id != "":
+        ids.add(e.track_id)
+    Dict<string, Json> filas = await track_rows_por_ids(ids)
+
+    List<Json> contexto = []
+    for int i in range(desde, hasta):
+        Json? p = filas.get(pista_en_orden(e, i))
+        if p != null:
+            contexto.add({ "entryId": "ctx" + str(i), "track": p, "addedAt": ahora() })
+    List<Json> user = []
+    for int i in range(0, len(e.user_queue)):
+        Json? p = filas.get(e.user_queue[i].trackId)
+        if p != null:
+            user.add({ "entryId": e.user_queue[i].entryId, "track": p, "addedAt": ahora() })
+    Json? actual = filas.get(e.track_id)
+    Json current = null
+    if actual != null:
+        current = { "entryId": "current", "track": actual, "addedAt": ahora() }
+    Json? ctx = parse_json(e.context)
+    return {
+        "revision": e.revision,
+        "current": current,
+        "userQueue": user,
+        "contextQueue": contexto,
+        "context": ctx,
+        "contextLabelKey": etiqueta_contexto(ctx)
+    }
+
+# ─── Utilidades del despachador ──────────────────────────────────────────────
+
+fn Json error_api(string codigo, string clave):
+    return { "code": codigo, "messageKey": clave, "params": [], "actionable": false, "retryable": false }
+
+fn string arg_str(Json args, string clave, string def):
+    string v = jstr(jget(args, clave), "")
+    if v == "":
+        return def
+    return v
+
+fn List<string> arg_ids(Json args, string clave):
+    List<string> out = []
+    List<Json> brutas = jlist(jget(args, clave))
+    for int i in range(0, len(brutas)):
+        out.add(jstr(brutas[i], ""))
+    return out
+
+# Contexto de reproducción: PlaybackContextDto con tag "kind".
+fn Json contexto_desde_args(Json args, string track_id):
+    Json ctx = jget(args, "context")
+    if ctx == null:
+        return { "kind": "single" }
+    string kind = jstr(ctx["kind"], "single")
+    if kind == "album" or kind == "playlist" or kind == "artist":
+        return { "kind": kind, "id": jstr(ctx["id"], "") }
+    if kind == "search":
+        return { "kind": "search", "query": jstr(ctx["query"], ""), "trackIds": ctx["trackIds"] }
+    if kind == "recommendation":
+        return { "kind": "recommendation", "seedTrackId": jstr(ctx["seedTrackId"], ""), "trackIds": ctx["trackIds"] }
+    return { "kind": kind }
+
+# El contexto que llega del frontend es el DTO; lo traduzco a mi almacenamiento
+# interno ({kind, id}) reconstruyendo la lista de pistas del contexto.
+fn List<string> pistas_de_contexto_dto(Json ctx, string track_id):
+    string kind = jstr(ctx["kind"], "single")
+    string id = jstr(ctx["id"], "")
+    if kind == "album":
+        List<Json> f = await sqlite.query("select t.id as id from tracks t where t.album_id = ? order by t.disc_number, t.track_number, t.id", id)
+        return ids_de_filas(f)
+    if kind == "playlist":
+        List<Json> f = await sqlite.query("select pi.track_id as id from playlist_items pi where pi.playlist_id = ? order by pi.position", id)
+        return ids_de_filas(f)
+    if kind == "artist":
+        List<Json> f = await sqlite.query("""
+            select t.id as id from tracks t
+            join track_artists ta on ta.track_id = t.id and ta.artist_id = ?
+            order by t.title_norm asc
+            """, id)
+        return ids_de_filas(f)
+    if kind == "liked":
+        List<Json> f = await sqlite.query("select track_id as id from favorites order by added_at desc")
+        return ids_de_filas(f)
+    if kind == "library":
+        List<Json> f = await sqlite.query("select id from tracks order by added_at desc, id desc")
+        return ids_de_filas(f)
+    if kind == "search" or kind == "recommendation":
+        return arg_ids(ctx, "trackIds")
+    return []
+
+# Marca de cambio de biblioteca/playlists/ajustes para el bombeo de eventos.
+fn void tocar_biblioteca():
+    ajuste_poner("stamp_library", str(ahora()) + hash.random_hex(2))
+
+fn void tocar_playlists(string kind = "other"):
+    ajuste_poner("stamp_playlists", str(ahora()) + hash.random_hex(2))
+    ajuste_poner("playlists_change_kind", kind)
+
+fn void tocar_ajustes():
+    ajuste_poner("stamp_settings", str(ahora()) + hash.random_hex(2))
+
+# ─── El despachador ──────────────────────────────────────────────────────────
+
+class PeticionInvoke:
+    string? cmd
+    string? args
+
+post endpoint("/api/invoke", PeticionInvoke p):
+    db_init()
+    string cmd = p.cmd == null ? "" : p.cmd
+    # los args llegan como string JSON: los campos de clase no admiten Json,
+    # y así el transporte puede mandar cualquier forma de argumentos
+    Json args = parse_json(p.args == null ? "{}" : p.args)
+    if args == null:
+        args = {}
+    return await despachar(cmd, args)
+
+fn Json despachar(string cmd, Json args):
+    # ── reproductor ──
+    if cmd == "player_play_track":
+        return await cmd_play_track(args)
+    if cmd == "player_toggle":
+        mutar_estado("toggle", "", "", jint(jget(args, "__posMs"), 0))
+        return estado_dto()
+    if cmd == "player_pause":
+        mutar_estado("pause", "", "", jint(jget(args, "__posMs"), 0))
+        return estado_dto()
+    if cmd == "player_resume":
+        mutar_estado("resume", "", "", 0)
+        return estado_dto()
+    if cmd == "player_next":
+        mutar_estado("avanzar", "skip", "", jint(jget(args, "__posMs"), 0))
+        EstadoCola e2 = leer_estado()
+        if e2.track_id != "":
+            asegurar_descarga(e2.track_id, "immediate")
+        return estado_dto()
+    if cmd == "player_previous":
+        int ms = jint(jget(args, "__posMs"), 0)
+        if ms > 3000:
+            mutar_estado("seek", "", "", 0)
+        else:
+            mutar_estado("retroceder", "", "", 0)
+            EstadoCola e3 = leer_estado()
+            if e3.track_id != "":
+                asegurar_descarga(e3.track_id, "immediate")
+        return estado_dto()
+    if cmd == "player_seek":
+        mutar_estado("seek", "", "", jint(jget(args, "positionMs"), 0))
+        return estado_dto()
+    if cmd == "player_set_volume":
+        double v = jdbl(jget(args, "volume"), 1.0)
+        mutar_estado("volume", "", "", 0, v)
+        return null
+    if cmd == "player_set_repeat":
+        mutar_estado("repeat", arg_str(args, "mode", "off"), "", 0)
+        return estado_dto()
+    if cmd == "player_set_shuffle":
+        mutar_estado("shuffle", jint(jget(args, "enabled"), 0) == 1 ? "1" : "0", "", 0)
+        return estado_dto()
+    if cmd == "player_get_state":
+        return estado_dto()
+
+    # ── cola ──
+    if cmd == "queue_get":
+        return cola_dto()
+    if cmd == "queue_add_next":
+        cola_annadir_siguientes(arg_ids(args, "trackIds"))
+        return cola_dto()
+    if cmd == "queue_add_last":
+        cola_annadir_al_final(arg_ids(args, "trackIds"))
+        return cola_dto()
+    if cmd == "queue_remove":
+        mutar_estado("quitar_entry", arg_str(args, "entryId", ""), "", 0)
+        return cola_dto()
+    if cmd == "queue_move":
+        mutar_estado("mover_entry", arg_str(args, "entryId", ""), "", jint(jget(args, "toIndex"), 0))
+        return cola_dto()
+    if cmd == "queue_clear_user":
+        mutar_estado("clear_user_queue", "", "", 0)
+        return cola_dto()
+    if cmd == "queue_jump_to":
+        mutar_estado("saltar_entry", arg_str(args, "entryId", ""), "", 0)
+        EstadoCola e4 = leer_estado()
+        if e4.track_id != "":
+            asegurar_descarga(e4.track_id, "immediate")
+        return estado_dto()
+
+    # ── biblioteca ──
+    if cmd == "library_tracks":
+        return await cmd_library_tracks(args)
+    if cmd == "library_albums":
+        return await cmd_library_albums(args)
+    if cmd == "library_artists":
+        return await cmd_library_artists(args)
+    if cmd == "library_favorites":
+        int limite = limite_pagina(args)
+        List<Json> filas = await sqlite.query(sql_pista_dto() + " where f.track_id is not null order by f.added_at desc limit ? offset ?", limite, offset_pagina(args))
+        List<Json> total = await sqlite.query("select count(*) as n from favorites")
+        return { "items": track_rows_de(filas), "total": jint(total[0]["n"], 0), "nextCursor": null }
+    if cmd == "library_set_favorite":
+        string tid = arg_str(args, "trackId", "")
+        if jint(jget(args, "enabled"), 0) == 1:
+            await sqlite.exec("insert or ignore into favorites(track_id) values(?)", tid)
+        else:
+            await sqlite.exec("delete from favorites where track_id = ?", tid)
+        return null
+    if cmd == "library_recent":
+        List<Json> ids = await sqlite.query("""
+            select h.track_id as id, max(h.played_at) as ultima
+            from play_history h group by h.track_id
+            order by ultima desc limit ?
+            """, jint(jget(args, "limit"), 20))
+        List<Json> out = []
+        for int i in range(0, len(ids)):
+            Json? p = track_row_por_id(jstr(ids[i]["id"], ""))
+            if p != null:
+                out.add(p)
+        return out
+    if cmd == "library_availability":
+        List<Json> out = []
+        List<string> ids = arg_ids(args, "trackIds")
+        for int i in range(0, len(ids)):
+            Json? p = track_row_por_id(ids[i])
+            Json disp = p == null ? { "kind": "absent" } : p["availability"]
+            List<Json> par = [ids[i], disp]
+            out.add(par)
+        return out
+    if cmd == "library_stats":
+        return await cmd_library_stats()
+    if cmd == "library_rescan":
+        int recuperados = await cmd_rescan()
+        tocar_biblioteca()
+        return "rescan-" + str(ahora())
+    if cmd == "library_delete_download":
+        string tid = arg_str(args, "trackId", "")
+        List<Json> f = await sqlite.query("select rel_path from audio_files where track_id = ?", tid)
+        if len(f) > 0:
+            os.remove_file(ruta_audio_abs(jstr(f[0]["rel_path"], "")))
+        await sqlite.exec("delete from audio_files where track_id = ?", tid)
+        await sqlite.exec("delete from download_jobs where track_id = ?", tid)
+        tocar_biblioteca()
+        return null
+    if cmd == "library_wipe_downloads":
+        List<Json> n = await sqlite.query("select count(*) as n from audio_files")
+        await sqlite.exec("delete from audio_files")
+        await sqlite.exec("delete from download_jobs")
+        await sqlite.exec("delete from play_history")
+        await sqlite.exec("update player_state set track_id = null, position_ms = 0, status = 'stopped', revision = revision + 1 where id = 1")
+        string audio_dir = os.path_join(biblioteca_raiz(), "audio")
+        List<string>? entradas = os.list_dir(audio_dir)
+        if entradas != null:
+            for int i in range(0, len(entradas)):
+                os.remove_dir(os.path_join(audio_dir, entradas[i]), true)
+        tocar_biblioteca()
+        return jint(n[0]["n"], 0)
+    if cmd == "library_retry_failed":
+        int tocado = await sqlite.exec("update download_jobs set state = 'queued', attempts = 0, last_error = null, updated_at = unixepoch() where state = 'failed'")
+        return tocado
+    if cmd == "album_detail":
+        return await cmd_album_detail(arg_str(args, "albumId", ""))
+    if cmd == "artist_detail":
+        return await cmd_artist_detail(arg_str(args, "artistId", ""))
+    if cmd == "library_delete_track":
+        string tid = arg_str(args, "trackId", "")
+        List<Json> f = await sqlite.query("select rel_path from audio_files where track_id = ?", tid)
+        if len(f) > 0:
+            os.remove_file(ruta_audio_abs(jstr(f[0]["rel_path"], "")))
+        await sqlite.exec("delete from tracks where id = ?", tid)
+        tocar_biblioteca()
+        return null
+    if cmd == "library_reset_metadata":
+        string tid = arg_str(args, "trackId", "")
+        await sqlite.exec("update tracks set metadata_locked = 0, metadata_at = null where id = ?", tid)
+        return null
+    if cmd == "library_search_candidates":
+        return await cmd_buscar_candidatos(args)
+    if cmd == "library_assign_metadata":
+        return await cmd_asignar_metadata(args)
+    if cmd == "library_import_files":
+        return await cmd_importar_ficheros(args)
+
+    # ── búsqueda e inicio ──
+    if cmd == "search_query":
+        return await cmd_search_query(args)
+    if cmd == "search_suggest":
+        string pref = normalizar(arg_str(args, "prefix", ""))
+        if pref == "":
+            return []
+        string patron = pref + "%"
+        List<Json> filas = await sqlite.query("""
+            select distinct t.title as texto from tracks t where t.title_norm like ? escape '\\'
+            union select ar.name from artists ar where ar.name_norm like ? escape '\\'
+            union select al.title from albums al where al.title_norm like ? escape '\\'
+            limit ?
+            """, patron, patron, patron, jint(jget(args, "limit"), 8))
+        List<Json> out = []
+        for int i in range(0, len(filas)):
+            out.add(jstr(filas[i]["texto"], ""))
+        return out
+    if cmd == "home_sections":
+        return await cmd_home()
+    if cmd == "reco_similar_to_track":
+        return await cmd_reco(arg_str(args, "trackId", ""), jint(jget(args, "limit"), 8))
+
+    # ── playlists ──
+    if cmd == "playlist_list":
+        return await cmd_playlist_list()
+    if cmd == "playlist_create":
+        string nombre = arg_str(args, "name", "").trim()
+        if nombre == "":
+            return error_api("INVALID", "error.invalid").status(400)
+        string pid = nuevo_id()
+        List<Json> f = await sqlite.query("select coalesce(max(position), 0) as p from playlists")
+        await sqlite.exec("insert into playlists(id, name, name_norm, position, created_at, updated_at) values(?, ?, ?, ?, unixepoch(), unixepoch())",
+            pid, nombre, normalizar(nombre), jdbl(f[0]["p"], 0.0) + 1.0)
+        tocar_playlists()
+        return pid
+    if cmd == "playlist_rename":
+        string nombre = arg_str(args, "name", "").trim()
+        await sqlite.exec("update playlists set name = ?, name_norm = ?, updated_at = unixepoch() where id = ?",
+            nombre, normalizar(nombre), arg_str(args, "playlistId", ""))
+        tocar_playlists()
+        return null
+    if cmd == "playlist_delete":
+        await sqlite.exec("delete from playlists where id = ?", arg_str(args, "playlistId", ""))
+        tocar_playlists()
+        return null
+    if cmd == "playlist_detail":
+        return await cmd_playlist_detail(arg_str(args, "playlistId", ""))
+    if cmd == "playlist_add_tracks":
+        await cmd_playlist_add(args)
+        tocar_playlists()
+        return null
+    if cmd == "playlist_remove_entries":
+        List<string> entries = arg_ids(args, "entryIds")
+        string plid = arg_str(args, "playlistId", "")
+        for int i in range(0, len(entries)):
+            await sqlite.exec("delete from playlist_items where id = ? and playlist_id = ?", entries[i], plid)
+        await sqlite.exec("update playlists set updated_at = unixepoch() where id = ?", plid)
+        tocar_playlists()
+        return null
+    if cmd == "playlist_reorder":
+        await cmd_playlist_reorder(arg_str(args, "playlistId", ""), arg_str(args, "entryId", ""), jint(jget(args, "toIndex"), 0))
+        tocar_playlists()
+        return null
+    if cmd == "playlist_reorder_list":
+        await cmd_playlist_reorder_lista(arg_str(args, "playlistId", ""), jint(jget(args, "toIndex"), 0))
+        tocar_playlists("reordered")
+        return null
+    if cmd == "playlist_set_description":
+        await sqlite.exec("update playlists set description = ?, updated_at = unixepoch() where id = ?",
+            jget(args, "description"), arg_str(args, "playlistId", ""))
+        return null
+    if cmd == "playlist_import":
+        Json r = await cmd_playlist_import(arg_str(args, "urlOrId", ""))
+        tocar_playlists()
+        return r
+    if cmd == "playlist_set_cover":
+        # el frontend pasa la ruta elegida en el diálogo nativo
+        string ruta = arg_str(args, "imagePath", "")
+        string plid = arg_str(args, "playlistId", "")
+        if ruta != "" and os.is_file(ruta):
+            garantizar_biblioteca()
+            string ext = "jpg"
+            int punto = ultimo_punto(ruta)
+            if punto > 0:
+                ext = ruta.slice(punto + 1)
+            string destino = os.path_join(covers_dir(), "playlist-" + plid + "." + ext)
+            await os.copy_file(ruta, destino, true)
+            await sqlite.exec("update playlists set cover_path = ?, updated_at = unixepoch() where id = ?",
+                "covers/playlist-" + plid + "." + ext, plid)
+        tocar_playlists()
+        return null
+    if cmd == "playlist_clear_cover":
+        string plid2 = arg_str(args, "playlistId", "")
+        await sqlite.exec("update playlists set cover_path = null, updated_at = unixepoch() where id = ?", plid2)
+        tocar_playlists()
+        return null
+    if cmd == "playlist_suggestions":
+        return await cmd_playlist_sugerencias(arg_str(args, "playlistId", ""), jint(jget(args, "limit"), 10))
+
+    # ── letras, ajustes, estadísticas, sistema ──
+    if cmd == "lyrics_get":
+        return await cmd_lyrics(arg_str(args, "trackId", ""))
+    if cmd == "settings_get":
+        return await cmd_settings_get()
+    if cmd == "settings_patch":
+        return await cmd_settings_patch(jget(args, "patch"))
+    if cmd == "settings_audio_devices":
+        return [ { "id": "default", "name": "Predeterminado", "isDefault": true } ]
+    if cmd == "settings_eq_profiles":
+        return perfiles_eq()
+    if cmd == "settings_preview_eq":
+        return null
+    if cmd == "settings_set_spotify_credentials":
+        ajuste_poner("spotify_client_id", arg_str(args, "clientId", ""))
+        ajuste_poner("spotify_client_secret", arg_str(args, "clientSecret", ""))
+        tocar_ajustes()
+        return null
+    if cmd == "settings_test_spotify":
+        return { "status": "notConfigured" }
+    if cmd == "settings_open_external":
+        return null
+    if cmd == "settings_test_cookies":
+        return await cmd_probar_cookies()
+    if cmd == "settings_update_ytdlp":
+        Json r = await os.run("yt-dlp", ["-U"])
+        return { "ok": jint(r["status"], 1) == 0, "message": (jstr(r["stdout"], "") + jstr(r["stderr"], "")).trim() }
+    if cmd == "settings_change_library_path":
+        string ruta = arg_str(args, "path", "")
+        bool mover = jint(jget(args, "moveExisting"), 0) == 1
+        if ruta != "":
+            string raiz_vieja = biblioteca_raiz()
+            os.make_dir(os.path_join(ruta, "audio"))
+            os.make_dir(os.path_join(ruta, "covers"))
+            os.make_dir(os.path_join(ruta, ".tmp"))
+            if mover and raiz_vieja != "" and raiz_vieja != ruta:
+                await mover_biblioteca(raiz_vieja, ruta)
+            ajuste_poner("library_path", ruta)
+        tocar_ajustes()
+        return "mig-" + str(ahora())
+    if cmd == "stats_get":
+        return await cmd_stats()
+    if cmd == "api_version":
+        return "1.0.0-lux"
+    if cmd == "updates_open_release_page":
+        return null
+
+    return error_api("INVALID", "error.invalid").status(400)
+
+get endpoint("/api/debug/simple"):
+    List<Json> filas = await sqlite.query(sql_pista_dto() + " limit 3")
+    return filas
+
+class PeticionLog:
+    string? tipo
+    string? detalle
+
+post endpoint("/api/client-log", PeticionLog p):
+    log.error("[ui/" + (p.tipo == null ? "?" : p.tipo) + "] " + (p.detalle == null ? "" : p.detalle))
+    return null

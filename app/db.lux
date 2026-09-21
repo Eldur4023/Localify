@@ -1,0 +1,352 @@
+# db.lux — Esquema y utilidades de base de datos.
+#
+# Puerto adaptado de las migraciones V1-V8 de Localify (crates/localify-db/
+# migrations). Sin FTS5 en esta primera fase: la búsqueda usa LIKE sobre las
+# columnas *_norm, suficiente para los tamaños de biblioteca de este port.
+# Las migraciones son perezosas (no hay gancho de arranque en LuxScript):
+# db_init() lo llama la primera petición que llegue, con CREATE TABLE IF NOT
+# EXISTS para que las carreras entre las 16 hebras del servidor sean inocuas.
+
+# Los imports de módulos son a nivel de proyecto y viven en app.lux.
+
+fn void db_init():
+    if state.get("db_ready", "") == "1":
+        return
+    # ./data no forma parte de los recursos embebidos: hay que crearlo antes
+    # de que SQLite pueda abrir el fichero (también en el binario empaquetado)
+    os.make_dir("data")
+    if state.get("db_init_running", "") == "1":
+        # otra hebra está creando el esquema: esperar en vez de consultar
+        # tablas que aún no existen (el servidor corre 16 hebras y la UI
+        # dispara varias peticiones en el primer arranque)
+        for int i in range(0, 200):
+            await sleep(50)
+            if state.get("db_ready", "") == "1":
+                return
+        return
+    state.set("db_init_running", "1")
+
+    await sqlite.exec("""
+        create table if not exists artists(
+            id text primary key,
+            name text not null,
+            name_norm text not null default '',
+            image_url text,
+            metadata_at integer,
+            created_at integer not null default (unixepoch())
+        )
+    """)
+    await sqlite.exec("create index if not exists idx_artists_name_norm on artists(name_norm)")
+
+    await sqlite.exec("""
+        create table if not exists albums(
+            id text primary key,
+            title text not null,
+            title_norm text not null default '',
+            album_type text not null default 'album' check(album_type in ('album','single','compilation')),
+            release_date text,
+            total_tracks integer,
+            cover_url text,
+            label text,
+            metadata_at integer,
+            created_at integer not null default (unixepoch())
+        )
+    """)
+    await sqlite.exec("create index if not exists idx_albums_title_norm on albums(title_norm)")
+
+    await sqlite.exec("""
+        create table if not exists tracks(
+            id text primary key,
+            title text not null,
+            title_norm text not null default '',
+            album_id text references albums(id) on delete set null,
+            duration_ms integer not null check(duration_ms > 0),
+            track_number integer,
+            disc_number integer default 1,
+            explicit integer not null default 0 check(explicit in (0,1)),
+            isrc text,
+            artist_display text not null default '',
+            artist_norm text not null default '',
+            metadata_locked integer not null default 0,
+            metadata_at integer,
+            added_at integer not null default (unixepoch())
+        )
+    """)
+    await sqlite.exec("create index if not exists idx_tracks_album on tracks(album_id, disc_number, track_number)")
+    await sqlite.exec("create index if not exists idx_tracks_added on tracks(added_at desc, id desc)")
+    await sqlite.exec("create index if not exists idx_tracks_isrc on tracks(isrc) where isrc is not null")
+    await sqlite.exec("create index if not exists idx_tracks_title_n on tracks(title_norm)")
+
+    await sqlite.exec("""
+        create table if not exists track_artists(
+            track_id text not null references tracks(id) on delete cascade,
+            artist_id text not null references artists(id) on delete cascade,
+            position integer not null default 0,
+            primary key(track_id, artist_id)
+        )
+    """)
+    await sqlite.exec("create index if not exists idx_track_artists_artist on track_artists(artist_id)")
+
+    await sqlite.exec("""
+        create table if not exists album_artists(
+            album_id text not null references albums(id) on delete cascade,
+            artist_id text not null references artists(id) on delete cascade,
+            position integer not null default 0,
+            primary key(album_id, artist_id)
+        )
+    """)
+    await sqlite.exec("create index if not exists idx_album_artists_artist on album_artists(artist_id)")
+
+    await sqlite.exec("""
+        create table if not exists audio_files(
+            track_id text primary key references tracks(id) on delete cascade,
+            rel_path text not null unique,
+            format text not null,
+            codec text,
+            bitrate_kbps integer,
+            sample_rate integer,
+            channels integer,
+            size_bytes integer,
+            duration_ms real,
+            source text not null default 'youtube' check(source in ('youtube','imported')),
+            youtube_id text,
+            verified_at integer,
+            created_at integer not null default (unixepoch())
+        )
+    """)
+    await sqlite.exec("create index if not exists idx_audio_files_created on audio_files(created_at desc, track_id desc)")
+
+    await sqlite.exec("""
+        create table if not exists youtube_matches(
+            id text primary key,
+            track_id text not null references tracks(id) on delete cascade,
+            video_id text not null,
+            title text,
+            channel text,
+            duration_s real,
+            view_count integer,
+            from_music integer not null default 0 check(from_music in (0,1)),
+            score real,
+            confidence text check(confidence in ('high','medium','low')),
+            breakdown text,
+            rejected integer not null default 0 check(rejected in (0,1)),
+            created_at integer not null default (unixepoch()),
+            unique(track_id, video_id)
+        )
+    """)
+    await sqlite.exec("create index if not exists idx_ytm_track on youtube_matches(track_id, rejected, score desc)")
+
+    await sqlite.exec("""
+        create table if not exists download_jobs(
+            track_id text primary key references tracks(id) on delete cascade,
+            state text not null check(state in ('queued','matching','downloading','finalizing','done','failed')),
+            priority text not null default 'prefetch' check(priority in ('immediate','prefetch')),
+            video_id text,
+            tmp_path text,
+            bytes_done integer not null default 0,
+            bytes_total integer,
+            attempts integer not null default 0,
+            last_error text,
+            started_at integer,
+            updated_at integer not null default (unixepoch())
+        )
+    """)
+    await sqlite.exec("create index if not exists idx_dl_state on download_jobs(state, priority, updated_at)")
+
+    await sqlite.exec("""
+        create table if not exists favorites(
+            track_id text primary key references tracks(id) on delete cascade,
+            added_at integer not null default (unixepoch())
+        )
+    """)
+    await sqlite.exec("create index if not exists idx_favorites_added on favorites(added_at desc, track_id desc)")
+
+    await sqlite.exec("""
+        create table if not exists playlists(
+            id text primary key,
+            name text not null,
+            name_norm text not null default '',
+            description text,
+            cover_path text,
+            source text not null default 'local' check(source in ('local','spotify_import','ytmusic_import')),
+            source_id text,
+            position real not null default 0,
+            created_at integer not null default (unixepoch()),
+            updated_at integer not null default (unixepoch())
+        )
+    """)
+    await sqlite.exec("create index if not exists idx_playlists_updated on playlists(updated_at desc)")
+    await sqlite.exec("create index if not exists idx_playlists_position on playlists(position asc)")
+
+    await sqlite.exec("""
+        create table if not exists playlist_items(
+            id text primary key,
+            playlist_id text not null references playlists(id) on delete cascade,
+            track_id text not null references tracks(id) on delete cascade,
+            position real not null,
+            added_at integer not null default (unixepoch())
+        )
+    """)
+    await sqlite.exec("create index if not exists idx_pli_playlist on playlist_items(playlist_id, position)")
+    await sqlite.exec("create index if not exists idx_pli_track on playlist_items(track_id)")
+
+    await sqlite.exec("""
+        create table if not exists play_history(
+            id text primary key,
+            track_id text not null references tracks(id) on delete cascade,
+            played_at integer not null default (unixepoch()),
+            ms_played integer not null default 0,
+            completed integer not null default 0 check(completed in (0,1)),
+            context text
+        )
+    """)
+    await sqlite.exec("create index if not exists idx_history_track on play_history(track_id, played_at desc)")
+    await sqlite.exec("create index if not exists idx_history_recent on play_history(played_at desc)")
+
+    await sqlite.exec("""
+        create table if not exists settings(
+            key text primary key,
+            value text,
+            updated_at integer not null default (unixepoch())
+        )
+    """)
+
+    await sqlite.exec("""
+        create table if not exists lyrics(
+            track_id text primary key references tracks(id) on delete cascade,
+            synced text,
+            plain text,
+            source text,
+            not_found integer not null default 0 check(not_found in (0,1)),
+            fetched_at integer
+        )
+    """)
+
+    await sqlite.exec("""
+        create table if not exists player_state(
+            id integer primary key check(id = 1),
+            track_id text references tracks(id) on delete set null,
+            position_ms integer not null default 0,
+            volume real not null default 1.0 check(volume between 0.0 and 1.0),
+            status text not null default 'stopped' check(status in ('playing','paused','stopped')),
+            repeat_mode text not null default 'off' check(repeat_mode in ('off','queue','track')),
+            shuffle integer not null default 0 check(shuffle in (0,1)),
+            shuffle_seed integer,
+            context text,
+            context_queue text,
+            play_order text,
+            queue_index integer not null default 0,
+            user_queue text,
+            history text,
+            revision integer not null default 1,
+            updated_at integer not null default (unixepoch())
+        )
+    """)
+    await sqlite.exec("insert or ignore into player_state(id) values(1)")
+
+    await sqlite.exec("insert or replace into settings(key, value, updated_at) values('schema_version', '1', unixepoch())")
+
+    # el flag va al FINAL: antes de esto, cualquier otra hebra está esperando
+    state.set("db_ready", "1")
+    state.set("db_init_running", "0")
+
+# ─── Utilidades ──────────────────────────────────────────────────────────────
+
+# true si el resultado de sqlite trae la clave "error" (los fallos del motor
+# no revientan el handler: llegan como Json).
+fn bool db_error(Json r):
+    if r == null:
+        return false
+    return jget(r, "error") != null
+
+fn string db_err_msg(Json r):
+    return jstr(jget(r, "error"), "error de base de datos")
+
+# Ajuste persistido: get con valor por defecto.
+fn string ajuste(string clave, string por_defecto):
+    List<Json> filas = await sqlite.query("select value from settings where key = ?", clave)
+    if len(filas) == 0:
+        return por_defecto
+    return jstr(filas[0]["value"], por_defecto)
+
+fn void ajuste_poner(string clave, string valor):
+    await sqlite.exec("insert into settings(key, value, updated_at) values(?, ?, unixepoch()) on conflict(key) do update set value = excluded.value, updated_at = unixepoch()", clave, valor)
+
+# Raíz de la biblioteca en disco (audio/, covers/, .tmp/).
+fn string biblioteca_raiz():
+    string r = ajuste("library_path", "")
+    if r != "":
+        return r
+    string home = os.getenv("HOME", "")
+    if home == "":
+        home = os.cwd()
+    return os.path_join(home, "Music", "Localify")
+
+fn void garantizar_biblioteca():
+    string raiz = biblioteca_raiz()
+    os.make_dir(os.path_join(raiz, "audio"))
+    os.make_dir(os.path_join(raiz, "covers"))
+    os.make_dir(os.path_join(raiz, ".tmp"))
+
+fn string ruta_audio_abs(string rel):
+    return os.path_join(biblioteca_raiz(), rel)
+
+# Mueve lo ya descargado (audio/ + covers/) de una raíz de biblioteca a otra.
+# Síncrono a propósito: no hay job en segundo plano que reporte progreso
+# real, así que la petición que llama a esto simplemente tarda lo que tarde.
+# Los ficheros que fallan al moverse se quedan en la raíz vieja sin más
+# consecuencia — la app ya sabe recuperarse de un audio ausente (se
+# redescarga la próxima vez que se reproduce), así que no hace falta abortar
+# ni deshacer lo ya movido.
+fn void mover_biblioteca(string raiz_vieja, string raiz_nueva):
+    List<Json> filas = await sqlite.query("select rel_path from audio_files")
+    for int i in range(0, len(filas)):
+        string rel = jstr(filas[i]["rel_path"], "")
+        if rel == "":
+            continue
+        string origen = os.path_join(raiz_vieja, rel)
+        string destino = os.path_join(raiz_nueva, rel)
+        if os.is_file(origen) and not os.is_file(destino):
+            await os.move(origen, destino)
+    string covers_vieja = os.path_join(raiz_vieja, "covers")
+    List<string>? nombres = os.list_dir(covers_vieja)
+    if nombres != null:
+        for int i in range(0, len(nombres)):
+            string origen = os.path_join(covers_vieja, nombres[i])
+            string destino = os.path_join(raiz_nueva, "covers", nombres[i])
+            if os.is_file(origen) and not os.is_file(destino):
+                await os.move(origen, destino)
+
+# Id nuevo: 22 caracteres hex, la misma forma que los id de pista de Localify.
+fn string nuevo_id():
+    return hash.random_hex(11)
+
+# Marca de tiempo en segundos UNIX.
+fn int ahora():
+    return time.now_seconds()
+
+# Escapa % y _ para LIKE con escape.
+fn string like_escapar(string q):
+    return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+# Literal "in (...)" seguro para una lista de ids embebida en SQL: no hay
+# forma de mandar una lista de tamaño variable como parámetros con '?' (las
+# llamadas nativas tienen aridad fija), así que en vez de concatenar tal
+# cual se descarta cualquier id que no sea [A-Za-z0-9_-] — la única forma que
+# toman los ids de este esquema (hex generado, ids de YouTube, UUIDs de
+# MusicBrainz) — y no queda comilla ni backslash con los que escapar el
+# literal.
+fn string ids_sql_lista(List<string> ids):
+    List<string> limpios = []
+    string alfabeto = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+    for int i in range(0, len(ids)):
+        string id = ids[i]
+        bool ok = len(id) > 0
+        for int k in range(0, len(id)):
+            if alfabeto.index_of(id.slice(k, k + 1)) < 0:
+                ok = false
+        if ok and not limpios.contains("'" + id + "'"):
+            limpios.add("'" + id + "'")
+    if len(limpios) == 0:
+        return "('')"
+    return "(" + limpios.join(",") + ")"

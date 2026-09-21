@@ -1,0 +1,81 @@
+# musicbrainz.lux — Cliente de MusicBrainz.
+#
+# Puerto mínimo de crates/localify-musicbrainz: lo único que esta app usa de
+# él es resolve_recording — el enlace de YouTube que MusicBrainz guarda para
+# muchas grabaciones ("conocido" en el plan de consultas: va por delante
+# incluso del ISRC porque identifica la grabación exacta). Sin autenticación,
+# respetando el límite de 1 petición/segundo.
+
+fn Json? mb_get(string ruta):
+    Dict<string, string> cabeceras = {
+        "User-Agent": "Localify-Lux/1.0 (https://github.com/localify-lux)"
+    }
+    Json? r = null
+    try:
+        r = await http.get("https://musicbrainz.org/ws/2/" + ruta, cabeceras)
+    catch e:
+        return null
+    if r == null:
+        return null
+    if jint(jget(r, "status"), 0) != 200:
+        return null
+    return jget(r, "body")
+
+# mb_resolver: busca la grabación "{artista} {titulo}" y devuelve el videoId
+# de YouTube asociado por sus relaciones de URL, o "".
+fn string mb_resolver(string artista, string titulo):
+    string consulta = ""
+    if artista != "":
+        consulta = artista + " "
+    consulta = consulta + titulo
+    Json? r = mb_get("recording?query=" + http.url_encode(consulta) + "&dismax=true&limit=3&fmt=json")
+    if r == null:
+        return ""
+    List<Json> grabaciones = jlist(jget(r, "recordings"))
+    if len(grabaciones) == 0:
+        return ""
+    await sleep(1100)
+    string mbid = jstr(grabaciones[0]["id"], "")
+    if mbid == "":
+        return ""
+    Json? detalle = mb_get("recording/" + mbid + "?inc=url-rels&fmt=json")
+    if detalle == null:
+        return ""
+    return video_de_relaciones(detalle)
+
+# Extrae el identificador de vídeo de las relaciones de URL.
+fn string video_de_relaciones(Json detalle):
+    List<Json> rels = jlist(jget(detalle, "relations"))
+    for int i in range(0, len(rels)):
+        string url = jstr(jget(jget(rels[i], "url"), "resource"), "")
+        if url == "":
+            continue
+        string vid = video_id_de_url(url)
+        if vid != "":
+            return vid
+    return ""
+
+# video_id_de_url: saca el parámetro v= o el segmento final de youtu.be.
+fn string video_id_de_url(string url):
+    int p = url.index_of("v=")
+    if p >= 0 and (url.contains("youtube.com") or url.contains("youtu.be")):
+        string resto = url.slice(p + 2)
+        string id = ""
+        for int i in range(0, len(resto)):
+            string c = resto.slice(i, i + 1)
+            if c == "&" or c == "#":
+                break
+            id = id + c
+        if len(id) == 11:
+            return id
+    if url.contains("youtu.be/"):
+        string resto = url.slice(url.index_of("youtu.be/") + 9)
+        string id2 = ""
+        for int i in range(0, len(resto)):
+            string c = resto.slice(i, i + 1)
+            if c == "?" or c == "/" or c == "#":
+                break
+            id2 = id2 + c
+        if len(id2) == 11:
+            return id2
+    return ""

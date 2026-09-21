@@ -1,0 +1,756 @@
+# api_comandos.lux — Implementación de los comandos del despachador.
+#
+# Cada cmd_* produce la forma EXACTA del DTO que el frontend original espera
+# (crates/localify-app/src/dto/*.rs). La paginación es PageDto {items, total,
+# nextCursor}; el orden de pistas acepta los criterios del original.
+
+fn int limite_pagina(Json args):
+    Json pagina = jget(args, "page")
+    int limite = jint(jget(pagina, "limit"), 0)
+    if limite <= 0:
+        return 500
+    return limite
+
+fn int offset_pagina(Json args):
+    Json pagina = jget(args, "page")
+    return jint(jget(pagina, "offset"), 0)
+
+# orden_desde_str: los criterios del original.
+fn string orden_dto(string sort):
+    if sort == "titleAsc":
+        return " order by t.title_norm asc, t.id"
+    if sort == "artistAsc":
+        return " order by t.artist_norm asc, t.title_norm asc, t.id"
+    if sort == "albumAsc":
+        return " order by al.title_norm asc, t.disc_number, t.track_number, t.id"
+    if sort == "durationAsc":
+        return " order by t.duration_ms asc, t.id"
+    if sort == "playCountDesc":
+        return " order by play_count desc, t.added_at desc, t.id"
+    if sort == "lastPlayedDesc":
+        return " order by (select max(h.played_at) from play_history h where h.track_id = t.id) desc nulls last, t.id"
+    return " order by t.added_at desc, t.id desc"
+
+# ─── Biblioteca ──────────────────────────────────────────────────────────────
+
+fn Json cmd_library_tracks(Json args):
+    Json filtro = jget(args, "filter")
+    string sort = arg_str(args, "sort", "addedDesc")
+    List<string> condiciones = []
+    List<Json> parametros = []
+    if filtro != null:
+        if jint(jget(filtro, "favoritesOnly"), 0) == 1:
+            condiciones.add(" f.track_id is not null")
+        if jint(jget(filtro, "localOnly"), 0) == 1:
+            condiciones.add(" af.track_id is not null")
+        string album = jstr(jget(filtro, "albumId"), "")
+        if album != "":
+            condiciones.add(" t.album_id = ?")
+            parametros.add(album)
+        string artista = jstr(jget(filtro, "artistId"), "")
+        if artista != "":
+            condiciones.add(" t.id in (select track_id from track_artists where artist_id = ?)")
+            parametros.add(artista)
+        string texto = jstr(jget(filtro, "text"), "")
+        if texto != "":
+            condiciones.add(" t.title_norm like ? escape '\\'")
+            parametros.add("%" + like_escapar(normalizar(texto)) + "%")
+    string where = ""
+    for int i in range(0, len(condiciones)):
+        if i == 0:
+            where = " where"
+        else:
+            where = where + " and"
+        where = where + condiciones[i]
+    string consulta = sql_pista_dto() + where + orden_dto(sort) + " limit ? offset ?"
+    List<Json> parametros2 = []
+    for int i in range(0, len(parametros)):
+        parametros2.add(parametros[i])
+    parametros2.add(limite_pagina(args))
+    parametros2.add(offset_pagina(args))
+    List<Json> filas = []
+    if len(parametros2) == 2:
+        filas = await sqlite.query(consulta, parametros2[0], parametros2[1])
+    elif len(parametros2) == 3:
+        filas = await sqlite.query(consulta, parametros2[0], parametros2[1], parametros2[2])
+    elif len(parametros2) == 4:
+        filas = await sqlite.query(consulta, parametros2[0], parametros2[1], parametros2[2], parametros2[3])
+    else:
+        filas = await sqlite.query(consulta, parametros2[0], parametros2[1], parametros2[2], parametros2[3], parametros2[4])
+    List<Json> total = await sqlite.query("select count(*) as n from tracks")
+    return { "items": track_rows_de(filas), "total": jint(total[0]["n"], 0), "nextCursor": null }
+
+fn Json cmd_library_albums(Json args):
+    int limite = limite_pagina(args)
+    int offset = offset_pagina(args)
+    List<Json> filas = await sqlite.query("""
+        select a.id, a.title, a.release_date, a.album_type,
+               coalesce((select count(*) from tracks t where t.album_id = a.id), 0) as n_tracks,
+               coalesce((select count(*) from tracks t join audio_files af on af.track_id = t.id where t.album_id = a.id), 0) as n_disponibles,
+               coalesce((select ar.name from album_artists aa join artists ar on ar.id = aa.artist_id
+                         where aa.album_id = a.id order by aa.position limit 1), '') as artist_display
+        from albums a
+        order by a.created_at desc limit ? offset ?
+        """, limite, offset)
+    List<Json> out = []
+    for int i in range(0, len(filas)):
+        out.add(album_row_dto(filas[i]))
+    List<Json> total = await sqlite.query("select count(*) as n from albums")
+    return { "items": out, "total": jint(total[0]["n"], 0), "nextCursor": null }
+
+fn Json cmd_library_artists(Json args):
+    int limite = limite_pagina(args)
+    int offset = offset_pagina(args)
+    List<Json> filas = await sqlite.query("""
+        select ar.id, ar.name,
+               coalesce((select count(*) from track_artists ta where ta.artist_id = ar.id), 0) as n_tracks,
+               coalesce((select count(*) from track_artists ta join tracks t on t.id = ta.track_id
+                         join audio_files af on af.track_id = t.id where ta.artist_id = ar.id), 0) as n_disponibles
+        from artists ar
+        order by n_tracks desc, ar.name asc limit ? offset ?
+        """, limite, offset)
+    List<Json> out = []
+    for int i in range(0, len(filas)):
+        out.add(artist_row_dto(filas[i]))
+    List<Json> total = await sqlite.query("select count(*) as n from artists")
+    return { "items": out, "total": jint(total[0]["n"], 0), "nextCursor": null }
+
+fn Json cmd_library_stats():
+    List<Json> pistas = await sqlite.query("select count(*) as n, coalesce(sum(duration_ms), 0) as ms from tracks")
+    List<Json> locales = await sqlite.query("select count(*) as n, coalesce(sum(size_bytes), 0) as bytes from audio_files")
+    List<Json> albumes = await sqlite.query("select count(*) as n from albums")
+    List<Json> artistas = await sqlite.query("select count(*) as n from artists")
+    List<Json> fallidas = await sqlite.query("select count(*) as n from download_jobs where state = 'failed'")
+    return {
+        "trackCount": jint(pistas[0]["n"], 0),
+        "localCount": jint(locales[0]["n"], 0),
+        "albumCount": jint(albumes[0]["n"], 0),
+        "artistCount": jint(artistas[0]["n"], 0),
+        "totalDurationMs": jint(pistas[0]["ms"], 0),
+        "totalBytes": jint(locales[0]["bytes"], 0),
+        "failedCount": jint(fallidas[0]["n"], 0)
+    }
+
+fn int cmd_rescan():
+    garantizar_biblioteca()
+    string raiz_audio = os.path_join(biblioteca_raiz(), "audio")
+    int recuperados = 0
+    List<string>? shards = os.list_dir(raiz_audio)
+    if shards != null:
+        for int i in range(0, len(shards)):
+            List<string>? ficheros = os.list_dir(os.path_join(raiz_audio, shards[i]))
+            if ficheros == null:
+                continue
+            for int k in range(0, len(ficheros)):
+                string nombre = ficheros[k]
+                int punto = nombre.index_of(".")
+                if punto <= 0:
+                    continue
+                string tid = nombre.slice(0, punto)
+                string ext = nombre.slice(punto + 1)
+                List<Json> t = await sqlite.query("select id from tracks where id = ?", tid)
+                if len(t) == 0:
+                    continue
+                List<Json> ya = await sqlite.query("select track_id from audio_files where track_id = ?", tid)
+                if len(ya) > 0:
+                    continue
+                await sqlite.exec("""
+                    insert into audio_files(track_id, rel_path, format, size_bytes, source, verified_at)
+                    values(?, ?, ?, ?, 'youtube', unixepoch())
+                    on conflict(track_id) do nothing
+                    """, tid, "audio/" + shards[i] + "/" + nombre, ext,
+                    os.file_size(os.path_join(raiz_audio, shards[i], nombre)))
+                recuperados = recuperados + 1
+    return recuperados
+
+# ─── Detalles ────────────────────────────────────────────────────────────────
+
+fn Json cmd_album_detail(string id):
+    List<Json> albumes = await sqlite.query("select id, title, release_date, album_type, label from albums where id = ?", id)
+    if len(albumes) == 0:
+        return error_api("NOT_FOUND", "error.not_found").status(404)
+    Json a = albumes[0]
+    List<Json> artistas = await sqlite.query("select ar.id, ar.name from album_artists aa join artists ar on ar.id = aa.artist_id where aa.album_id = ? order by aa.position", id)
+    List<Json> refs = []
+    for int i in range(0, len(artistas)):
+        refs.add({ "id": jstr(artistas[i]["id"], ""), "name": jstr(artistas[i]["name"], "") })
+    List<Json> pistas = await sqlite.query(sql_pista_dto() + " where t.album_id = ? order by t.disc_number, t.track_number, t.id", id)
+    List<Json> rows = track_rows_de(pistas)
+    int suma = 0
+    int locales = 0
+    for int i in range(0, len(rows)):
+        suma = suma + jint(rows[i]["durationMs"], 0)
+        if jstr(rows[i]["availability"]["kind"], "") == "local":
+            locales = locales + 1
+    string tipo = jstr(a["album_type"], "album")
+    if tipo == "single":
+        tipo = "single"
+    elif tipo == "compilation":
+        tipo = "compilation"
+    return {
+        "id": jstr(a["id"], ""),
+        "title": jstr(a["title"], ""),
+        "artists": refs,
+        "albumType": tipo,
+        "releaseDate": jstr(a["release_date"], ""),
+        "cover": "albums/" + id,
+        "label": jstr(a["label"], ""),
+        "totalDurationMs": suma,
+        "localCount": locales,
+        "tracks": rows
+    }
+
+fn Json cmd_artist_detail(string id):
+    List<Json> artistas = await sqlite.query("select id, name from artists where id = ?", id)
+    if len(artistas) == 0:
+        return error_api("NOT_FOUND", "error.not_found").status(404)
+    List<Json> pistas = await sqlite.query(sql_pista_dto() + """
+        join track_artists ta on ta.track_id = t.id and ta.artist_id = ?
+        order by coalesce(hp.cnt, 0) desc, t.title_norm asc
+        """, id)
+    List<Json> top = track_rows_de(pistas)
+    List<Json> albumes = await sqlite.query("""
+        select distinct a.id, a.title, a.release_date, a.album_type, '' as artist_display,
+               coalesce((select count(*) from tracks t where t.album_id = a.id), 0) as n_tracks,
+               coalesce((select count(*) from tracks t join audio_files af on af.track_id = t.id where t.album_id = a.id), 0) as n_disponibles
+        from albums a
+        join album_artists aa on aa.album_id = a.id and aa.artist_id = ?
+        order by a.release_date desc
+        """, id)
+    List<Json> albums_out = []
+    for int i in range(0, len(albumes)):
+        albums_out.add(album_row_dto(albumes[i]))
+    int locales = 0
+    for int i in range(0, len(top)):
+        if jstr(top[i]["availability"]["kind"], "") == "local":
+            locales = locales + 1
+    return {
+        "id": jstr(artistas[0]["id"], ""),
+        "name": jstr(artistas[0]["name"], ""),
+        "imageUrl": null,
+        "genres": [],
+        "localTrackCount": locales,
+        "topTracks": top,
+        "albums": albums_out
+    }
+
+# ─── Candidatos y reasignación de metadatos ─────────────────────────────────
+
+# TrackCandidateDto: title, artists[{id,name}], album{id,title}|null,
+# durationMs, trackNumber, discNumber, explicit, isrc, releaseDate, popularity.
+fn Json candidato_de(PistaCatalogo p):
+    List<Json> artistas = []
+    for int i in range(0, len(p.artista_ids)):
+        artistas.add({ "id": p.artista_ids[i], "name": p.artista_nombres[i] })
+    Json album = null
+    if p.album_id != "":
+        album = { "id": p.album_id, "title": p.album_titulo }
+    string fecha = p.anyo == 0 ? null : str(p.anyo) + "-01-01"
+    return {
+        "title": p.title,
+        "artists": artistas,
+        "album": album,
+        "durationMs": p.duration_ms,
+        "trackNumber": p.track_number == 0 ? null : p.track_number,
+        "discNumber": null,
+        "explicit": false,
+        "isrc": null,
+        "releaseDate": fecha,
+        "popularity": p.popularity == 0 ? null : p.popularity
+    }
+
+fn Json cmd_buscar_candidatos(Json args):
+    string consulta = arg_str(args, "query", "")
+    int limite = jint(jget(args, "limit"), 10)
+    if consulta == "":
+        return []
+    Json? r = ytm_buscar(consulta, "canciones")
+    if r == null:
+        return []
+    List<Json> elementos = elementos_de_lista(r)
+    List<Json> out = []
+    for int i in range(0, len(elementos)):
+        if len(out) >= limite:
+            break
+        PistaCatalogo p = ytm_cancion(elementos[i])
+        if p.id == "" or p.title == "":
+            continue
+        out.add(candidato_de(p))
+    return out
+
+fn Json cmd_asignar_metadata(Json args):
+    string tid = arg_str(args, "trackId", "")
+    Json cand = jget(args, "candidate")
+    if tid == "" or cand == null:
+        return error_api("INVALID", "error.invalid").status(400)
+    string titulo = jstr(cand["title"], "")
+    int duracion = jint(cand["durationMs"], 0)
+    string album_id = jstr(jget(cand["album"], "id"), "")
+    string album_titulo = jstr(jget(cand["album"], "title"), "")
+    if album_id != "":
+        await sqlite.exec("""
+            insert or ignore into albums(id, title, title_norm, metadata_at) values(?, ?, ?, unixepoch())
+            """, album_id, album_titulo, normalizar(album_titulo))
+    await sqlite.exec("""
+        update tracks set title = ?, title_norm = ?, album_id = ?, duration_ms = ?,
+               metadata_locked = 1, metadata_at = unixepoch()
+        where id = ?
+        """, titulo, normalizar(titulo), album_id == "" ? null : album_id, duracion, tid)
+    # artistas: reescribir la relación con los del candidato
+    await sqlite.exec("delete from track_artists where track_id = ?", tid)
+    List<Json> artistas = jlist(jget(cand, "artists"))
+    string display = ""
+    for int i in range(0, len(artistas)):
+        string aid = jstr(artistas[i]["id"], "")
+        string nombre = jstr(artistas[i]["name"], "")
+        if nombre == "":
+            continue
+        if aid != "":
+            await sqlite.exec("""
+                insert into artists(id, name, name_norm, metadata_at) values(?, ?, ?, unixepoch())
+                on conflict(id) do update set name = excluded.name
+                """, aid, nombre, normalizar(nombre))
+            await sqlite.exec("insert or ignore into track_artists(track_id, artist_id, position) values(?, ?, ?)", tid, aid, i)
+        if i > 0:
+            display = display + ", "
+        display = display + nombre
+    await sqlite.exec("update tracks set artist_display = ?, artist_norm = ? where id = ?", display, normalizar(display), tid)
+    tocar_biblioteca()
+    return null
+
+# ─── Importación de ficheros locales (ffprobe) ──────────────────────────────
+
+fn Json cmd_importar_ficheros(Json args):
+    List<string> rutas = arg_ids(args, "paths")
+    int elegidos = len(rutas)
+    int importadas = 0
+    int ilegibles = 0
+    garantizar_biblioteca()
+    for int i in range(0, len(rutas)):
+        string ruta = rutas[i]
+        if ruta == "" or not os.is_file(ruta):
+            ilegibles = ilegibles + 1
+            continue
+        Json? info = ffprobe_info(ruta)
+        Json tags = null
+        double dur = 0.0
+        string codec = ""
+        if info != null:
+            tags = jget(jget(info, "format"), "tags")
+            dur = jdbl(jget(jget(info, "format"), "duration"), 0.0)
+            List<Json> streams = jlist(jget(info, "streams"))
+            if len(streams) > 0:
+                codec = jstr(streams[0]["codec_name"], "")
+        if tags == null or dur <= 0.0:
+            ilegibles = ilegibles + 1
+            continue
+        string titulo = jstr(tags["title"], "")
+        if titulo == "":
+            titulo = os.path_basename(ruta)
+        string artista = jstr(tags["artist"], "")
+        string album = jstr(tags["album"], "")
+        string fecha = jstr(tags["date"], "")
+        int pista_num = jint(int_pode(jstr(tags["track"], "")), 0)
+        if pista_num > 9 and pista_num % 100 == 0:
+            pista_num = pista_num / 100
+        # id local estable: hash de la ruta del ORIGINAL
+        string tid = "local_" + hash.sha256(ruta).slice(0, 20)
+        string ext = "mp3"
+        int punto = ultimo_punto(ruta)
+        if punto > 0:
+            ext = ruta.slice(punto + 1).lower()
+        string shard = shard_de(tid)
+        string dir_destino = os.path_join(biblioteca_raiz(), "audio", shard)
+        os.make_dir(dir_destino)
+        string destino = os.path_join(dir_destino, tid + "." + ext)
+        if ruta != destino:
+            await os.copy_file(ruta, destino, true)
+        string album_id = ""
+        if album != "":
+            album_id = "local_al_" + hash.sha256(album + "|" + artista).slice(0, 20)
+            await sqlite.exec("""
+                insert or ignore into albums(id, title, title_norm, release_date, metadata_at)
+                values(?, ?, ?, ?, unixepoch())
+                """, album_id, album, normalizar(album), fecha == "" ? null : fecha)
+            if artista != "":
+                string aid = "local_ar_" + hash.sha256(artista).slice(0, 20)
+                await sqlite.exec("""
+                    insert or ignore into artists(id, name, name_norm, metadata_at) values(?, ?, ?, unixepoch())
+                    """, aid, artista, normalizar(artista))
+                await sqlite.exec("insert or ignore into album_artists(album_id, artist_id, position) values(?, ?, 0)", album_id, aid)
+                await sqlite.exec("insert or ignore into track_artists(track_id, artist_id, position) values(?, ?, 0)", tid, aid)
+        await sqlite.exec("""
+            insert into tracks(id, title, title_norm, album_id, duration_ms, track_number, artist_display, artist_norm, metadata_locked, metadata_at, added_at)
+            values(?, ?, ?, ?, ?, ?, ?, ?, 1, unixepoch(), unixepoch())
+            on conflict(id) do nothing
+            """, tid, titulo, normalizar(titulo), album_id == "" ? null : album_id,
+            int(dur * 1000.0), pista_num == 0 ? null : pista_num, artista, normalizar(artista))
+        await sqlite.exec("""
+            insert or ignore into audio_files(track_id, rel_path, format, codec, size_bytes, duration_ms, source, verified_at)
+            values(?, ?, ?, ?, ?, ?, 'imported', unixepoch())
+            """, tid, "audio/" + shard + "/" + tid + "." + ext, ext, codec,
+            os.file_size(destino), int(dur * 1000.0))
+        importadas = importadas + 1
+    tocar_biblioteca()
+    return { "filesSelected": elegidos, "imported": importadas, "skippedUnreadable": ilegibles }
+
+# Reproducir con contexto: traduce el PlaybackContextDto a mi almacenamiento
+# interno, fija la pista y arranca la descarga si hace falta.
+fn Json cmd_play_track(Json args):
+    garantizar_biblioteca()
+    string track_id = arg_str(args, "trackId", "")
+    if track_id == "":
+        return error_api("INVALID", "error.invalid").status(400)
+    Json ctx = contexto_desde_args(args, track_id)
+    List<string> pistas = pistas_de_contexto_dto(ctx, track_id)
+    set_contexto(str(ctx), pistas, track_id)
+    mutar_estado("set_track", track_id, "", 0)
+    asegurar_descarga(track_id, "immediate")
+    return estado_dto()
+
+# ─── Búsqueda ────────────────────────────────────────────────────────────────
+
+fn Json cmd_search_query(Json args):
+    string q = arg_str(args, "q", "").trim()
+    int query_id = state.incr("search_query_id")
+    if q == "":
+        return { "queryId": query_id, "top": null, "tracks": [], "albums": [], "artists": [], "playlists": [], "remote": { "state": "notAttempted" } }
+    string patron = "%" + like_escapar(normalizar(q)) + "%"
+    # Cada término tiene que aparecer en ALGÚN sitio (título, artista o
+    # álbum), no los tres juntos como una sola frase literal: así "Coldplay
+    # Yellow" encuentra "Yellow by Coldplay" aunque el orden no coincida.
+    # Máximo 6 términos — hueco de sobra para cualquier búsqueda real, y deja
+    # la consulta de aridad fija (el motor no admite listas de tamaño
+    # variable como parámetros).
+    List<string> terminos = terminos_de(normalizar(q), 6)
+    List<string> patrones = []
+    for int i in range(0, 6):
+        if i < len(terminos):
+            patrones.add("%" + like_escapar(terminos[i]) + "%")
+        else:
+            patrones.add("%")
+    List<Json> filas = await sqlite.query(sql_pista_dto() + """
+        where (t.title_norm like ? escape '\\' or t.artist_norm like ? escape '\\' or al.title_norm like ? escape '\\')
+          and (t.title_norm like ? escape '\\' or t.artist_norm like ? escape '\\' or al.title_norm like ? escape '\\')
+          and (t.title_norm like ? escape '\\' or t.artist_norm like ? escape '\\' or al.title_norm like ? escape '\\')
+          and (t.title_norm like ? escape '\\' or t.artist_norm like ? escape '\\' or al.title_norm like ? escape '\\')
+          and (t.title_norm like ? escape '\\' or t.artist_norm like ? escape '\\' or al.title_norm like ? escape '\\')
+          and (t.title_norm like ? escape '\\' or t.artist_norm like ? escape '\\' or al.title_norm like ? escape '\\')
+        order by case when t.title_norm like ? escape '\\' then 0 else 1 end,
+                 coalesce(hp.cnt, 0) desc, t.title_norm
+        limit 60
+        """,
+        patrones[0], patrones[0], patrones[0],
+        patrones[1], patrones[1], patrones[1],
+        patrones[2], patrones[2], patrones[2],
+        patrones[3], patrones[3], patrones[3],
+        patrones[4], patrones[4], patrones[4],
+        patrones[5], patrones[5], patrones[5],
+        patron + "%")
+    List<Json> rows = track_rows_de(filas)
+
+    # agrupar por título canónico: "Faint", "Faint (Live)" y
+    # "Faint - Remastered 2011" son la misma fila con sus versiones
+    List<string> claves = []
+    Dict<string, Json> principal = {}
+    Dict<string, Json> versiones = {}
+    for int i in range(0, len(rows)):
+        string clave = titulo_canonico(jstr(rows[i]["title"], ""))
+        if clave == "":
+            clave = jstr(rows[i]["title"], "")
+        if not claves.contains(clave):
+            claves.add(clave)
+            principal[clave] = rows[i]
+            versiones[clave] = []
+        else:
+            List<Json> lista = jlist(versiones[clave])
+            lista.add(rows[i])
+            versiones[clave] = lista
+    List<Json> grupos = []
+    for int i in range(0, len(claves)):
+        grupos.add({ "principal": principal[claves[i]], "versiones": versiones[claves[i]] })
+
+    List<Json> albumes = await sqlite.query("""
+        select a.id, a.title, a.release_date, a.album_type,
+               coalesce((select count(*) from tracks t where t.album_id = a.id), 0) as n_tracks,
+               coalesce((select count(*) from tracks t join audio_files af on af.track_id = t.id where t.album_id = a.id), 0) as n_disponibles,
+               coalesce((select ar.name from album_artists aa join artists ar on ar.id = aa.artist_id
+                         where aa.album_id = a.id order by aa.position limit 1), '') as artist_display
+        from albums a where a.title_norm like ? escape '\\' limit 12
+        """, patron)
+    List<Json> albums_out = []
+    for int i in range(0, len(albumes)):
+        albums_out.add(album_row_dto(albumes[i]))
+    List<Json> artistas = await sqlite.query("""
+        select ar.id, ar.name,
+               coalesce((select count(*) from track_artists ta where ta.artist_id = ar.id), 0) as n_tracks,
+               coalesce((select count(*) from track_artists ta join tracks t on t.id = ta.track_id
+                         join audio_files af on af.track_id = t.id where ta.artist_id = ar.id), 0) as n_disponibles
+        from artists ar where ar.name_norm like ? escape '\\' limit 12
+        """, patron)
+    List<Json> artists_out = []
+    for int i in range(0, len(artistas)):
+        artists_out.add(artist_row_dto(artistas[i]))
+
+    Json top = null
+    if len(grupos) > 0:
+        top = { "kind": "track", "item": grupos[0]["principal"] }
+    elif len(albums_out) > 0:
+        top = { "kind": "album", "item": albums_out[0] }
+    elif len(artists_out) > 0:
+        top = { "kind": "artist", "item": artists_out[0] }
+
+    # lo remoto: la primera consulta lanza el trabajo; el bombeo de eventos lo
+    # ejecuta y avisa con searchRemoteReady (los resultados ya están en la BD)
+    Json remote = { "state": "notAttempted" }
+    if len(rows) > 0 or len(albums_out) > 0:
+        remote = { "state": "notAttempted" }
+    else:
+        remote = { "state": "loading" }
+        state.set("remote_query", str({ "queryId": query_id, "q": q }))
+
+    return {
+        "queryId": query_id,
+        "top": top,
+        "tracks": grupos,
+        "albums": albums_out,
+        "artists": artists_out,
+        "playlists": [],
+        "remote": remote
+    }
+
+# ─── Inicio y recomendaciones ────────────────────────────────────────────────
+
+fn Json seccion_pistas(string clave, List<Json> rows):
+    return { "key": clave, "params": [], "items": { "kind": "tracks", "items": rows } }
+
+fn Json cmd_home():
+    List<Json> secciones = []
+    List<Json> sonadas = await sqlite.query("""
+        select h.track_id as id, max(h.played_at) as ultima from play_history h
+        group by h.track_id order by ultima desc limit 12
+        """)
+    if len(sonadas) > 0:
+        List<Json> recientes = []
+        for int i in range(0, len(sonadas)):
+            Json? p = track_row_por_id(jstr(sonadas[i]["id"], ""))
+            if p != null:
+                recientes.add(p)
+        if len(recientes) >= 4:
+            secciones.add(seccion_pistas("home.recent", recientes))
+    List<Json> top = await sqlite.query(sql_pista_dto() + " order by coalesce(hp.cnt, 0) desc, t.added_at desc limit 12")
+    List<Json> top_rows = track_rows_de(top)
+    if len(top_rows) >= 4:
+        secciones.add(seccion_pistas("home.top_tracks", top_rows))
+    List<Json> albumes = await sqlite.query("""
+        select a.id, a.title, a.release_date, a.album_type, '' as artist_display,
+               coalesce((select count(*) from tracks t where t.album_id = a.id), 0) as n_tracks,
+               coalesce((select count(*) from tracks t join audio_files af on af.track_id = t.id where t.album_id = a.id), 0) as n_disponibles
+        from albums a
+        where a.id in (select distinct album_id from tracks t join play_history h on h.track_id = t.id)
+        order by a.created_at desc limit 12
+        """)
+    if len(albumes) >= 4:
+        List<Json> albums_out = []
+        for int i in range(0, len(albumes)):
+            albums_out.add(album_row_dto(albumes[i]))
+        secciones.add({ "key": "home.top_albums", "params": [], "items": { "kind": "albums", "items": albums_out } })
+    List<Json> artistas = await sqlite.query("""
+        select ar.id, ar.name,
+               coalesce((select count(*) from track_artists ta where ta.artist_id = ar.id), 0) as n_tracks,
+               0 as n_disponibles
+        from artists ar
+        where ar.id in (select distinct artist_id from track_artists ta join play_history h on h.track_id = ta.track_id)
+        order by n_tracks desc limit 12
+        """)
+    if len(artistas) >= 4:
+        List<Json> artists_out = []
+        for int i in range(0, len(artistas)):
+            artists_out.add(artist_row_dto(artistas[i]))
+        secciones.add({ "key": "home.top_artists", "params": [], "items": { "kind": "artists", "items": artists_out } })
+    List<Json> listas = await cmd_playlist_list()
+    if len(listas) >= 4:
+        secciones.add({ "key": "home.playlists", "params": [], "items": { "kind": "playlists", "items": listas } })
+    List<Json> favoritas = await sqlite.query(sql_pista_dto() + " where f.track_id is not null order by f.added_at desc limit 12")
+    List<Json> fav_rows = track_rows_de(favoritas)
+    if len(fav_rows) >= 4:
+        secciones.add(seccion_pistas("home.favorites", fav_rows))
+    return secciones
+
+fn Json cmd_reco(string track_id, int limite):
+    if track_id == "":
+        return []
+    List<Json> pista = await sqlite.query("select album_id from tracks where id = ?", track_id)
+    if len(pista) == 0:
+        return []
+    List<Json> filas = await sqlite.query(sql_pista_dto() + """
+        where t.id != ?
+          and (t.album_id = ?
+               or t.id in (select ta2.track_id from track_artists ta2
+                           where ta2.artist_id in (select artist_id from track_artists where track_id = ?)))
+          and af.track_id is not null
+        order by coalesce(hp.cnt, 0) desc, t.added_at desc limit ?
+        """, track_id, jstr(pista[0]["album_id"], ""), track_id, limite)
+    return track_rows_de(filas)
+
+# ─── Playlists ───────────────────────────────────────────────────────────────
+
+fn Json playlist_summary_dto(Json f):
+    # coverAlbums: los álbumes de las primeras pistas, para el mosaico
+    List<Json> albumes = await sqlite.query("""
+        select distinct t.album_id as id from playlist_items pi
+        join tracks t on t.id = pi.track_id
+        where pi.playlist_id = ? and t.album_id is not null
+        order by pi.position limit 4
+        """, jstr(f["id"], ""))
+    List<Json> covers = []
+    for int i in range(0, len(albumes)):
+        covers.add("albums/" + jstr(albumes[i]["id"], ""))
+    return {
+        "id": jstr(f["id"], ""),
+        "name": jstr(f["name"], ""),
+        "trackCount": jint(f["n"], 0),
+        "coverAlbums": covers,
+        "hasOwnCover": jstr(f["cover_path"], "") != "",
+        "updatedAt": jint(f["updated_at"], 0),
+        "source": jstr(f["source"], "local") == "spotify_import" ? "spotifyImport" : "local"
+    }
+
+fn Json cmd_playlist_list():
+    List<Json> filas = await sqlite.query("""
+        select p.*, coalesce((select count(*) from playlist_items pi where pi.playlist_id = p.id), 0) as n
+        from playlists p order by p.position asc
+        """)
+    List<Json> out = []
+    for int i in range(0, len(filas)):
+        out.add(playlist_summary_dto(filas[i]))
+    return out
+
+fn Json cmd_playlist_detail(string plid):
+    List<Json> f = await sqlite.query("""
+        select p.*, coalesce((select count(*) from playlist_items pi where pi.playlist_id = p.id), 0) as n
+        from playlists p where p.id = ?
+        """, plid)
+    if len(f) == 0:
+        return error_api("NOT_FOUND", "error.not_found").status(404)
+    Json resumen = playlist_summary_dto(f[0])
+    List<Json> items = await sqlite.query("""
+        select pi.id as entry_id, pi.track_id, pi.added_at from playlist_items pi
+        where pi.playlist_id = ? order by pi.position asc
+        """, plid)
+    List<Json> entries = []
+    int suma = 0
+    for int i in range(0, len(items)):
+        Json? p = track_row_por_id(jstr(items[i]["track_id"], ""))
+        if p != null:
+            entries.add({ "entryId": jstr(items[i]["entry_id"], ""), "track": p, "addedAt": jint(items[i]["added_at"], 0) })
+            suma = suma + jint(p["durationMs"], 0)
+    Dict<string, Json> out = {}
+    for string clave in resumen:
+        out[clave] = resumen[clave]
+    out["description"] = f[0]["description"]
+    out["totalDurationMs"] = suma
+    out["entries"] = entries
+    return out
+
+fn void cmd_playlist_add(Json args):
+    string plid = arg_str(args, "playlistId", "")
+    List<string> ids = arg_ids(args, "trackIds")
+    Json en = jget(args, "atIndex")
+    if len(ids) == 0:
+        return
+    if en != null:
+        # insertar en posición: renumerar y colocar
+        List<Json> items = await sqlite.query("select id from playlist_items where playlist_id = ? order by position asc", plid)
+        List<string> orden = []
+        for int i in range(0, len(items)):
+            orden.add(jstr(items[i]["id"], ""))
+        int destino = jint(en, len(orden))
+        if destino < 0:
+            destino = 0
+        if destino > len(orden):
+            destino = len(orden)
+        for int i in range(0, len(ids)):
+            string nuevo = nuevo_id()
+            await sqlite.exec("insert into playlist_items(id, playlist_id, track_id, position, added_at) values(?, ?, ?, 0, unixepoch())", nuevo, plid, ids[i])
+            orden = insertar_en(orden, destino + i, nuevo)
+        for int i in range(0, len(orden)):
+            await sqlite.exec("update playlist_items set position = ? where id = ?", (i + 1) * 1.0, orden[i])
+    else:
+        List<Json> f = await sqlite.query("select coalesce(max(position), 0) as p from playlist_items where playlist_id = ?", plid)
+        double pos = jdbl(f[0]["p"], 0.0)
+        for int i in range(0, len(ids)):
+            pos = pos + 1.0
+            await sqlite.exec("insert into playlist_items(id, playlist_id, track_id, position, added_at) values(?, ?, ?, ?, unixepoch())",
+                nuevo_id(), plid, ids[i], pos)
+    await sqlite.exec("update playlists set updated_at = unixepoch() where id = ?", plid)
+    # meter una canción en una playlist es decir "la quiero" (prefetch)
+    for int i in range(0, len(ids)):
+        asegurar_descarga(ids[i], "prefetch")
+
+fn void cmd_playlist_reorder(string plid, string entry_id, int destino):
+    List<Json> items = await sqlite.query("select id from playlist_items where playlist_id = ? order by position asc", plid)
+    List<string> orden = []
+    for int i in range(0, len(items)):
+        orden.add(jstr(items[i]["id"], ""))
+    int idx = orden.index_of(entry_id)
+    if idx < 0:
+        return
+    orden.remove_at(idx)
+    if destino < 0:
+        destino = 0
+    if destino > len(orden):
+        destino = len(orden)
+    orden = insertar_en(orden, destino, entry_id)
+    for int i in range(0, len(orden)):
+        await sqlite.exec("update playlist_items set position = ? where id = ?", (i + 1) * 1.0, orden[i])
+    await sqlite.exec("update playlists set updated_at = unixepoch() where id = ?", plid)
+
+fn void cmd_playlist_reorder_lista(string plid, int destino):
+    List<Json> filas = await sqlite.query("select id from playlists order by position asc")
+    List<string> orden = []
+    for int i in range(0, len(filas)):
+        orden.add(jstr(filas[i]["id"], ""))
+    int idx = orden.index_of(plid)
+    if idx < 0:
+        return
+    orden.remove_at(idx)
+    if destino < 0:
+        destino = 0
+    if destino > len(orden):
+        destino = len(orden)
+    orden = insertar_en(orden, destino, plid)
+    for int i in range(0, len(orden)):
+        await sqlite.exec("update playlists set position = ? where id = ?", (i + 1) * 1.0, orden[i])
+
+fn Json cmd_playlist_sugerencias(string plid, int limite):
+    List<Json> propias = await sqlite.query("""
+        select distinct ta.artist_id as id from playlist_items pi
+        join track_artists ta on ta.track_id = pi.track_id
+        where pi.playlist_id = ?
+        """, plid)
+    if len(propias) == 0:
+        return []
+    List<Json> filas = await sqlite.query(sql_pista_dto() + """
+        join track_artists ta on ta.track_id = t.id and ta.artist_id in (select artist_id from (select distinct ta2.artist_id from playlist_items pi
+             join track_artists ta2 on ta2.track_id = pi.track_id where pi.playlist_id = ?))
+        left join playlist_items pi2 on pi2.track_id = t.id and pi2.playlist_id = ?
+        where pi2.id is null and af.track_id is not null
+        order by coalesce(hp.cnt, 0) desc limit ?
+        """, plid, plid, limite)
+    return track_rows_de(filas)
+
+fn Json cmd_playlist_import(string url):
+    string id_pl = extraer_id_lista(url)
+    string id_sp = extraer_id_spotify(url)
+    if id_pl != "":
+        Json r = importar_lista_ytm(id_pl)
+        if jget(r, "error") != null:
+            return error_api("INVALID", "error.invalid").status(400)
+        return jstr(r["id"], "")
+    if id_sp != "":
+        Json r2 = importar_lista_spotify(id_sp)
+        if jget(r2, "error") != null:
+            return error_api("INVALID", "error.invalid").status(400)
+        return jstr(r2["id"], "")
+    return error_api("INVALID", "error.invalid").status(400)

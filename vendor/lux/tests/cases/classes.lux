@@ -1,0 +1,124 @@
+app:
+    port 8790
+
+class Alta:
+    string name
+    int    age
+
+    validate:
+        name != ""   "name: required"
+        age >= 18     "age: must be of age"
+
+class Punto:
+    int x
+    int y
+
+    fn int cuadrado():
+        return this.x * this.x + this.y * this.y
+
+    fn string label(string prefijo = "P"):
+        return prefijo + "(" + str(this.x) + "," + str(this.y) + ")"
+
+# A class field can be a List of another class, or a plain reference to one
+# -- forward reference on purpose: Season names Episode before Episode is
+# declared below it, exercising build_classes()'s two-pass resolution.
+class Season:
+    string        name
+    List<Episode> episodes
+
+class Episode:
+    string title
+    int    duration_s
+
+class Library:
+    List<Episode> flat
+    Episode?      featured
+
+fn int doble(int x):
+    return x * 2
+
+fn int factorial(int n):
+    if n <= 1:
+        return 1
+    return n * factorial(n - 1)
+
+fn int infinita(int n):
+    return infinita(n + 1)
+
+# A standalone `fn` constructing a class instance, calling a method on one,
+# and being called from ANOTHER `fn` (not just from a route directly) --
+# emit_function_bodies() (project.cpp) needs ClassSigs/EnumSigs wired for
+# exactly this; it used to be built+emitted in the same pass as function
+# SIGNATURES, before classes/enums even existed yet, so this failed with
+# "unknown function: 'Punto'" until that got split the same way
+# build_class_signatures()/emit_class_bodies() already were.
+fn Punto hacer_punto(int x, int y):
+    return Punto(x, y)
+
+fn List<int> cuadrados_de_puntos():
+    List<int> out = []
+    Punto a = hacer_punto(3, 4)
+    Punto b = hacer_punto(1, 1)
+    out.add(a.cuadrado())
+    out.add(b.cuadrado())
+    return out
+
+get endpoint("/__ping__"):
+    return { "ok": true }
+
+post endpoint("/add", Alta a):
+    return { "creado": a.name }.status(201)
+
+get endpoint("/punto/:x/:y", int x, int y):
+    Punto p = Punto(x, y)
+    return { "cuadrado": p.cuadrado() }
+
+get endpoint("/label/:x/:y", int x, int y):
+    Punto p = Punto(x, y)
+    return { "one": p.label(), "other": p.label("Q") }
+
+get endpoint("/doble/:n", int n):
+    return { "r": doble(n) }
+
+get endpoint("/factorial/:n", int n):
+    return { "r": factorial(n) }
+
+get endpoint("/infinita"):
+    return { "r": infinita(1) }
+
+get endpoint("/puntos_desde_fn"):
+    return { "cuadrados": cuadrados_de_puntos() }
+
+get endpoint("/nested/build"):
+    Episode e1 = Episode("Pilot", 1320)
+    Episode e2 = Episode("Episode 2", 1290)
+    Season s = Season("Season 1", [e1, e2])
+    return s
+
+get endpoint("/nested/access"):
+    Episode e1 = Episode("Pilot", 1320)
+    Episode e2 = Episode("Episode 2", 1290)
+    Season s = Season("Season 1", [e1, e2])
+    string first_title = s.episodes[0].title
+    int total = 0
+    for Episode ep in s.episodes:
+        total = total + ep.duration_s
+    return { "first_title": first_title, "total": total, "count": len(s.episodes) }
+
+get endpoint("/nested/optional_present"):
+    Episode e = Episode("Pilot", 1320)
+    Library lib = Library([e], e)
+    return lib
+
+get endpoint("/nested/optional_absent"):
+    Library lib = Library([], null)
+    return lib
+
+post endpoint("/nested/ingest", Season s):
+    int total = 0
+    for Episode ep in s.episodes:
+        total = total + ep.duration_s
+    return { "name": s.name, "count": len(s.episodes), "total": total }
+
+on error 422:
+    return { "count": len(error.messages), "details": error.messages }

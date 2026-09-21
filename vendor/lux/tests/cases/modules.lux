@@ -1,0 +1,320 @@
+# Native modules (NATIVE-MODULES.md): a compiled-in, `import`-gated
+# capability, distinct from the DB drivers (sqlite/postgres/mysql) -- always
+# synchronous, no `app:` configuration block required. `hash` is the proof
+# module: three thin wrappers over crypto.hpp (already exercised indirectly
+# by the session/jwt suite), here checked directly and hex-encoded. `csv`
+# has no external dependency either (unlike `pdf`, which has its own suite
+# -- run_pdf.sh -- to skip gracefully on a binary built without cairo), so
+# it belongs in the always-runs regression suite too.
+import hash
+import csv
+import os
+import math
+import time
+import regex
+import rooms
+import proc
+
+get endpoint("/hash/:s", string s):
+    return { "sha256": hash.sha256(s) }
+
+get endpoint("/hmac/:key/:msg", string key, string msg):
+    return { "mac": hash.hmac_sha256(key, msg) }
+
+get endpoint("/random/:n", int n):
+    return { "hex": hash.random_hex(n) }
+
+get endpoint("/csv/basic"):
+    string data = "name,age,city\nana,30,madrid\nbob,25,paris\ncleo,35,madrid\n"
+    int h = csv.parse(data)
+    List<Json> cols = csv.columns(h)
+    List<Json> rows = csv.rows(h)
+    int n = csv.row_count(h)
+    csv.close(h)
+    return { "columns": cols, "rows": rows, "row_count": n }
+
+get endpoint("/csv/filter_and_aggregate"):
+    string data = "name,age,city\nana,30,madrid\nbob,25,paris\ncleo,35,madrid\n"
+    int h = csv.parse(data)
+    int madrid = csv.filter_eq(h, "city", "madrid")
+    List<Json> rows = csv.rows(madrid)
+    double total = csv.sum(h, "age")
+    double avg = csv.mean(h, "age")
+    List<Json> grouped = csv.group_sum(h, "city", "age")
+    csv.close(h)
+    csv.close(madrid)
+    return { "madrid_rows": rows, "total_age": total, "avg_age": avg, "grouped": grouped }
+
+get endpoint("/csv/quoted"):
+    string data = "name,note\n\"Smith, John\",\"He said \"\"hi\"\"\"\nplain,ok\n"
+    int h = csv.parse(data)
+    List<Json> rows = csv.rows(h)
+    csv.close(h)
+    return { "rows": rows }
+
+get endpoint("/csv/roundtrip"):
+    string data = "a,b\n1,2\n3,4\n"
+    int h = csv.parse(data)
+    string back = csv.to_csv(h)
+    csv.close(h)
+    return { "csv": back }
+
+get endpoint("/csv/closed_handle"):
+    int h = csv.parse("a,b\n1,2\n")
+    csv.close(h)
+    List<Json> rows = csv.rows(h)
+    return { "unreachable": rows }
+
+get endpoint("/os/env"):
+    string missing = os.getenv("LUX_DEFINITELY_NOT_SET_XYZ", "fallback")
+    Json present = os.getenv("LUX_TEST_TMP")
+    return { "missing_uses_default": missing, "present_is_not_null": present != null }
+
+get endpoint("/os/path"):
+    string joined = os.path_join("a", "b", "c.txt")
+    string base = os.path_basename("/x/y/z.txt")
+    string dir = os.path_dirname("/x/y/z.txt")
+    return { "joined": joined, "base": base, "dir": dir }
+
+get endpoint("/os/file_roundtrip"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string dir = os.path_join(tmp, "os_test")
+    os.make_dir(dir)
+    string path = os.path_join(dir, "hello.txt")
+    await os.write_file(path, "hola mundo")
+    bool existed_before = os.path_exists(path)
+    string content = await os.read_file(path)
+    List<Json> entries = os.list_dir(dir)
+    bool removed = os.remove_file(path)
+    bool exists_after = os.path_exists(path)
+    return { "existed_before": existed_before, "content": content, "entries": entries,
+              "removed": removed, "exists_after": exists_after }
+
+get endpoint("/os/missing_file"):
+    Json content = await os.read_file("/definitely/does/not/exist/xyz123")
+    return { "content_is_null": content == null }
+
+get endpoint("/os/stat"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string dir = os.path_join(tmp, "os_stat_test")
+    os.make_dir(dir)
+    string file = os.path_join(dir, "stat_me.txt")
+    await os.write_file(file, "12345")
+    bool dir_is_dir = os.is_dir(dir)
+    bool dir_is_file = os.is_file(dir)
+    bool file_is_dir = os.is_dir(file)
+    bool file_is_file = os.is_file(file)
+    int size = os.file_size(file)
+    int dir_size = os.file_size(dir)
+    bool mtime_positive = os.mtime_ms(file) > 0
+    os.remove_file(file)
+    return { "dir_is_dir": dir_is_dir, "dir_is_file": dir_is_file,
+              "file_is_dir": file_is_dir, "file_is_file": file_is_file,
+              "size": size, "dir_size": dir_size, "mtime_positive": mtime_positive }
+
+get endpoint("/os/stat_missing"):
+    string missing = "/definitely/does/not/exist/xyz123"
+    return { "is_dir": os.is_dir(missing), "is_file": os.is_file(missing),
+              "size": os.file_size(missing), "mtime": os.mtime_ms(missing) }
+
+get endpoint("/os/run_echo"):
+    Json r = await os.run("/bin/echo", ["hello", "from", "os.run"])
+    return r
+
+get endpoint("/os/run_missing"):
+    Json r = await os.run("/definitely/not/a/real/command/xyz123")
+    return r
+
+get endpoint("/os/remove_dir_empty"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string dir = os.path_join(tmp, "os_rmdir_empty")
+    os.make_dir(dir)
+    bool removed = os.remove_dir(dir)
+    return { "removed": removed, "exists_after": os.path_exists(dir) }
+
+get endpoint("/os/remove_dir_nonempty_rejected"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string dir = os.path_join(tmp, "os_rmdir_nonempty")
+    os.make_dir(dir)
+    await os.write_file(os.path_join(dir, "f.txt"), "x")
+    Json r = os.remove_dir(dir)
+    return { "unreachable": r }
+
+get endpoint("/os/remove_dir_recursive"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string dir = os.path_join(tmp, "os_rmdir_recursive")
+    os.make_dir(os.path_join(dir, "sub"))
+    await os.write_file(os.path_join(dir, "sub", "f.txt"), "x")
+    bool removed = os.remove_dir(dir, true)
+    return { "removed": removed, "exists_after": os.path_exists(dir) }
+
+get endpoint("/os/remove_dir_on_a_file_rejected"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string file = os.path_join(tmp, "os_rmdir_on_file.txt")
+    await os.write_file(file, "x")
+    Json r = os.remove_dir(file)
+    return { "unreachable": r }
+
+get endpoint("/os/copy_file"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string src = os.path_join(tmp, "os_copy_src.txt")
+    string dst = os.path_join(tmp, "os_copy_dst.txt")
+    await os.write_file(src, "copy me")
+    bool copied = await os.copy_file(src, dst)
+    string src_content = await os.read_file(src)
+    string dst_content = await os.read_file(dst)
+    return { "copied": copied, "src_content": src_content, "dst_content": dst_content }
+
+get endpoint("/os/copy_file_overwrite_rejected"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string src = os.path_join(tmp, "os_copy_ow_src.txt")
+    string dst = os.path_join(tmp, "os_copy_ow_dst.txt")
+    await os.write_file(src, "new")
+    await os.write_file(dst, "old")
+    Json r = await os.copy_file(src, dst)
+    return r
+
+get endpoint("/os/copy_file_overwrite_allowed"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string src = os.path_join(tmp, "os_copy_ow2_src.txt")
+    string dst = os.path_join(tmp, "os_copy_ow2_dst.txt")
+    await os.write_file(src, "new")
+    await os.write_file(dst, "old")
+    bool copied = await os.copy_file(src, dst, true)
+    string dst_content = await os.read_file(dst)
+    return { "copied": copied, "dst_content": dst_content }
+
+get endpoint("/os/move_file"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string src = os.path_join(tmp, "os_move_src.txt")
+    string dst = os.path_join(tmp, "os_move_dst.txt")
+    await os.write_file(src, "moving")
+    bool moved = await os.move(src, dst)
+    string dst_content = await os.read_file(dst)
+    return { "moved": moved, "src_gone": not os.path_exists(src), "dst_content": dst_content }
+
+get endpoint("/os/move_dir"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string src = os.path_join(tmp, "os_move_dir_src")
+    string dst = os.path_join(tmp, "os_move_dir_dst")
+    os.make_dir(os.path_join(src, "inner"))
+    await os.write_file(os.path_join(src, "inner", "f.txt"), "nested")
+    bool moved = await os.move(src, dst)
+    string content = await os.read_file(os.path_join(dst, "inner", "f.txt"))
+    return { "moved": moved, "src_gone": not os.path_exists(src), "content": content }
+
+get endpoint("/os/move_missing_source_rejected"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    Json r = await os.move(os.path_join(tmp, "definitely_not_there_xyz"), os.path_join(tmp, "whatever"))
+    return r
+
+get endpoint("/math/basic"):
+    return {
+        "abs": math.abs(-7), "abs_f": math.abs(-2.5),
+        "min": math.min(3, 9), "max": math.max(3, 9),
+        "round": math.round(2.6), "floor": math.floor(2.9), "ceil": math.ceil(2.1),
+        "sqrt": math.sqrt(16), "pow": math.pow(2, 10), "log": math.log(1)
+    }
+
+get endpoint("/math/random"):
+    double r = math.random()
+    int n = math.random_int(5, 5)
+    return { "in_range": r >= 0.0 and r < 1.0, "fixed_range": n }
+
+get endpoint("/time/basic"):
+    int n = time.now()
+    int s = time.now_seconds()
+    string iso = time.format_iso(0)
+    string custom = time.format(0, "%Y-%m-%d")
+    return { "n_positive": n > 0, "s_positive": s > 0, "iso_epoch0": iso, "custom_epoch0": custom }
+
+get endpoint("/time/parse"):
+    Json parsed = time.parse_iso("1970-01-01T00:00:00Z")
+    Json bad = time.parse_iso("not a date")
+    return { "parsed_epoch0": parsed, "bad_is_null": bad == null }
+
+get endpoint("/regex/test"):
+    return { "yes": regex.test("[0-9]+", "abc123"), "no": regex.test("^[0-9]+$", "abc123") }
+
+get endpoint("/regex/find"):
+    return { "found": regex.find("[0-9]+", "abc123def"), "missing": regex.find("[0-9]+", "abcdef") }
+
+get endpoint("/regex/find_all"):
+    return { "all": regex.find_all("[0-9]+", "a1 b22 c333") }
+
+get endpoint("/regex/groups"):
+    return { "g": regex.groups("(\\w+)@(\\w+)\\.com", "hi bob@example.com bye") }
+
+get endpoint("/regex/replace"):
+    return { "r": regex.replace("[0-9]+", "a1 b22 c333", "#") }
+
+get endpoint("/regex/replace_backref"):
+    return { "r": regex.replace("(\\w+)@(\\w+)", "user@host", "$2@$1") }
+
+get endpoint("/regex/split"):
+    return { "r": regex.split("\\s*,\\s*", "a, b,c ,  d") }
+
+get endpoint("/regex/bad_pattern"):
+    return { "r": regex.test("(unclosed", "x") }
+
+# `rooms` (NATIVE-MODULES.md): cross-connection WebSocket broadcast. The
+# real thing (two live connections joining a room, one broadcasting to the
+# other) needs an actual WebSocket client this HTTP-only regression harness
+# does not have -- verified by hand instead (see the module's own comment
+# in modules/base_modules/rooms.cpp). What a plain GET *can* check: an
+# empty/unknown room behaves like "nobody home" rather than an error, and
+# join()/leave()/leave_all() refuse to run outside a ws route instead of
+# dereferencing a null connection.
+get endpoint("/rooms/count_empty"):
+    return { "n": rooms.count("nobody-here") }
+
+get endpoint("/rooms/broadcast_empty"):
+    return { "reached": rooms.broadcast("nobody-here", "hello") }
+
+get endpoint("/rooms/join_outside_ws"):
+    return { "ok": rooms.join("x") }
+
+# `proc` (NATIVE-MODULES.md): a live subprocess handle, distinct from
+# os.run() (which spawns, drains, and waits inside ONE blocking call) --
+# start() returns immediately, and read()/alive()/wait()/kill() operate on
+# the handle from wherever/whenever later. The real point of this module --
+# a second request reading from or killing a process a FIRST request
+# started, potentially on a different thread -- needs an actual live
+# server exchange this HTTP-only harness cannot script; verified by hand
+# instead (see proc.cpp's own module comment). Each check below is
+# self-contained (start+use+close in one handler) so it does not depend on
+# handle numbers assigned by requests earlier in this same file -- that
+# numbering is an implementation detail, not something a test should pin.
+get endpoint("/proc/echo_full"):
+    int h = proc.start("/bin/echo", ["hello", "from", "proc"])
+    string? out = await proc.read(h, 4096, 2000)
+    int? code = await proc.wait(h, 2000)
+    proc.close(h)
+    return { "out": out, "code": code }
+
+# start() is synchronous (it never blocks -- posix_spawn either succeeds or
+# fails immediately), so unlike os.run()'s OWN "missing command" test
+# (os.run is async, so its failure is a soft {"error": ...} at 200), a
+# failing proc.start() is a hard error on the route, same as any other
+# synchronous native call misused.
+get endpoint("/proc/missing_command"):
+    int h = proc.start("/definitely/not/a/real/command/xyz123")
+    return { "h": h }
+
+get endpoint("/proc/kill_and_wait"):
+    int h = proc.start("/bin/sleep", ["10"])
+    bool was_alive = proc.alive(h)
+    proc.kill(h)
+    int? code = await proc.wait(h, 2000)
+    bool still_alive = proc.alive(h)
+    proc.close(h)
+    return { "was_alive": was_alive, "code": code, "still_alive": still_alive }
+
+get endpoint("/proc/read_without_pipe"):
+    int h = proc.start("/bin/echo", ["x"], { "stdout": "null" })
+    Json out = await proc.read(h, 100, 500)
+    proc.close(h)
+    return { "out": out }
+
+get endpoint("/proc/unknown_handle"):
+    return { "alive": proc.alive(999999) }

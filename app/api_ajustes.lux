@@ -1,0 +1,252 @@
+# api_ajustes.lux — Letras, ajustes y estadísticas del despachador.
+
+# Última aparición de un carácter (para la extensión de una ruta).
+fn int ultimo_punto(string s):
+    int mejor = -1
+    for int i in range(0, len(s)):
+        if s.slice(i, i + 1) == ".":
+            mejor = i
+    return mejor
+
+# ─── Letras ──────────────────────────────────────────────────────────────────
+# LyricsDto {synced: [{atMs, text}]|null, plain, source}; null = no hay letra.
+
+fn Json? cmd_lyrics(string id):
+    List<Json> f = await sqlite.query("select synced, plain, not_found from lyrics where track_id = ?", id)
+    if len(f) > 0:
+        if jint(f[0]["not_found"], 0) == 1:
+            return null
+        string synced = jstr(f[0]["synced"], "")
+        string plain = jstr(f[0]["plain"], "")
+        return { "synced": lrc_a_lineas(synced), "plain": plain == "" ? null : plain, "source": "lrclib" }
+    List<Json> t = await sqlite.query("""
+        select t.title, t.duration_ms, t.artist_display, ar.name as artist
+        from tracks t left join track_artists ta on ta.track_id = t.id and ta.position = 0
+        left join artists ar on ar.id = ta.artist_id
+        where t.id = ?
+        """, id)
+    if len(t) == 0:
+        return null
+    string titulo = jstr(t[0]["title"], "")
+    string artista = jstr(t[0]["artist"], "")
+    if artista == "":
+        artista = jstr(t[0]["artist_display"], "")
+        if artista.contains(","):
+            artista = artista.slice(0, artista.index_of(",")).trim()
+    int dur_ms = jint(t[0]["duration_ms"], 0)
+    if titulo == "" or artista == "":
+        return null
+    Dict<string, string> cabeceras = { "User-Agent": "Localify-Lux/1.0 (music player)" }
+    Json? r = null
+    try:
+        r = await http.get("https://lrclib.net/api/get?artist_name=" + http.url_encode(artista) + "&track_name=" + http.url_encode(titulo) + "&duration=" + str(int(dur_ms / 1000)), cabeceras)
+    catch e:
+        return null
+    if r == null or jint(jget(r, "status"), 0) != 200:
+        await sqlite.exec("insert or replace into lyrics(track_id, not_found, fetched_at) values(?, 1, unixepoch())", id)
+        return null
+    Json body = jget(r, "body")
+    string synced = jstr(body["syncedLyrics"], "")
+    string plain = jstr(body["plainLyrics"], "")
+    if synced == "" and plain == "":
+        await sqlite.exec("insert or replace into lyrics(track_id, not_found, fetched_at) values(?, 1, unixepoch())", id)
+        return null
+    await sqlite.exec("""
+        insert into lyrics(track_id, synced, plain, source, fetched_at) values(?, ?, ?, 'lrclib', unixepoch())
+        on conflict(track_id) do update set synced = excluded.synced, plain = excluded.plain, not_found = 0, fetched_at = excluded.fetched_at
+        """, id, synced, plain)
+    return { "synced": lrc_a_lineas(synced), "plain": plain == "" ? null : plain, "source": "lrclib" }
+
+# "[00:12.34] texto" → {atMs, text}
+fn List<Json> lrc_a_lineas(string lrc):
+    List<Json> out = []
+    if lrc == "":
+        return out
+    List<string> lineas = lrc.split("\n")
+    for int i in range(0, len(lineas)):
+        string linea = lineas[i].trim()
+        if not linea.starts_with("["):
+            continue
+        int cierre = linea.index_of("]")
+        if cierre < 3:
+            continue
+        string marca = linea.slice(1, cierre)
+        string texto = linea.slice(cierre + 1).trim()
+        # marca "mm:ss.xx"
+        int dos = marca.index_of(":")
+        if dos < 1:
+            continue
+        string mm = marca.slice(0, dos)
+        string ss = marca.slice(dos + 1)
+        int valido = 1
+        for int k in range(0, len(mm)):
+            if "0123456789".index_of(mm.slice(k, k + 1)) < 0:
+                valido = 0
+        for int k in range(0, len(ss)):
+            string c = ss.slice(k, k + 1)
+            if "0123456789".index_of(c) < 0 and c != "." and c != ":":
+                valido = 0
+        if valido == 0:
+            continue
+        List<string> partes = ss.split(".")
+        int secs = 0
+        double frac = 0.0
+        if len(partes) >= 1:
+            secs = int_pode(partes[0])
+        if len(partes) >= 2:
+            frac = jdbl(parse_json("0." + partes[1]), 0.0)
+        int ms = (int(mm) * 60 + secs) * 1000 + int(frac * 1000)
+        if texto == "":
+            continue
+        out.add({ "atMs": ms, "text": texto })
+    return out
+
+# ─── Ajustes ─────────────────────────────────────────────────────────────────
+# SettingsDto completo: language, libraryPath, metadataProvider, audio
+# (crossfadeMs, gapless, eqProfile, normalizeVolume, outputDeviceId),
+# download (preferredFormat, maxConcurrent, maxRetries, cookiesBrowser,
+# cookiesFile), spotify, integrations, ui.
+
+fn List<Json> perfiles_eq():
+    return [
+        { "id": "flat", "nameKey": "eq.flat", "gainsDb": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] },
+        { "id": "bass", "nameKey": "eq.bass", "gainsDb": [6.0, 5.0, 4.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] },
+        { "id": "treble", "nameKey": "eq.treble", "gainsDb": [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 3.0, 4.0, 5.0, 5.0] },
+        { "id": "vocal", "nameKey": "eq.vocal", "gainsDb": [-2.0, -1.0, 0.0, 2.0, 4.0, 4.0, 3.0, 1.0, 0.0, -1.0] },
+        { "id": "acoustic", "nameKey": "eq.acoustic", "gainsDb": [3.0, 3.0, 2.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 1.0] },
+        { "id": "electronic", "nameKey": "eq.electronic", "gainsDb": [5.0, 4.0, 1.0, 0.0, -1.0, 1.0, 0.0, 1.0, 4.0, 5.0] },
+        { "id": "rock", "nameKey": "eq.rock", "gainsDb": [5.0, 4.0, 2.0, 0.0, -1.0, -1.0, 1.0, 3.0, 4.0, 4.0] }
+    ]
+
+# El ajuste estructurado (audio/download/ui/integrations) vive como un JSON
+# único en settings('settings_json'); las claves simples quedan para el resto.
+fn Json ajustes_estructurados():
+    Json? guardados = parse_json(ajuste("settings_json", "{}"))
+    if guardados == null:
+        guardados = {}
+    return guardados
+
+fn Json cmd_settings_get():
+    Json guardados = ajustes_estructurados()
+    Json audio = jget(guardados, "audio")
+    if audio == null:
+        audio = {
+            "crossfadeMs": 0,
+            "gapless": true,
+            "eqProfile": { "id": "flat", "nameKey": "eq.flat", "gainsDb": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] },
+            "normalizeVolume": false,
+            "outputDeviceId": null
+        }
+    Json download = jget(guardados, "download")
+    if download == null:
+        string modo = ajuste("cookies_mode", "none")
+        Json d = { "preferredFormat": "opus", "maxConcurrent": 2, "maxRetries": 3, "cookiesBrowser": null, "cookiesFile": null }
+        if modo == "browser":
+            d["cookiesBrowser"] = ajuste("cookies_browser", "firefox")
+        elif modo == "file":
+            d["cookiesFile"] = ajuste("cookies_file", "")
+        download = d
+    Json spotify = jget(guardados, "spotify")
+    if spotify == null:
+        string cid = ajuste("spotify_client_id", "")
+        spotify = { "configured": cid != "", "clientId": cid == "" ? null : cid }
+    Json integraciones = jget(guardados, "integrations")
+    if integraciones == null:
+        integraciones = { "discordEnabled": false, "discordClientId": null }
+    Json ui = jget(guardados, "ui")
+    if ui == null:
+        ui = { "listDensity": "comfortable", "startView": "home" }
+    return {
+        "language": ajuste("language", "es"),
+        "libraryPath": biblioteca_raiz(),
+        "metadataProvider": ajuste("metadata_provider", "combined"),
+        "audio": audio,
+        "download": download,
+        "spotify": spotify,
+        "integrations": integraciones,
+        "ui": ui
+    }
+
+fn Json cmd_settings_patch(Json cambios):
+    if cambios == null:
+        return null
+    Json actuales = ajustes_estructurados()
+    if jget(cambios, "audio") != null:
+        actuales["audio"] = jget(cambios, "audio")
+    if jget(cambios, "download") != null:
+        Json d = jget(cambios, "download")
+        actuales["download"] = d
+        # reflejar las cookies en las claves que lee args_cookies()
+        if d["cookiesBrowser"] != null:
+            ajuste_poner("cookies_mode", "browser")
+            ajuste_poner("cookies_browser", jstr(d["cookiesBrowser"], "firefox"))
+        elif d["cookiesFile"] != null:
+            ajuste_poner("cookies_mode", "file")
+            ajuste_poner("cookies_file", jstr(d["cookiesFile"], ""))
+        else:
+            ajuste_poner("cookies_mode", "none")
+    if jget(cambios, "integrations") != null:
+        actuales["integrations"] = jget(cambios, "integrations")
+    if jget(cambios, "ui") != null:
+        actuales["ui"] = jget(cambios, "ui")
+    if jget(cambios, "language") != null:
+        ajuste_poner("language", jstr(jget(cambios, "language"), "es"))
+    if jget(cambios, "metadataProvider") != null:
+        ajuste_poner("metadata_provider", jstr(jget(cambios, "metadataProvider"), "combined"))
+    await sqlite.exec("""
+        insert into settings(key, value, updated_at) values('settings_json', ?, unixepoch())
+        on conflict(key) do update set value = excluded.value, updated_at = unixepoch()
+        """, str(actuales))
+    tocar_ajustes()
+    return null
+
+fn Json cmd_probar_cookies():
+    string modo = ajuste("cookies_mode", "none")
+    if modo == "none":
+        return { "status": { "kind": "unavailable", "reasonKey": "settings.cookies_none" } }
+    List<string> extra = args_cookies()
+    if len(extra) == 0:
+        return { "status": { "kind": "unavailable", "reasonKey": "settings.cookies_none" } }
+    Json r = await os.run("yt-dlp", ["--dump-json", "--flat-playlist", "--playlist-end", "1"] + extra + ["ytsearch1:test"])
+    if jint(r["status"], 1) == 0 and jstr(r["stdout"], "").trim() != "":
+        return { "status": { "kind": "ready" } }
+    return { "status": { "kind": "unavailable", "reasonKey": "settings.cookies_broken" } }
+
+# ─── Estadísticas ────────────────────────────────────────────────────────────
+# ListeningStatsDto {totalMsPlayed, totalPlays, distinctTracks, topTracks:
+# [{track, msPlayed, plays}], topArtists: [{artist, msPlayed}]}.
+
+fn Json cmd_stats():
+    List<Json> totales = await sqlite.query("""
+        select coalesce(sum(ms_played), 0) as ms, count(*) as plays,
+               count(distinct track_id) as pistas from play_history
+        """)
+    List<Json> top_pistas = await sqlite.query("""
+        select track_id, coalesce(sum(ms_played), 0) as ms, count(*) as plays
+        from play_history group by track_id order by plays desc, ms desc limit 10
+        """)
+    List<Json> top_out = []
+    for int i in range(0, len(top_pistas)):
+        Json? p = track_row_por_id(jstr(top_pistas[i]["track_id"], ""))
+        if p != null:
+            top_out.add({ "track": p, "msPlayed": jint(top_pistas[i]["ms"], 0), "plays": jint(top_pistas[i]["plays"], 0) })
+    List<Json> top_artistas = await sqlite.query("""
+        select ta.artist_id as id, coalesce(sum(h.ms_played), 0) as ms
+        from play_history h join track_artists ta on ta.track_id = h.track_id
+        group by ta.artist_id order by ms desc limit 10
+        """)
+    List<Json> artistas_out = []
+    for int i in range(0, len(top_artistas)):
+        List<Json> a = await sqlite.query("""
+            select ar.id, ar.name, 0 as n_tracks, 0 as n_disponibles
+            from artists ar where ar.id = ?
+            """, jstr(top_artistas[i]["id"], ""))
+        if len(a) > 0:
+            artistas_out.add({ "artist": artist_row_dto(a[0]), "msPlayed": jint(top_artistas[i]["ms"], 0) })
+    return {
+        "totalMsPlayed": jint(totales[0]["ms"], 0),
+        "totalPlays": jint(totales[0]["plays"], 0),
+        "distinctTracks": jint(totales[0]["pistas"], 0),
+        "topTracks": top_out,
+        "topArtists": artistas_out
+    }
