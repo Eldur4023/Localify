@@ -448,6 +448,12 @@ int main(int argc, char** argv) {
     if (!wait_for_server(port, std::chrono::milliseconds(5000)))
         lux::log().warn("server did not come up in time, opening the window anyway");
 
+    // The port is random by design (find_free_port() above), but external
+    // tools on the same machine (a login script, a "now playing" widget)
+    // still need a way to find it -- relative to work_dir, same as "data"
+    // and everything else the app itself reads/writes.
+    std::ofstream("./port") << port;
+
     const lux_script::WindowConfig& wcfg = lux_script::window_config();
     std::string app_id = sanitize_id(resolve_display_name(mod));
 
@@ -474,6 +480,8 @@ int main(int argc, char** argv) {
     luxdesktop::mpris_shutdown();
     luxdesktop::discord_shutdown();
     save_geometry(app_id, window.last_width(), window.last_height());
+    std::error_code ec;
+    fs::remove("./port", ec);
 
     // See the comment on g_shutdown_from_signal: only raise SIGTERM
     // ourselves if nothing already started the shutdown.

@@ -29,3 +29,10 @@ post endpoint("/api/setup-window"):
 # Las rutas del menú "Ir a" navegan la SPA desde dentro del WebView.
 post endpoint("/api/window/goto/:vista", string vista):
     return html("<script>location.hash = '#/" + vista + "';</script>")
+
+# No hay modo --headless (a diferencia del original): el arranque en sesión
+# (dsh-localify) lanza la ventana normal y la minimiza en cuanto responde,
+# en vez de no mostrarla nunca.
+post endpoint("/api/window/minimize"):
+    window.minimize()
+    return status(204)
