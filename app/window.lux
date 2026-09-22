@@ -36,3 +36,12 @@ post endpoint("/api/window/goto/:vista", string vista):
 post endpoint("/api/window/minimize"):
     window.minimize()
     return status(204)
+
+# Cuando el candado de instancia única rechaza un segundo lanzamiento
+# (icono del menú, doble clic...), main() llama aquí antes de salir en vez
+# de no hacer nada: sin esto, "abrir la app" con la ventana ya minimizada
+# no tenía ningún efecto visible, y parecía que hacía falta intentarlo
+# varias veces para que "abriera".
+post endpoint("/api/window/restore"):
+    window.restore()
+    return status(204)

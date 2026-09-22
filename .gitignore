@@ -2,6 +2,10 @@ build/
 build-*/
 app/data/
 
+# Snapshot de referencia de la app Tauri original (previa al port a Lux),
+# rescatado de 7cf18d4 para comparar comportamiento -- no se versiona.
+tauri-original/
+
 # Editores / herramientas locales
 .claude/
 .vscode/

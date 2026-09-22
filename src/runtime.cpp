@@ -199,6 +199,38 @@ bool acquire_single_instance_lock(const fs::path& dir) {
     return true;
 }
 
+// Called when the lock above says another instance already owns work_dir:
+// asks THAT instance to raise its window instead of just exiting silently.
+// Without this, launching the app again while it was already running
+// (minimized at login, or just still open) had no visible effect at all --
+// which looks exactly like "nothing happened, try again" to whoever clicked
+// the icon, even though a second click was never going to do anything
+// different. Best-effort: a missing/stale port file just means we exit
+// quietly, same as before this existed.
+void ask_running_instance_to_show(const fs::path& work_dir) {
+    std::ifstream in(work_dir / "port");
+    uint16_t port = 0;
+    if (!(in >> port) || port == 0) return;
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return;
+    timeval tv{1, 0};
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    sockaddr_in addr{};
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+        static const char req[] =
+            "POST /api/window/restore HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            "Content-Length: 0\r\nConnection: close\r\n\r\n";
+        ::send(fd, req, sizeof(req) - 1, 0);
+        char buf[64];
+        while (::recv(fd, buf, sizeof(buf), 0) > 0) {}
+    }
+    ::close(fd);
+}
+
 // Binds to loopback with port 0 (the OS picks a free ephemeral port), reads
 // it back with getsockname(), then releases it immediately. A small race
 // (something else could grab the same port before Lux's own bind) is the
@@ -369,6 +401,7 @@ int main(int argc, char** argv) {
     fs::create_directories(work_dir);
     if (!acquire_single_instance_lock(work_dir)) {
         std::cerr << "luxdesktop: already running (" << work_dir.string() << " is locked)\n";
+        ask_running_instance_to_show(work_dir);
         return 1;
     }
     extract_resources(work_dir);
