@@ -334,6 +334,14 @@ fn Json despachar(string cmd, Json args):
     if cmd == "player_seek":
         mutar_estado("seek", "", "", jint(jget(args, "positionMs"), 0))
         return estado_dto()
+    if cmd == "player_report_position":
+        # Sincronización periódica de posición (cada pocos segundos, desde el
+        # propio cliente mientras suena): sin esto, player_state.position_ms
+        # solo se movía en pausa/seek/cambio de pista, dejando clavada la
+        # posición para MPRIS y la tarjeta "reproduciendo ahora", que leen el
+        # estado desde fuera del navegador.
+        mutar_estado("seek", "", "", jint(jget(args, "positionMs"), 0))
+        return null
     if cmd == "player_set_volume":
         double v = jdbl(jget(args, "volume"), 1.0)
         mutar_estado("volume", "", "", 0, v)

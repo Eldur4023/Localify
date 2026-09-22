@@ -342,6 +342,24 @@ function alCargarMetadata(e) {
 	}
 }
 
+// player_state.position_ms en el servidor solo se escribe en momentos
+// puntuales (pausa, seek, cambio de pista): nada lo mantenía al día
+// mientras sonaba sin interrupciones. Eso es invisible en esta misma
+// página (el <audio> es la fuente de verdad local), pero deja clavada la
+// posición para cualquiera que lea el estado desde fuera -- MPRIS y,
+// sobre todo, la tarjeta "reproduciendo ahora" (dsh-localify-bridge),
+// cuya barra de progreso no se movía nunca en una reproducción normal.
+let ultimoReporte = 0;
+function reportarPosicionSiToca(ms) {
+	if (Date.now() - ultimoReporte < 3000) return;
+	ultimoReporte = Date.now();
+	fetch("/api/invoke", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ cmd: "player_report_position", args: JSON.stringify({ positionMs: ms }) }),
+	}).catch(() => {});
+}
+
 slots.forEach((a) => {
 	a.addEventListener("ended", alTerminarPista);
 	// Arrancar el AudioContext con el primer gesto (política de autoplay).
@@ -350,16 +368,18 @@ slots.forEach((a) => {
 		if (cadenaEq && cadenaEq.ctx.state === "suspended") cadenaEq.ctx.resume();
 	});
 	a.addEventListener("loadedmetadata", alCargarMetadata);
-	// La barra de progreso no depende solo del setInterval de player.js: ese
-	// temporizador es JS normal, y WebKitGTK lo puede llegar a congelar (o
-	// espaciarlo mucho) en cuanto la ventana pierde el foco o se minimiza,
+	// La barra de progreso de ESTA página no depende solo del setInterval de
+	// player.js: ese temporizador es JS normal, y WebKitGTK lo puede llegar
+	// a espaciar mucho en cuanto la ventana pierde el foco o se minimiza,
 	// aunque el audio siga sonando de verdad (el decodificador no depende
 	// del bucle de eventos de JS). timeupdate lo dispara el propio elemento
 	// según avanza la reproducción, así que sigue llegando pase lo que pase
 	// con los temporizadores.
 	a.addEventListener("timeupdate", (e) => {
 		if (e.target !== audioActivo()) return;
-		emitir("positionTick", { positionMs: Math.round(e.target.currentTime * 1000) });
+		const ms = Math.round(e.target.currentTime * 1000);
+		emitir("positionTick", { positionMs: ms });
+		reportarPosicionSiToca(ms);
 	});
 });
 
