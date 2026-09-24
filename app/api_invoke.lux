@@ -294,28 +294,6 @@ post endpoint("/api/invoke", PeticionInvoke p):
 fn Json despachar(string cmd, Json args):
     # ── reproductor ── (todo por reproductor.lux: la misma puerta que usan
     # el menú, la bandeja, MPRIS y la tarjeta del escritorio)
-    if cmd == "player_play_track":
-        return reproductor_orden("play_track", args)
-    if cmd == "player_toggle":
-        return reproductor_orden("toggle", args)
-    if cmd == "player_pause":
-        return reproductor_orden("pause", args)
-    if cmd == "player_resume":
-        return reproductor_orden("resume", args)
-    if cmd == "player_next":
-        return reproductor_orden("next", args)
-    if cmd == "player_previous":
-        return reproductor_orden("previous", args)
-    if cmd == "player_seek":
-        return reproductor_orden("seek", args)
-    if cmd == "player_ended":
-        return reproductor_orden("ended", args)
-    if cmd == "player_set_volume":
-        return reproductor_orden("set_volume", args)
-    if cmd == "player_set_repeat":
-        return reproductor_orden("set_repeat", args)
-    if cmd == "player_set_shuffle":
-        return reproductor_orden("set_shuffle", args)
     if cmd == "player_report":
         reproductor_informe(args)
         return null
@@ -323,6 +301,8 @@ fn Json despachar(string cmd, Json args):
         return reproductor_siguiente()
     if cmd == "player_get_state":
         return estado_dto()
+    if cmd.starts_with("player_"):
+        return reproductor_orden(cmd.slice(7), args)
 
     # ── cola ──
     if cmd == "queue_get":
@@ -589,10 +569,6 @@ fn Json despachar(string cmd, Json args):
         return null
 
     return error_api("INVALID", "error.invalid").status(400)
-
-get endpoint("/api/debug/simple"):
-    List<Json> filas = await sqlite.query(sql_pista_dto() + " limit 3")
-    return filas
 
 class PeticionLog:
     string? tipo

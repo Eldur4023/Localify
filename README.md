@@ -174,50 +174,6 @@ synchronous: a local D-Bus round-trip has no unbounded wait, so it needs no
 `await`. No extra dependency either — it talks to
 `org.freedesktop.Notifications` over GDBus, which ships with GTK3 already.
 
-## Native menu and system tray
-
-```lux
-post endpoint("/setup-chrome"):
-    window.set_menu([
-        { "label": "File", "items": [
-            { "label": "New note", "action": "/notes/new", "accel": "<Control>n" },
-            "-",
-            { "label": "Quit", "action": "/quit", "accel": "<Control>q" }
-        ]},
-        { "label": "Help", "items": [
-            { "label": "About", "action": "/about" }
-        ]}
-    ])
-    window.set_tray("./icon.png", "My App")
-    return status(204)
-
-post endpoint("/quit"):
-    window.close()
-    return status(204)
-```
-
-A menu item's `action` is just a path — clicking it runs
-`fetch(action, {method:'POST'})` inside the page, the same "loopback HTTP
-is the whole IPC" idea as everything else here, not a second
-native-to-LuxScript callback mechanism. `"-"` is a separator. An item can
-have `"items"` instead of `"action"` for a nested submenu, as deep as you
-like (`File > Export > As CSV`). An optional `"accel"` (GTK accelerator
-syntax) binds a window-wide keyboard shortcut to that item, working
-whether or not the menu is open. Call `set_menu` again (say, after login)
-to replace the whole bar.
-
-A boolean `"checked"` key turns a leaf into a checkbox — GTK renders and
-manages its own tick mark, and clicking it calls `action` with the
-resulting state appended: `fetch(action + "?checked=true|false", ...)`.
-`set_menu` again with the field updated (from wherever your route keeps
-that state) to reflect it back if something else changes it.
-
-The tray icon's left-click toggles the window's visibility — built in, not
-configurable yet. It uses `GtkStatusIcon`, deprecated since GTK 3.14 but
-still the only tray API GTK3 ships without pulling in a separate
-`libappindicator` dependency, and it still works with anything that
-supports the older XEmbed systray protocol (confirmed on KDE Plasma).
-
 ## Clipboard
 
 ```lux
@@ -291,5 +247,5 @@ never goes down over a typo. Devtools are always on in this mode.
 ## What this is not (yet)
 
 - **Linux only**, same as Lux itself (epoll, `sendfile(2)`, `SO_REUSEPORT`).
-- The menu has no radio-button groups yet (nested submenus, keyboard
-  accelerators and checkboxes all work).
+- No native menu bar or tray icon (`window.set_menu`/`window.set_tray` are
+  no-ops here).

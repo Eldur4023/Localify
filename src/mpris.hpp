@@ -7,7 +7,7 @@
 //
 // App-specific, NOT part of vendor/lux: it is wired into the generic
 // `window` module's WindowControl::mpris_update hook the same way
-// desktop_window.cpp wires up notify()/set_menu(), so vendor/lux itself
+// desktop_window.cpp wires up notify(), so vendor/lux itself
 // stays untouched aside from that one hook declaration.
 #include <cstdint>
 #include <string>

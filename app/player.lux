@@ -1,8 +1,7 @@
 # player.lux — Rutas REST del reproductor y servicio de audio.
 #
 # La interfaz habla por /api/invoke; estas rutas son para quien no es la
-# interfaz: el menú nativo y la bandeja (window.lux, "action" = una ruta), y
-# el relé de MPRIS (mpris.cpp). Todas entran por reproductor_orden()
+# interfaz: el relé de MPRIS (mpris.cpp). Todas entran por reproductor_orden()
 # (reproductor.lux), la misma puerta que la interfaz, así que hacen
 # exactamente lo mismo: mutar, anotar la escucha, publicar y despertar la
 # ventana. El audio se sirve por /audio/:id (send_file soporta Range/206,
@@ -49,25 +48,9 @@ fn List<Json> descargas_activas():
 
 # ─── Órdenes desde fuera de la ventana ───────────────────────────────────────
 
-post endpoint("/api/player/toggle"):
+post endpoint("/api/player/:orden", string orden):
     db_init()
-    return reproductor_orden("toggle", {})
-
-post endpoint("/api/player/pause"):
-    db_init()
-    return reproductor_orden("pause", {})
-
-post endpoint("/api/player/resume"):
-    db_init()
-    return reproductor_orden("resume", {})
-
-post endpoint("/api/player/next"):
-    db_init()
-    return reproductor_orden("next", {})
-
-post endpoint("/api/player/previous"):
-    db_init()
-    return reproductor_orden("previous", {})
+    return reproductor_orden(orden, {})
 
 class PeticionSeek:
     int? positionMs

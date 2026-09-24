@@ -2,17 +2,10 @@
 #include <atomic>
 #include <string>
 
-#include <lux_script/value.hpp>
-
 // Thin wrapper over the vendored webview.h C API (third_party/webview/webview.h)
 // -- a single header wrapping WebKitGTK, no Chromium/Node bundled, nothing to
 // download. Lux itself is untouched: this project only depends on it as a
 // library (vendor/lux), and everything GUI-related lives here instead.
-//
-// set_menu() takes a lux_script::Value directly (the same List<Dict>/Json
-// LuxScript itself works with) rather than a parallel C++ menu-description
-// type: window.cpp (vendor/lux) hands it over as-is, and building the
-// actual GtkMenu from it is entirely this class's job.
 class DesktopWindow {
 public:
     struct Options {
@@ -80,19 +73,6 @@ public:
     // by its own documentation, safe to call from any thread.
     void notify(const std::string& title, const std::string& body);
 
-    // Native menu bar. Rebuilds the window's whole content (menu bar +
-    // webview stacked in a box) the first time this is called -- see
-    // desktop_window.cpp's comment on webview.h's own widget layout. An
-    // item's optional "accel" (GTK accelerator syntax, e.g. "<Control>q")
-    // binds a window-wide keyboard shortcut to it.
-    void set_menu(const lux_script::Value& spec);
-
-    // System tray icon (GtkStatusIcon -- deprecated since GTK 3.14 but
-    // still functional, and the only tray API GTK3 ships without adding a
-    // separate libappindicator dependency; see desktop_window.cpp).
-    // Left-click toggles the window's visibility.
-    void set_tray(const std::string& icon_path, const std::string& tooltip);
-
     // The system clipboard (X11 CLIPBOARD selection via GtkClipboard), not
     // the webview's own `navigator.clipboard`. Both are quick, bounded
     // local X11 round-trips, same threading posture as notify().
@@ -110,9 +90,6 @@ public:
 
 private:
     void*             handle_      = nullptr; // webview_t
-    void*             menubar_     = nullptr; // GtkWidget* -- null until set_menu()'s first call
-    void*             accel_group_ = nullptr; // GtkAccelGroup* -- created alongside menubar_
-    void*             tray_        = nullptr; // GtkStatusIcon* -- null until set_tray()'s first call
     std::atomic<int>  last_width_  = 0;
     std::atomic<int>  last_height_ = 0;
     std::atomic<bool> running_     = false;   // guards terminate() against a GTK

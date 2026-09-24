@@ -653,12 +653,3 @@ fn List<Json> tick_descargas():
         finalizar(jstr(finalizando[i]["track_id"], ""))
 
     return descargas_activas()
-
-get endpoint("/api/downloads"):
-    db_init()
-    return { "jobs": tick_descargas(), "ffprobe": ffprobe_disponible() }
-
-post endpoint("/api/downloads/retry/:id", string id):
-    db_init()
-    await sqlite.exec("update download_jobs set state = 'queued', attempts = 0, last_error = null, updated_at = unixepoch() where track_id = ? and state = 'failed'", id)
-    return { "ok": true }

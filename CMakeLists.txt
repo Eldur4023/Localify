@@ -100,7 +100,7 @@ function(add_lux_desktop_app name)
         VERBATIM
     )
 
-    add_executable(${name} src/runtime.cpp src/desktop_window.cpp src/mpris.cpp src/discord_rpc.cpp ${_generated})
+    add_executable(${name} src/runtime.cpp src/desktop_common.cpp src/desktop_window.cpp src/mpris.cpp src/discord_rpc.cpp ${_generated})
     target_compile_definitions(${name} PRIVATE LUXDESKTOP_APP_ID="${APP_ID}")
     _lux_desktop_link(${name})
 endfunction()
@@ -115,7 +115,7 @@ add_lux_desktop_app(app DIR ${CMAKE_CURRENT_SOURCE_DIR}/app ID localify)
 # Reads app/ straight off disk and hot-reloads it through LuxScript's own
 # compiler -- no respack, no rebuilding THIS binary after editing app.lux, a
 # template or a static file. Run ./build/app-dev while you work.
-add_executable(app-dev src/dev.cpp src/desktop_window.cpp src/mpris.cpp src/discord_rpc.cpp)
+add_executable(app-dev src/dev.cpp src/desktop_common.cpp src/desktop_window.cpp src/mpris.cpp src/discord_rpc.cpp)
 target_compile_definitions(app-dev PRIVATE
     LUXDESKTOP_APP_DIR="${CMAKE_CURRENT_SOURCE_DIR}/app")
 _lux_desktop_link(app-dev)

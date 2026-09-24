@@ -13,6 +13,7 @@
 #include "desktop_window.hpp"
 #include "mpris.hpp"
 #include "discord_rpc.hpp"
+#include "desktop_common.hpp"
 
 #include <lux_script/project.hpp>
 #include <lux_script/vm.hpp>
@@ -40,16 +41,13 @@
 #endif
 
 namespace fs = std::filesystem;
+using namespace luxdesktop;
 
 namespace {
 
 std::shared_ptr<lux_script::Module> g_module;
 std::mutex                          g_module_mutex;
 std::atomic<bool>                   g_stop{false};
-
-std::atomic<bool> g_shutdown_from_signal{false};
-DesktopWindow*     g_window = nullptr;
-std::mutex         g_window_mutex;
 
 std::shared_ptr<lux_script::Module> current_module() {
     std::lock_guard<std::mutex> lk(g_module_mutex);
@@ -64,86 +62,6 @@ void publish_module(std::shared_ptr<lux_script::Module> m) {
 void reload_window() {
     std::lock_guard<std::mutex> lk(g_window_mutex);
     if (g_window) g_window->reload();
-}
-
-// Backs the `window` LuxScript module's callable functions -- see the
-// identical block in src/runtime.cpp for the full rationale.
-void install_window_control_hooks() {
-    auto& ctl = lux_script::window_control();
-    ctl.set_title = [](const std::string& title) {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->set_title(title);
-    };
-    ctl.minimize = [] {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->minimize();
-    };
-    ctl.maximize = [] {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->maximize();
-    };
-    ctl.restore = [] {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->restore();
-    };
-    ctl.close = [] {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->terminate();
-    };
-    ctl.fullscreen = [] {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->fullscreen();
-    };
-    ctl.unfullscreen = [] {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->unfullscreen();
-    };
-    ctl.set_always_on_top = [](bool on_top) {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->set_always_on_top(on_top);
-    };
-    ctl.pick_file = [](const std::string& suggested_name, bool save_mode) -> std::string {
-        DesktopWindow* w;
-        {
-            std::lock_guard<std::mutex> lk(g_window_mutex);
-            w = g_window;
-        }
-        return w ? w->pick_file(suggested_name, save_mode) : std::string();
-    };
-    ctl.notify = [](const std::string& title, const std::string& body) {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->notify(title, body);
-    };
-    ctl.set_menu = [](const lux_script::Value& spec) {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->set_menu(spec);
-    };
-    ctl.set_tray = [](const std::string& icon_path, const std::string& tooltip) {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->set_tray(icon_path, tooltip);
-    };
-    ctl.clipboard_read = []() -> std::string {
-        DesktopWindow* w;
-        {
-            std::lock_guard<std::mutex> lk(g_window_mutex);
-            w = g_window;
-        }
-        return w ? w->clipboard_read() : std::string();
-    };
-    ctl.clipboard_write = [](const std::string& text) {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->clipboard_write(text);
-    };
-    ctl.mpris_update = [](const lux_script::Value& state) {
-        luxdesktop::mpris_update(state);
-    };
-    ctl.discord_update = [](const lux_script::Value& state) {
-        luxdesktop::discord_update(state);
-    };
-    ctl.eval_js = [](const std::string& js) {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->eval_js(js);
-    };
 }
 
 // Lux's own Module::stamps (vendor/lux) only tracks the .lux files
@@ -233,92 +151,6 @@ void watch_loop(std::vector<fs::path> inputs) {
         lux::log().info("reloaded: " + std::to_string(next->program.routes.size()) + " route(s)");
         reload_window();
     }
-}
-
-uint16_t find_free_port() {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) throw std::runtime_error("socket: " + std::string(std::strerror(errno)));
-    sockaddr_in addr{};
-    addr.sin_family      = AF_INET;
-    addr.sin_port        = 0;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        ::close(fd);
-        throw std::runtime_error("bind: " + std::string(std::strerror(errno)));
-    }
-    socklen_t len = sizeof(addr);
-    ::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len);
-    uint16_t port = ntohs(addr.sin_port);
-    ::close(fd);
-    return port;
-}
-
-// Same window-geometry memory as src/runtime.cpp -- see its comments for
-// the reasoning (sanity bounds, XDG_CACHE_HOME, why a plain "W H" file).
-std::string resolve_display_name(const std::shared_ptr<lux_script::Module>& mod) {
-    const auto& wcfg = lux_script::window_config();
-    if (!wcfg.title.empty())            return wcfg.title;
-    if (!mod->program.app.name.empty()) return mod->program.app.name;
-    return "Lux Desktop App";
-}
-
-std::string sanitize_id(const std::string& name) {
-    std::string out;
-    for (char c : name) {
-        if (std::isalnum(static_cast<unsigned char>(c)))
-            out += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        else if (!out.empty() && out.back() != '-')
-            out += '-';
-    }
-    while (!out.empty() && out.back() == '-') out.pop_back();
-    return out.empty() ? "lux-desktop-app" : out;
-}
-
-fs::path xdg_cache_home() {
-    if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg) return fs::path(xdg);
-    const char* home = std::getenv("HOME");
-    return fs::path(home ? home : ".") / ".cache";
-}
-
-fs::path geometry_file(const std::string& id) {
-    return xdg_cache_home() / "lux-desktop" / (id + ".geometry");
-}
-
-bool load_saved_geometry(const std::string& id, int& width, int& height) {
-    std::ifstream in(geometry_file(id));
-    int w = 0, h = 0;
-    if (!(in >> w >> h)) return false;
-    if (w < 100 || h < 100 || w > 10000 || h > 10000) return false;
-    width = w;
-    height = h;
-    return true;
-}
-
-void save_geometry(const std::string& id, int width, int height) {
-    if (width < 100 || height < 100 || width > 10000 || height > 10000) return;
-    std::error_code ec;
-    fs::path f = geometry_file(id);
-    fs::create_directories(f.parent_path(), ec);
-    std::ofstream out(f);
-    if (out) out << width << " " << height << "\n";
-}
-
-bool wait_for_server(uint16_t port, std::chrono::milliseconds timeout) {
-    auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (fd >= 0) {
-            sockaddr_in addr{};
-            addr.sin_family      = AF_INET;
-            addr.sin_port        = htons(port);
-            addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-            bool ok = ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
-            ::close(fd);
-            if (ok) return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    return false;
 }
 
 } // namespace

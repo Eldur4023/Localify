@@ -1,5 +1,5 @@
-// Generado desde en.json: JSON como módulo ES para no depender
-// de import attributes en el WebKitGTK del sistema.
+// Un módulo ES y no un .json: el WebKitGTK del sistema no soporta
+// import attributes.
 export default {
 	"app.name": "Localify",
 	"nav.home": "Home",

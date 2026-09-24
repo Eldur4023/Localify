@@ -1,42 +1,11 @@
-# window.lux — Integración con el shell de escritorio.
-#
-# El menú nativo y la bandeja se configuran desde la UI (que es quien sabe
-# que hay ventana): las "acciones" del menú son rutas que el propio WebKit
-# invoca con fetch, que es exactamente el mecanismo de window.set_menu.
-
-post endpoint("/api/setup-window"):
-    window.set_menu([
-        {
-            "label": "Reproducción",
-            "items": [
-                { "label": "Reproducir / Pausar", "action": "/api/player/toggle", "accel": "<Control>p" },
-                { "label": "Siguiente", "action": "/api/player/next", "accel": "<Control>Right" },
-                { "label": "Anterior", "action": "/api/player/previous", "accel": "<Control>Left" }
-            ]
-        },
-        {
-            "label": "Ir a",
-            "items": [
-                { "label": "Inicio", "action": "/api/window/goto/home" },
-                { "label": "Biblioteca", "action": "/api/window/goto/library" },
-                { "label": "Ajustes", "action": "/api/window/goto/settings" }
-            ]
-        }
-    ])
-    window.set_tray("./icon.png", "Localify")
-    return status(204)
-
-# Las rutas del menú "Ir a" navegan la SPA desde dentro del WebView.
-post endpoint("/api/window/goto/:vista", string vista):
-    return html("<script>location.hash = '#/" + vista + "';</script>")
+# window.lux — Minimizar y restaurar la ventana desde fuera de ella.
 
 # No hay modo --headless (a diferencia del original), pero el binario SÍ
 # acepta ahora un flag nativo --minimized (runtime.cpp, DesktopWindow::
 # Options::start_minimized) que arranca la ventana ya iconificada desde el
 # primer frame -- el arranque en sesión debería pasar ese flag directamente
 # en vez de usar este endpoint. Este endpoint se queda para minimizar una
-# ventana YA en marcha bajo demanda (por ejemplo desde el propio menú de la
-# app), un caso distinto de "arrancar minimizado".
+# ventana YA en marcha bajo demanda, un caso distinto de "arrancar minimizado".
 post endpoint("/api/window/minimize"):
     window.minimize()
     return status(204)

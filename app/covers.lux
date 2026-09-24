@@ -68,7 +68,8 @@ fn string? portada_album_url_fallback(string album_id):
             return url_miniatura_video(yid)
     return null
 
-get endpoint("/api/cover/album/:id", string id):
+# Portada de álbum: la suya, o la miniatura de una de sus pistas con vídeo.
+fn Json? portada_album_respuesta(string id):
     db_init()
     string destino = os.path_join(covers_dir(), "album-" + id + ".jpg")
     string? url = portada_album_url(id)
@@ -160,31 +161,12 @@ delete endpoint("/api/cover/playlist/:id", string id):
 # de arriba con esas formas.
 
 get endpoint("/api/cover/albums/:id", string id):
-    List<Json> f = await sqlite.query("select cover_url from albums where id = ?", id)
-    if len(f) == 0 or jstr(f[0]["cover_url"], "") == "":
-        return status(404)
-    string destino = os.path_join(covers_dir(), "album-" + id + ".jpg")
-    bool ok = cachear_imagen(jstr(f[0]["cover_url"], ""), destino)
-    if not ok or not os.is_file(destino):
-        return status(404)
-    header("Content-Type", "image/jpeg")
-    return send_file(destino, covers_dir())
+    return await portada_album_respuesta(id)
 
+# id pelado = álbum (los prefijos track/artist/playlist caen arriba por ser
+# más específicos)
 get endpoint("/api/cover/:id", string id):
-    # id pelado = álbum (los prefijos track/artist/playlist caen arriba por
-    # ser más específicos)
-    List<Json> f = await sqlite.query("select cover_url from albums where id = ?", id)
-    if len(f) == 0 or jstr(f[0]["cover_url"], "") == "":
-        return status(404)
-    string destino = os.path_join(covers_dir(), "album-" + id + ".jpg")
-    bool ok = cachear_imagen(jstr(f[0]["cover_url"], ""), destino)
-    if not ok or not os.is_file(destino):
-        return status(404)
-    header("Content-Type", "image/jpeg")
-    return send_file(destino, covers_dir())
-
-get endpoint("/api/cover/playlists/:id", string id):
-    return await portada_playlist_respuesta(id)
+    return await portada_album_respuesta(id)
 
 get endpoint("/api/cover/artist/:id", string id):
     # el catálogo de YouTube Music no trae fotos de artista (sin Wikidata):
