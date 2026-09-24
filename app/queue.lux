@@ -64,6 +64,11 @@ class EstadoCola:
     List<Entrada> user_queue
     List<string> history
     int revision
+    # Ver reproductor.lux: cada cue es una orden "carga/colócate aquí" que el
+    # motor de audio aplica una sola vez; anchor_ms es el instante de época en
+    # que la posición 0 habría sonado (0 = no está sonando o aún no se sabe).
+    int cue
+    int anchor_ms
 
 fn List<string> parsear_ids(string json_texto):
     List<string> out = []
@@ -102,8 +107,8 @@ fn List<int> parsear_orden(string json_texto):
     return out
 
 fn EstadoCola leer_estado():
-    List<Json> filas = await sqlite.query("select track_id, position_ms, volume, status, repeat_mode, shuffle, shuffle_seed, context, context_queue, play_order, queue_index, user_queue, history, revision from player_state where id = 1")
-    EstadoCola e = EstadoCola("", 0, 1.0, "stopped", "off", false, 0, "null", [], [], 0, [], [], 0)
+    List<Json> filas = await sqlite.query("select track_id, position_ms, volume, status, repeat_mode, shuffle, shuffle_seed, context, context_queue, play_order, queue_index, user_queue, history, revision, cue, anchor_ms from player_state where id = 1")
+    EstadoCola e = EstadoCola("", 0, 1.0, "stopped", "off", false, 0, "null", [], [], 0, [], [], 0, 0, 0)
     if len(filas) == 0:
         return e
     Json f = filas[0]
@@ -121,6 +126,8 @@ fn EstadoCola leer_estado():
     e.user_queue = parsear_entries(jstr(f["user_queue"], ""))
     e.history = parsear_ids(jstr(f["history"], ""))
     e.revision = jint(f["revision"], 0)
+    e.cue = jint(f["cue"], 0)
+    e.anchor_ms = jint(f["anchor_ms"], 0)
     return e
 
 fn List<Json> user_queue_json(EstadoCola e):
@@ -135,12 +142,31 @@ fn bool guardar_estado(EstadoCola e):
     int tocado = await sqlite.exec(
         """update player_state set track_id = ?, position_ms = ?, volume = ?, status = ?,
            repeat_mode = ?, shuffle = ?, shuffle_seed = ?, context = ?, context_queue = ?,
-           play_order = ?, queue_index = ?, user_queue = ?, history = ?, revision = revision + 1,
-           updated_at = unixepoch() where id = 1 and revision = ?""",
+           play_order = ?, queue_index = ?, user_queue = ?, history = ?, cue = ?, anchor_ms = ?,
+           revision = revision + 1, updated_at = unixepoch() where id = 1 and revision = ?""",
         e.track_id, e.position_ms, e.volume, e.status, e.repeat_mode,
         e.shuffle ? 1 : 0, e.shuffle_seed, e.context, str(e.context_queue),
-        str(e.play_order), e.queue_index, str(user_queue_json(e)), str(e.history), e.revision)
+        str(e.play_order), e.queue_index, str(user_queue_json(e)), str(e.history),
+        e.cue, e.anchor_ms, e.revision)
     return tocado == 1
+
+# La ÚNICA forma en que el backend mueve el motor de audio: estrena un cue.
+# El motor aplica cada cue una vez (carga la pista si no es la que tiene, o
+# salta a `ms` si lo es), y todo lo que el cliente informa lleva el cue en el
+# que estaba: un informe de un cue viejo (la canción anterior) se descarta en
+# vez de aplicarse a la nueva.
+fn void cuear(EstadoCola e, int ms):
+    e.cue = e.cue + 1
+    e.position_ms = ms
+    e.anchor_ms = 0
+
+# Posición real ahora mismo: mientras suena, lo que marca el ancla; si no,
+# la última guardada.
+fn int posicion_viva(EstadoCola e):
+    if e.status == "playing" and e.anchor_ms > 0:
+        int p = time.now() - e.anchor_ms
+        return p < 0 ? 0 : p
+    return e.position_ms
 
 # Mutación con reintento: recarga, aplica el cambio y compite por la escritura.
 # Único punto de la CAS sobre player_state — todo mutador de estado pasa por
@@ -152,7 +178,7 @@ fn bool mutar_estado(string accion, string arg1, string arg2, int argn, double a
         EstadoCola e = leer_estado()
         bool ok = false
         if accion == "avanzar":
-            ok = cola_avanzar(e, arg1 == "natural", argn)
+            ok = cola_avanzar(e, arg1 == "natural")
         elif accion == "retroceder":
             ok = cola_retroceder(e)
         elif accion == "shuffle":
@@ -168,26 +194,29 @@ fn bool mutar_estado(string accion, string arg1, string arg2, int argn, double a
         elif accion == "orden_indice":
             ok = cola_ir_a_indice(e, argn)
         elif accion == "toggle":
-            # argn: posición en ms a fijar al pausar (-1 = no tocarla)
+            # argn: posición en ms que el motor tenía al pausar (-1 = no la
+            # sabe quien pide la pausa -- MPRIS, bandeja --: se usa el ancla)
             if e.track_id != "":
                 if e.status == "playing":
+                    e.position_ms = argn >= 0 ? argn : posicion_viva(e)
+                    e.anchor_ms = 0
                     e.status = "paused"
-                    if argn >= 0:
-                        e.position_ms = argn
                 else:
                     e.status = "playing"
                 ok = true
         elif accion == "pause":
+            if e.status == "playing":
+                e.position_ms = argn >= 0 ? argn : posicion_viva(e)
+            e.anchor_ms = 0
             e.status = "paused"
-            if argn >= 0:
-                e.position_ms = argn
             ok = true
         elif accion == "resume":
             if e.track_id != "":
                 e.status = "playing"
             ok = true
         elif accion == "seek":
-            e.position_ms = argn
+            if e.track_id != "":
+                cuear(e, argn < 0 ? 0 : argn)
             ok = true
         elif accion == "volume":
             double v = argd
@@ -201,10 +230,11 @@ fn bool mutar_estado(string accion, string arg1, string arg2, int argn, double a
             e.user_queue = []
             ok = true
         elif accion == "set_track":
-            registrar_historial(e)
+            if e.track_id != arg1:
+                registrar_historial(e)
             e.track_id = arg1
-            e.position_ms = 0
             e.status = "playing"
+            cuear(e, 0)
             ok = true
         if not ok:
             return true
@@ -232,8 +262,6 @@ fn bool set_contexto(string context_json, List<string> pistas, string pista_inic
                 if pistas[i] == pista_inicial:
                     e.queue_index = i
                     break
-        if pista_inicial != "" and pista_inicial != e.track_id:
-            e.position_ms = 0
         if guardar_estado(e):
             return true
     return false
@@ -269,20 +297,16 @@ fn void registrar_historial(EstadoCola e):
 # ─── Avance y retroceso ──────────────────────────────────────────────────────
 
 # Avanza de pista. `natural` distingue el fin de la canción del salto manual:
-# solo el fin natural repite en modo "track" y cuenta como reproducción.
-# Devuelve true si el estado cambió (siempre escriben algo, salvo error).
-fn bool cola_avanzar(EstadoCola e, bool natural, int ms_reproducidos):
-    registrar_historial(e)
-
-    # historial de reproducciones para estadísticas
-    if e.track_id != "":
-        await sqlite.exec("insert into play_history(id, track_id, played_at, ms_played, completed, context) values(?, ?, unixepoch(), ?, ?, ?)",
-            nuevo_id(), e.track_id, ms_reproducidos, natural ? 1 : 0, e.context)
-
+# solo el fin natural repite en modo "track". Sin efectos fuera de `e`: esto
+# corre dentro del bucle de reintentos de mutar_estado, y la escucha para
+# estadísticas la anota reproductor.lux UNA vez, tras escribir con éxito.
+fn bool cola_avanzar(EstadoCola e, bool natural):
     # repetición de pista: solo en fin natural
     if natural and e.repeat_mode == "track" and e.track_id != "":
-        e.position_ms = 0
+        cuear(e, 0)
         return true
+
+    registrar_historial(e)
 
     # 1) la cola de usuario tiene prioridad absoluta
     if len(e.user_queue) > 0:
@@ -291,30 +315,30 @@ fn bool cola_avanzar(EstadoCola e, bool natural, int ms_reproducidos):
         for int i in range(1, len(e.user_queue)):
             resto.add(e.user_queue[i])
         e.user_queue = resto
-        e.position_ms = 0
+        cuear(e, 0)
         return true
 
     # 2) avance dentro del contexto
+    # Fin sin nada más que sonar: se para, pero la última se QUEDA en el
+    # reproductor, al principio (como el original: "se para, no se apaga la
+    # sesión"); darle a play la vuelve a poner.
     int n = len(e.context_queue)
     if n == 0:
-        # sin contexto ni cola: se detiene
-        e.track_id = ""
-        e.position_ms = 0
+        cuear(e, 0)
         e.status = "stopped"
         return true
     if e.queue_index + 1 < n:
         e.queue_index = e.queue_index + 1
         e.track_id = pista_en_orden(e, e.queue_index)
-        e.position_ms = 0
+        cuear(e, 0)
         return true
     # fin del contexto
     if e.repeat_mode == "queue":
         e.queue_index = 0
         e.track_id = pista_en_orden(e, 0)
-        e.position_ms = 0
+        cuear(e, 0)
         return true
-    e.track_id = ""
-    e.position_ms = 0
+    cuear(e, 0)
     e.status = "stopped"
     return true
 
@@ -326,15 +350,15 @@ fn bool cola_retroceder(EstadoCola e):
     if len(e.user_queue) == 0 and len(e.history) > 0 and e.context_queue == []:
         e.track_id = e.history[len(e.history) - 1]
         e.history = e.history.slice(0, len(e.history) - 1)
-        e.position_ms = 0
+        cuear(e, 0)
         return true
     if e.queue_index > 0 and len(e.context_queue) > 0:
         e.queue_index = e.queue_index - 1
         e.track_id = pista_en_orden(e, e.queue_index)
-        e.position_ms = 0
+        cuear(e, 0)
         return true
     if e.track_id != "":
-        e.position_ms = 0
+        cuear(e, 0)
         return true
     return false
 
@@ -426,7 +450,7 @@ fn bool cola_saltar_entry(EstadoCola e, string entry_id):
                 if j != i:
                     resto.add(e.user_queue[j])
             e.user_queue = resto
-            e.position_ms = 0
+            cuear(e, 0)
             return true
     return false
 
@@ -437,5 +461,21 @@ fn bool cola_ir_a_indice(EstadoCola e, int indice):
     registrar_historial(e)
     e.queue_index = indice
     e.track_id = pista_en_orden(e, indice)
-    e.position_ms = 0
+    cuear(e, 0)
     return true
+
+# Lo que sonaría si la pista actual terminase ahora (fin natural), sin
+# tocar nada: el motor de audio lo precarga para el gapless/crossfade.
+fn string pista_siguiente_natural(EstadoCola e):
+    if e.track_id == "":
+        return ""
+    if e.repeat_mode == "track":
+        return e.track_id
+    if len(e.user_queue) > 0:
+        return e.user_queue[0].trackId
+    int n = len(e.context_queue)
+    if e.queue_index + 1 < n:
+        return pista_en_orden(e, e.queue_index + 1)
+    if e.repeat_mode == "queue" and n > 0:
+        return pista_en_orden(e, 0)
+    return ""

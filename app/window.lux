@@ -30,9 +30,13 @@ post endpoint("/api/setup-window"):
 post endpoint("/api/window/goto/:vista", string vista):
     return html("<script>location.hash = '#/" + vista + "';</script>")
 
-# No hay modo --headless (a diferencia del original): el arranque en sesión
-# (dsh-localify) lanza la ventana normal y la minimiza en cuanto responde,
-# en vez de no mostrarla nunca.
+# No hay modo --headless (a diferencia del original), pero el binario SÍ
+# acepta ahora un flag nativo --minimized (runtime.cpp, DesktopWindow::
+# Options::start_minimized) que arranca la ventana ya iconificada desde el
+# primer frame -- el arranque en sesión debería pasar ese flag directamente
+# en vez de usar este endpoint. Este endpoint se queda para minimizar una
+# ventana YA en marcha bajo demanda (por ejemplo desde el propio menú de la
+# app), un caso distinto de "arrancar minimizado".
 post endpoint("/api/window/minimize"):
     window.minimize()
     return status(204)

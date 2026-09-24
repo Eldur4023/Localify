@@ -127,6 +127,10 @@ void install_window_control_hooks() {
     ctl.discord_update = [](const lux_script::Value& state) {
         luxdesktop::discord_update(state);
     };
+    ctl.eval_js = [](const std::string& js) {
+        std::lock_guard<std::mutex> lk(g_window_mutex);
+        if (g_window) g_window->eval_js(js);
+    };
 }
 
 #ifndef LUXDESKTOP_APP_ID
@@ -390,6 +394,15 @@ bool wait_for_server(uint16_t port, std::chrono::milliseconds timeout) {
 
 int main(int argc, char** argv) {
     bool install = argc > 1 && std::string(argv[1]) == "--install-desktop";
+    // No --headless mode (unlike the original Tauri app): a session
+    // launcher that wants the window running but out of the way from the
+    // start passes this instead of the old workaround (launch normal, then
+    // POST /api/window/minimize the moment the server answers -- see
+    // window.lux, still there for minimizing/restoring an ALREADY-running
+    // window on demand, a different case from "start minimized").
+    bool start_minimized = false;
+    for (int i = 1; i < argc; ++i)
+        if (std::string(argv[i]) == "--minimized") start_minimized = true;
 
     // Resources are extracted to a PERSISTENT directory (XDG data home), not
     // a temp one: anything the app writes next to its own sources at runtime
@@ -410,9 +423,18 @@ int main(int argc, char** argv) {
                                  // relative to itself, so this is the CWD
                                  // they expect.
 
+    // The sources are the .lux files EMBEDDED in this binary, not whatever
+    // sits in work_dir: extraction overwrites but never deletes, so a file
+    // removed from app/ in a newer build stayed there and kept being
+    // compiled (and serving its routes) forever.
+    std::vector<std::string> sources;
+    for (const auto& f : kEmbeddedFiles) {
+        fs::path p(f.path);
+        if (p.extension() == ".lux") sources.push_back(p.string());
+    }
     std::vector<fs::path> inputs;
     std::string error;
-    if (!lux_script::resolve_inputs({"."}, inputs, error)) {
+    if (!lux_script::resolve_inputs(sources, inputs, error)) {
         std::cerr << "luxdesktop: " << error << "\n";
         return 1;
     }
@@ -497,6 +519,7 @@ int main(int argc, char** argv) {
     opts.resizable = wcfg.resizable;
     opts.devtools  = wcfg.devtools;
     opts.icon      = wcfg.icon;
+    opts.start_minimized = start_minimized;
     // A size the user already resized to on a previous run wins over the
     // window: block's own defaults -- those are a first-launch default,
     // not something to snap back to every time.

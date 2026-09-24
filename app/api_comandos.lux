@@ -394,20 +394,6 @@ fn Json cmd_importar_ficheros(Json args):
     tocar_biblioteca()
     return { "filesSelected": elegidos, "imported": importadas, "skippedUnreadable": ilegibles }
 
-# Reproducir con contexto: traduce el PlaybackContextDto a mi almacenamiento
-# interno, fija la pista y arranca la descarga si hace falta.
-fn Json cmd_play_track(Json args):
-    garantizar_biblioteca()
-    string track_id = arg_str(args, "trackId", "")
-    if track_id == "":
-        return error_api("INVALID", "error.invalid").status(400)
-    Json ctx = contexto_desde_args(args, track_id)
-    List<string> pistas = pistas_de_contexto_dto(ctx, track_id)
-    set_contexto(str(ctx), pistas, track_id)
-    mutar_estado("set_track", track_id, "", 0)
-    asegurar_descarga(track_id, "immediate")
-    return estado_dto()
-
 # ─── Búsqueda ────────────────────────────────────────────────────────────────
 
 fn Json cmd_search_query(Json args):

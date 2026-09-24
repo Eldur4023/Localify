@@ -84,11 +84,18 @@ function(add_lux_desktop_app name)
     # never embedded into the binary -- extracting a stale build-time copy
     # over it at boot would destroy the user's library.
     list(FILTER _app_files EXCLUDE REGEX "${APP_DIR}/data/.*")
+    # The file LIST as a dependency too: deleting a file from DIR leaves every
+    # remaining dependency older than the generated .cpp, so without this the
+    # deleted file stayed embedded (and running) in the binary. file(CONFIGURE)
+    # only rewrites the stamp when the list actually changes.
+    set(_listado ${CMAKE_CURRENT_BINARY_DIR}/generated/${name}_files.txt)
+    string(REPLACE ";" "\n" _listado_txt "${_app_files}")
+    file(CONFIGURE OUTPUT ${_listado} CONTENT "${_listado_txt}\n")
     set(_generated ${CMAKE_CURRENT_BINARY_DIR}/generated/${name}_resources.cpp)
     add_custom_command(
         OUTPUT  ${_generated}
         COMMAND respack ${APP_DIR} ${_generated}
-        DEPENDS respack ${_app_files}
+        DEPENDS respack ${_app_files} ${_listado}
         COMMENT "luxdesktop: embedding resources for ${name}"
         VERBATIM
     )

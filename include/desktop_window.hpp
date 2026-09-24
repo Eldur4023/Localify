@@ -22,6 +22,14 @@ public:
         bool        resizable = true;
         bool        devtools  = false;
         std::string icon;             // path to an image file, or empty for none
+        // Starts iconified instead of shown -- for a session launcher that
+        // wants the app running but out of the way from the first frame
+        // (there is no --headless mode, see runtime.cpp's --minimized flag)
+        // instead of showing the window and then minimizing it a moment
+        // later over HTTP (POST /api/window/minimize, window.lux), which is
+        // what this replaces for THAT one case; the endpoint still exists
+        // for minimizing/restoring an already-running window on demand.
+        bool        start_minimized = false;
     };
 
     explicit DesktopWindow(Options opts);
@@ -42,6 +50,10 @@ public:
     // watcher (src/dev.cpp) so a hot LuxScript recompile refreshes the
     // window the same way it would a browser tab, no manual F5.
     void reload();
+
+    // Thread-safe: runs `js` inside the page (window.eval_js()). Runs even
+    // while the window is minimized/hidden -- unlike the page's own timers.
+    void eval_js(const std::string& js);
 
     // The rest back the `window` LuxScript module (vendor/lux/src/lux_script/
     // modules/window.cpp) via WindowControl -- see runtime.cpp/dev.cpp for

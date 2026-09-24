@@ -898,6 +898,58 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
             }
             return recv;
         }
+        // sort_by/find/find_index: the same "pass a fn, no closure" shape as
+        // map/filter/reduce/for_each above, added because sort()'s natural-
+        // order-only limit (comment above it) and index_of()'s equals-only
+        // match are exactly the two gaps a hand-rolled loop keeps getting
+        // reintroduced for (sort a list of Dicts by one field, find the
+        // first element matching more than a single equals check).
+        if (name == "sort_by") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!args[0].is_func()) { error = "'sort_by()' expects a function"; return Value::null(); }
+            std::vector<Value> keys;
+            keys.reserve(l.size());
+            for (auto& item : l) {
+                Value k = call_func_value(ctx, args[0], {item}, "sort_by", error);
+                if (!error.empty()) return Value::null();
+                keys.push_back(std::move(k));
+            }
+            std::vector<size_t> order(l.size());
+            for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+            bool ok = true;
+            std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                bool this_ok = true;
+                bool r = keys[a].less_than(keys[b], this_ok);
+                if (!this_ok) ok = false;
+                return r;
+            });
+            if (!ok) { error = "sort_by(): the key values cannot be compared with each other"; return Value::null(); }
+            Value::List out;
+            out.reserve(l.size());
+            for (size_t i : order) out.push_back(l[i]);
+            l = std::move(out);
+            return recv;
+        }
+        if (name == "find") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!args[0].is_func()) { error = "'find()' expects a function"; return Value::null(); }
+            for (auto& item : l) {
+                Value keep = call_func_value(ctx, args[0], {item}, "find", error);
+                if (!error.empty()) return Value::null();
+                if (keep.truthy()) return item;
+            }
+            return Value::null();
+        }
+        if (name == "find_index") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!args[0].is_func()) { error = "'find_index()' expects a function"; return Value::null(); }
+            for (size_t i = 0; i < l.size(); ++i) {
+                Value keep = call_func_value(ctx, args[0], {l[i]}, "find_index", error);
+                if (!error.empty()) return Value::null();
+                if (keep.truthy()) return Value::integer(static_cast<long long>(i));
+            }
+            return Value::integer(-1);
+        }
         error = "Lists have no method '" + name + "'";
         return Value::null();
     }
@@ -1073,6 +1125,8 @@ const std::vector<BuiltinMethod>* methods_of(const std::string& type) {
         {"join", 1, 1, "string"},
         {"map", 1, 1, "List"},         {"filter", 1, 1, "List"},
         {"reduce", 2, 2, "Json"},      {"for_each", 1, 1, nullptr},
+        {"sort_by", 1, 1, nullptr},    {"find", 1, 1, "Json"},
+        {"find_index", 1, 1, "int"},
     });
     static const std::vector<BuiltinMethod> kDict = with_own({
         {"has", 1, 1, "bool"},   {"keys", 0, 0, "List"}, {"save", 1, 1, "string"},

@@ -529,7 +529,21 @@ public:
                      }),
                      this);
     // Initialize webview widget
-    m_webview = webkit_web_view_new();
+    //
+    // Localify: a desktop app, not a browser tab, so the browser autoplay
+    // policy does not apply -- with it on (WebKitGTK's default), <audio>.play()
+    // and a Web Audio AudioContext created without a user gesture stay
+    // blocked/suspended, and anything routed through that AudioContext plays
+    // in silence while its clock keeps running. Tauri's webview layer (wry)
+    // sets this same policy on Linux. The policies object is construct-only,
+    // hence g_object_new instead of webkit_web_view_new().
+    {
+      WebKitWebsitePolicies *policies = webkit_website_policies_new_with_policies(
+          "autoplay", WEBKIT_AUTOPLAY_ALLOW, NULL);
+      m_webview = GTK_WIDGET(g_object_new(WEBKIT_TYPE_WEB_VIEW,
+                                          "website-policies", policies, NULL));
+      g_object_unref(policies);
+    }
     WebKitUserContentManager *manager =
         webkit_web_view_get_user_content_manager(WEBKIT_WEB_VIEW(m_webview));
     g_signal_connect(manager, "script-message-received::external",
@@ -552,6 +566,8 @@ public:
     WebKitSettings *settings =
         webkit_web_view_get_settings(WEBKIT_WEB_VIEW(m_webview));
     webkit_settings_set_javascript_can_access_clipboard(settings, true);
+    // Same reason as the autoplay policy above.
+    webkit_settings_set_media_playback_requires_user_gesture(settings, false);
     if (debug) {
       webkit_settings_set_enable_write_console_messages_to_stdout(settings,
                                                                   true);

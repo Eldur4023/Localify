@@ -1,0 +1,287 @@
+# reproductor.lux — Órdenes del reproductor y lo que se publica hacia fuera.
+#
+# Un dueño por cada dato:
+#   - El backend decide QUÉ suena: pista, cola, estado deseado (sonando /
+#     pausa), volumen, repetición, aleatorio e historial. Todo cambio pasa por
+#     mutar_estado() (queue.lux) y sube `revision`; el cliente descarta
+#     cualquier respuesta con una revision más vieja que la última aplicada.
+#   - El motor de audio del cliente (public/src/ipc/motor-audio.js) es el
+#     único dueño del SONIDO y del TIEMPO. El backend solo lo mueve estrenando
+#     un `cue` (queue.lux: cuear): "carga esta pista / colócate aquí". El
+#     cliente aplica cada cue una vez, y todo lo que informa lleva el cue en
+#     el que estaba, así que un informe atrasado de la canción anterior nunca
+#     se aplica a la siguiente.
+#   - La posición se ANCLA: el motor informa del instante de época en que la
+#     posición 0 habría sonado (al empezar de verdad, al saltar y cada pocos
+#     segundos). La posición es entonces "ahora − ancla" para cualquiera que
+#     la lea desde fuera (la tarjeta, MPRIS, Discord), sin re-anclar en cada
+#     informe.
+#
+# Toda orden -- de la interfaz, del menú nativo, de la bandeja, de MPRIS o de
+# la tarjeta del escritorio -- entra por reproductor_orden(): muta, anota la
+# escucha, publica en MPRIS/Discord y despierta a la ventana. Antes cada
+# entrada tenía su copia y cada copia hacía una parte distinta.
+
+# ─── Estado para la interfaz ─────────────────────────────────────────────────
+
+# PlayerStateDto + revision y cue, que es lo que el cliente necesita para
+# ordenar y aplicar. positionMs es la posición VIVA (ancla), no la última
+# guardada.
+fn Json estado_dto():
+    EstadoCola e = leer_estado()
+    Json? pista = track_row_por_id(e.track_id)
+    int duracion = pista == null ? 0 : jint(pista["durationMs"], 0)
+    int pos = posicion_viva(e)
+    if duracion > 0 and pos > duracion:
+        pos = duracion
+    Json? ctx = parse_json(e.context)
+    return {
+        "track": pista,
+        "status": e.status,
+        "positionMs": pos,
+        "durationMs": duracion,
+        "bufferedMs": pista != null and e.status == "playing" ? duracion : 0,
+        "volume": e.volume,
+        "repeat": e.repeat_mode,
+        "shuffle": e.shuffle,
+        "context": ctx,
+        "revision": e.revision,
+        "cue": e.cue
+    }
+
+# ─── Escuchas (estadísticas) ─────────────────────────────────────────────────
+
+# Una escucha cuenta a partir de 5 s y es "completa" desde el 90 %, como en
+# el original. Se escribe EN CURSO, no al acabar: la fila nace al llegar a
+# los 5 s y se va actualizando con cada informe del motor (cada ~5 s), cada
+# orden y al cerrarse (cambio de pista, fin natural), así que las
+# estadísticas se mueven mientras suena. El tiempo es el que de verdad sonó,
+# sin pausas, medido por el motor.
+#
+# La escucha abierta vive en `state` (memoria del proceso): su fila, su
+# pista, lo último sabido y cuándo, para estimar lo que sonó desde entonces
+# cuando la orden viene de fuera (MPRIS, bandeja) y nadie trae la cifra.
+
+fn void escucha_progreso(string track_id, int ms, string contexto):
+    if track_id == "" or ms < 5000:
+        return
+    List<Json> f = await sqlite.query("select duration_ms from tracks where id = ?", track_id)
+    int dur = len(f) > 0 ? jint(f[0]["duration_ms"], 0) : 0
+    int completa = dur > 0 and ms * 10 >= dur * 9 ? 1 : 0
+    string id = state.get("escucha_id", "")
+    if id != "" and state.get("escucha_pista", "") == track_id:
+        await sqlite.exec("update play_history set ms_played = max(ms_played, ?), completed = max(completed, ?) where id = ?",
+            ms, completa, id)
+    else:
+        id = nuevo_id()
+        await sqlite.exec("insert into play_history(id, track_id, played_at, ms_played, completed, context) values(?, ?, unixepoch(), ?, ?, ?)",
+            id, track_id, ms, completa, contexto)
+        state.set("escucha_id", id)
+        state.set("escucha_pista", track_id)
+    state.set("escucha_ms", str(ms))
+    state.set("escucha_t", str(time.now()))
+    marcar_estadisticas()
+
+fn void escucha_cerrar():
+    state.remove("escucha_id")
+    state.remove("escucha_pista")
+    state.remove("escucha_ms")
+    state.remove("escucha_t")
+
+# Lo escuchado de `e.track_id` cuando la orden no trae la cifra del motor:
+# lo último informado más lo que ha sonado desde entonces; sin informe
+# (la pista acaba de empezar), la posición.
+fn int escucha_estimada(EstadoCola e):
+    if state.get("escucha_pista", "") != e.track_id:
+        return posicion_viva(e)
+    int ms = int(state.get("escucha_ms", "0"))
+    if e.status == "playing":
+        ms = ms + time.now() - int(state.get("escucha_t", "0"))
+    return ms
+
+# La interfaz repinta las estadísticas cuando cambia este sello (events.lux).
+fn void marcar_estadisticas():
+    state.set("stamp_stats", str(time.now()))
+
+# ─── La puerta única ─────────────────────────────────────────────────────────
+
+fn Json reproductor_orden(string orden, Json args):
+    EstadoCola antes = leer_estado()
+    # Posición que el motor tenía al dar la orden (-1: la orden viene de
+    # fuera de la ventana y no la trae; entonces manda el ancla).
+    int pos_motor = jint(jget(args, "__posMs"), -1)
+    int escuchado = jint(jget(args, "__listenedMs"), -1)
+    bool del_motor = escuchado >= 0
+    if not del_motor:
+        escuchado = escucha_estimada(antes)
+    bool natural = false
+
+    if orden == "play_track":
+        string track_id = arg_str(args, "trackId", "")
+        if track_id == "":
+            return error_api("INVALID", "error.invalid").status(400)
+        garantizar_biblioteca()
+        Json ctx = contexto_desde_args(args, track_id)
+        set_contexto(str(ctx), pistas_de_contexto_dto(ctx, track_id), track_id)
+        mutar_estado("set_track", track_id, "", 0)
+    elif orden == "toggle":
+        mutar_estado("toggle", "", "", pos_motor)
+    elif orden == "pause":
+        mutar_estado("pause", "", "", pos_motor)
+    elif orden == "resume":
+        mutar_estado("resume", "", "", 0)
+    elif orden == "next":
+        mutar_estado("avanzar", "skip", "", 0)
+    elif orden == "ended":
+        # Fin natural, con el cue en el que estaba el motor. Un aviso de un
+        # cue que ya no es el vigente (dos avisos del mismo final, o uno que
+        # llega después de que el usuario cambiara de canción) no avanza nada:
+        # antes cada uno avanzaba la cola una vez más.
+        if jint(jget(args, "cue"), -1) != antes.cue:
+            return estado_dto()
+        natural = true
+        mutar_estado("avanzar", "natural", "", 0)
+    elif orden == "previous":
+        # Regla de los 3 s de Spotify: por encima, reinicia la actual.
+        int donde = pos_motor >= 0 ? pos_motor : posicion_viva(antes)
+        if donde > 3000:
+            mutar_estado("seek", "", "", 0)
+        else:
+            mutar_estado("retroceder", "", "", 0)
+    elif orden == "seek":
+        mutar_estado("seek", "", "", jint(jget(args, "positionMs"), 0))
+    elif orden == "set_volume":
+        mutar_estado("volume", "", "", 0, jdbl(jget(args, "volume"), 1.0))
+    elif orden == "set_repeat":
+        mutar_estado("repeat", arg_str(args, "mode", "off"), "", 0)
+    elif orden == "set_shuffle":
+        mutar_estado("shuffle", jget(args, "enabled") == true ? "1" : "0", "", 0)
+    elif orden == "jump_to":
+        mutar_estado("saltar_entry", arg_str(args, "entryId", ""), "", 0)
+    else:
+        return error_api("INVALID", "error.invalid").status(400)
+
+    EstadoCola despues = leer_estado()
+    bool cambio_pista = despues.track_id != antes.track_id
+    if antes.track_id != "" and (cambio_pista or (natural and despues.cue != antes.cue)):
+        escucha_progreso(antes.track_id, escuchado, antes.context)
+        escucha_cerrar()
+    elif del_motor:
+        escucha_progreso(antes.track_id, escuchado, antes.context)
+    if cambio_pista and despues.track_id != "":
+        asegurar_descarga(despues.track_id, "immediate")
+    if despues.revision != antes.revision:
+        publicar_integraciones()
+        despertar_ventana()
+    return estado_dto()
+
+# Informe del motor: dónde está de verdad y cuánto lleva sonado. No es una
+# decisión (no sube revision ni despierta a nadie), y solo se acepta del cue
+# vigente mientras suena: un informe que llega tarde de la canción anterior,
+# o después de una pausa, no pisa nada.
+fn void reproductor_informe(Json args):
+    EstadoCola e = leer_estado()
+    if jint(jget(args, "cue"), -1) != e.cue or e.status != "playing":
+        return
+    await sqlite.exec("update player_state set position_ms = ?, anchor_ms = ? where id = 1 and cue = ?",
+        jint(jget(args, "positionMs"), 0), jint(jget(args, "anchorMs"), 0), e.cue)
+    int escuchado = jint(jget(args, "listenedMs"), -1)
+    # Otra vez el cue: una orden que cambió de pista mientras tanto ya cerró
+    # esta escucha, y este informe la reabriría duplicada.
+    if escuchado >= 0 and leer_estado().cue == e.cue:
+        escucha_progreso(e.track_id, escuchado, e.context)
+    publicar_integraciones()
+
+# Lo que sonaría al terminar la actual, para que el motor lo precargue
+# (gapless/crossfade). Si aún no está descargado, se pide en segundo plano:
+# para cuando termine la actual, con suerte ya está.
+fn Json reproductor_siguiente():
+    EstadoCola e = leer_estado()
+    string id = pista_siguiente_natural(e)
+    if id == "":
+        return { "trackId": null, "available": false, "cue": e.cue }
+    List<Json> f = await sqlite.query("select 1 as ok from audio_files where track_id = ?", id)
+    bool disponible = len(f) > 0
+    if not disponible:
+        asegurar_descarga(id, "prefetch")
+    return { "trackId": id, "available": disponible, "cue": e.cue }
+
+# ─── Hacia fuera ─────────────────────────────────────────────────────────────
+
+# Hace que la ventana pida el estado YA. Su propio sondeo va a 1 s, y
+# WebKitGTK lo frena a varios segundos con la ventana minimizada: una pausa
+# desde las teclas multimedia tardaba eso en callar la música. Esto se
+# ejecuta aunque la ventana esté oculta.
+fn void despertar_ventana():
+    window.eval_js("window.__localifyDespertar && window.__localifyDespertar()")
+
+# URL PÚBLICA de la carátula: la del álbum (i.scdn.co, lh3.googleusercontent),
+# o la miniatura del vídeo si no hay álbum con portada. Tiene que ser pública:
+# quien la descarga es el cliente de Discord, en su propio proceso, donde ni
+# una ruta local ni el puerto de esta app significan nada. Se cachea por
+# pista: esto corre en cada publicación.
+fn string portada_publica(string track_id):
+    string k = "portada_pub:" + track_id
+    string c = state.get(k, "")
+    if c != "":
+        return c == "-" ? "" : c
+    string url = ""
+    List<Json> f = await sqlite.query("select al.cover_url as u from tracks t join albums al on al.id = t.album_id where t.id = ?", track_id)
+    if len(f) > 0:
+        url = jstr(f[0]["u"], "")
+    if url == "":
+        string yid = youtube_id_de_pista(track_id)
+        if yid != "":
+            url = url_miniatura_video(yid)
+    state.set(k, url == "" ? "-" : url)
+    return url
+
+# MPRIS y Discord a partir del estado actual. Se llama tras cada orden y en
+# cada sondeo: Discord solo acepta unos pocos cambios por minuto, y lo que no
+# pudo salir en su momento sale en una llamada posterior (discord_rpc.cpp
+# guarda siempre el último estado deseado, no los intermedios).
+fn void publicar_integraciones():
+    EstadoCola e = leer_estado()
+    Json? pista = track_row_por_id(e.track_id)
+    int dur = pista == null ? 0 : jint(pista["durationMs"], 0)
+    int pos = posicion_viva(e)
+    if dur > 0 and pos > dur:
+        pos = dur
+    string titulo = pista == null ? "" : jstr(pista["title"], "")
+    string artista = pista == null ? "" : jstr(pista["artistDisplay"], "")
+    string album = pista == null ? "" : jstr(pista["albumTitle"], "")
+    string portada = pista == null ? "" : portada_publica(e.track_id)
+
+    window.mpris_update({
+        "trackId": e.track_id,
+        "title": titulo,
+        "artist": artista,
+        "album": album,
+        "artUrl": portada,
+        "durationMs": dur,
+        "positionMs": pos,
+        "status": e.status,
+        "volume": e.volume,
+        "shuffle": e.shuffle,
+        "repeat": e.repeat_mode,
+        "cue": e.cue
+    })
+
+    Json integraciones = jget(ajustes_estructurados(), "integrations")
+    bool discord_on = integraciones != null and jget(integraciones, "discordEnabled") == true
+    string discord_id = discord_on ? jstr(jget(integraciones, "discordClientId"), "").trim() : ""
+    # Pausado o parado no se anuncia (el original tampoco): un perfil que
+    # dice "escuchando" algo en pausa desde hace media hora es peor que uno
+    # vacío. Inicio y FIN, para que Discord pinte la barra de progreso.
+    Json? actividad = null
+    if pista != null and e.status == "playing":
+        int inicio = int((time.now() - pos) / 1000)
+        actividad = {
+            "title": titulo,
+            "artist": artista,
+            "album": album,
+            "coverUrl": portada,
+            "startS": inicio,
+            "endS": dur > 0 ? inicio + int(dur / 1000) : 0
+        }
+    window.discord_update({ "clientId": discord_id, "activity": actividad })

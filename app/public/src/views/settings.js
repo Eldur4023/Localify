@@ -907,11 +907,31 @@ export function mountSettingsView(contenedor) {
 	* aquí —escuchar música en otra vista los mueve— así que enseñar lo que se
 	* pidió la última vez estaría, tarde o temprano, mintiendo.
 	*/
+	let cuerpoStats = null;
+	let refrescandoStats = false;
 	function pintarStats(destino) {
 		const { el: bloque, cuerpo } = seccion(t("settings.tab_stats"));
 		destino.append(bloque);
+		cuerpoStats = cuerpo;
 		void conEspera(cuerpo, statsApi.get()).then((r) => pintarContenidoStats(cuerpo, r)).catch((e) => {
 			mostrarError(t("error.internal"), String(e));
+		});
+	}
+	/**
+	 * Mientras la pestaña está a la vista, cada escucha que avanza
+	 * (`statsChanged`, cada ~5 s sonando) la repinta en su sitio: sin la
+	 * espera de la primera carga, que haría parpadear la pantalla.
+	 */
+	function refrescarStats() {
+		const cuerpo = cuerpoStats;
+		if (pestañaActiva !== "stats" || !cuerpo?.isConnected || refrescandoStats) return;
+		refrescandoStats = true;
+		void statsApi.get().then((r) => {
+			if (cuerpoStats !== cuerpo || !cuerpo.isConnected) return;
+			cuerpo.replaceChildren();
+			pintarContenidoStats(cuerpo, r);
+		}).catch(() => {}).finally(() => {
+			refrescandoStats = false;
 		});
 	}
 	function pintarContenidoStats(cuerpo, r) {
@@ -985,6 +1005,10 @@ export function mountSettingsView(contenedor) {
 				actual = s;
 				if (pestañaActiva === "general") pintar();
 			});
+			return;
+		}
+		if (evento.type === "statsChanged") {
+			refrescarStats();
 			return;
 		}
 		if (evento.type === "settingsChanged") {

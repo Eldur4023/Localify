@@ -21,6 +21,17 @@ DesktopWindow::DesktopWindow(Options opts) {
             g_clear_error(&error); // a missing/bad icon is cosmetic, never fatal
         }
     }
+    if (opts.start_minimized) {
+        // Direct call, not webview_dispatch: same reasoning as the icon
+        // load above -- the GTK main loop has not started yet at this
+        // point in construction, and this only ever runs once, from the
+        // same thread that will call run() right after. Iconifying before
+        // the window is ever mapped means it never shows a visible frame
+        // first, unlike minimize() (which needs webview_dispatch because it
+        // is called later, from an HTTP handler thread, after run() has the
+        // GTK loop going).
+        gtk_window_iconify(GTK_WINDOW(webview_get_window(w)));
+    }
     last_width_  = opts.width;
     last_height_ = opts.height;
     // Tracks the window's live size so it is available AFTER run() returns
@@ -61,6 +72,17 @@ void DesktopWindow::reload() {
     webview_dispatch(static_cast<webview_t>(handle_),
         [](webview_t w, void*) { webview_eval(w, "location.reload()"); },
         nullptr);
+}
+
+void DesktopWindow::eval_js(const std::string& js) {
+    auto* copy = new std::string(js);
+    webview_dispatch(static_cast<webview_t>(handle_),
+        [](webview_t w, void* arg) {
+            auto* s = static_cast<std::string*>(arg);
+            webview_eval(w, s->c_str());
+            delete s;
+        },
+        copy);
 }
 
 void DesktopWindow::set_title(const std::string& title) {

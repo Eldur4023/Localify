@@ -115,10 +115,15 @@ Value fn_window_mpris_update(NativeCtx&, std::vector<Value>& args, std::string& 
     return Value::null();
 }
 
+Value fn_window_eval_js(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "window.eval_js() expects a string"; return Value::null(); }
+    if (window_control().eval_js) window_control().eval_js(args[0].as_str());
+    return Value::null();
+}
+
 Value fn_window_discord_update(NativeCtx&, std::vector<Value>& args, std::string& error) {
     if (!args[0].is_dict()) {
-        error = "window.discord_update() expects a dict: "
-                "{clientId, details, state, playing, startEpochS}";
+        error = "window.discord_update() expects a dict: {clientId, activity}";
         return Value::null();
     }
     if (window_control().discord_update) window_control().discord_update(args[0]);
@@ -174,6 +179,7 @@ public:
             {"set_menu",  1, 1, fn_window_set_menu},
             {"mpris_update", 1, 1, fn_window_mpris_update},
             {"discord_update", 1, 1, fn_window_discord_update},
+            {"eval_js",   1, 1, fn_window_eval_js},
             {"set_tray",  2, 2, fn_window_set_tray},
             {"clipboard_read",  0, 0, fn_window_clipboard_read, /*is_async=*/true},
             {"clipboard_write", 1, 1, fn_window_clipboard_write},

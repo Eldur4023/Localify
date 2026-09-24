@@ -3,6 +3,7 @@
 #include <gio/gio.h>
 
 #include <arpa/inet.h>
+#include <chrono>
 #include <cstring>
 #include <mutex>
 #include <netinet/in.h>
@@ -79,7 +80,16 @@ struct State {
     std::string art_url;
     long long   duration_us = 0;
     std::string status = "Stopped"; // Playing | Paused | Stopped
+    // Position is anchored, not frozen: the backend sends the live position
+    // on each update (~1 s, slower while the window is hidden) and this
+    // extrapolates between updates while Playing, so a widget polling
+    // Position sees it move smoothly instead of in 1-3 s steps.
     long long   position_us = 0;
+    std::chrono::steady_clock::time_point position_at{};
+    // The backend's "cue": it changes whenever the audio engine is told to
+    // (re)load or jump. Same track + new cue = a seek, which MPRIS wants
+    // announced with the Seeked signal (clients assume rate 1.0 otherwise).
+    long long   cue = -1;
     double      volume = 1.0;
     bool        shuffle = false;
     std::string loop_status = "None"; // None | Track | Playlist
@@ -87,6 +97,16 @@ struct State {
 };
 
 State&            state() { static State s; return s; }
+
+long long live_position_us_locked(const State& s) {
+    long long p = s.position_us;
+    if (s.status == "Playing") {
+        p += std::chrono::duration_cast<std::chrono::microseconds>(
+                 std::chrono::steady_clock::now() - s.position_at).count();
+    }
+    if (s.duration_us > 0 && p > s.duration_us) p = s.duration_us;
+    return p < 0 ? 0 : p;
+}
 GDBusConnection*  g_conn = nullptr;
 guint             g_owner_id = 0;
 guint             g_reg_root = 0;
@@ -158,10 +178,10 @@ GVariant* build_metadata_locked() {
 void method_call(GDBusConnection* conn, const gchar*, const gchar*, const gchar* iface,
                   const gchar* method, GVariant* params, GDBusMethodInvocation* inv, gpointer) {
     if (g_strcmp0(iface, "org.mpris.MediaPlayer2") == 0) {
-        // Raise/Quit: this app has no "bring window to front" hook wired
-        // through here yet, and quitting the whole app from a media widget
-        // is not something anything currently asks for -- both are no-ops
-        // that still answer the call so a client never sees a timeout.
+        // Raise shows the window (the same route a second launch uses).
+        // Quit stays a no-op: quitting the whole app from a media widget is
+        // not something anything asks for. Both answer, so no client times out.
+        if (g_strcmp0(method, "Raise") == 0) post_local("/api/window/restore");
         g_dbus_method_invocation_return_value(inv, nullptr);
         return;
     }
@@ -176,7 +196,7 @@ void method_call(GDBusConnection* conn, const gchar*, const gchar*, const gchar*
         g_variant_get(params, "(x)", &offset_us);
         long long new_pos_ms;
         { std::lock_guard<std::mutex> lk(state().mutex);
-          new_pos_ms = (state().position_us + offset_us) / 1000; }
+          new_pos_ms = (live_position_us_locked(state()) + offset_us) / 1000; }
         if (new_pos_ms < 0) new_pos_ms = 0;
         post_local("/api/player/seek", "{\"positionMs\":" + std::to_string(new_pos_ms) + "}");
     } else if (g_strcmp0(method, "SetPosition") == 0) {
@@ -200,7 +220,7 @@ GVariant* get_property(GDBusConnection*, const gchar*, const gchar*, const gchar
     State& s = state();
     if (g_strcmp0(iface, "org.mpris.MediaPlayer2") == 0) {
         if (g_strcmp0(prop, "CanQuit") == 0)          return g_variant_new_boolean(false);
-        if (g_strcmp0(prop, "CanRaise") == 0)         return g_variant_new_boolean(false);
+        if (g_strcmp0(prop, "CanRaise") == 0)         return g_variant_new_boolean(true);
         if (g_strcmp0(prop, "HasTrackList") == 0)     return g_variant_new_boolean(false);
         if (g_strcmp0(prop, "Identity") == 0)         return g_variant_new_string("Localify");
         if (g_strcmp0(prop, "SupportedUriSchemes") == 0) { const char* v[1] = {nullptr}; return g_variant_new_strv(v, 0); }
@@ -213,7 +233,7 @@ GVariant* get_property(GDBusConnection*, const gchar*, const gchar*, const gchar
     if (g_strcmp0(prop, "Shuffle") == 0)        return g_variant_new_boolean(s.shuffle);
     if (g_strcmp0(prop, "Metadata") == 0)       return build_metadata_locked();
     if (g_strcmp0(prop, "Volume") == 0)         return g_variant_new_double(s.volume);
-    if (g_strcmp0(prop, "Position") == 0)       return g_variant_new_int64(s.position_us);
+    if (g_strcmp0(prop, "Position") == 0)       return g_variant_new_int64(live_position_us_locked(s));
     if (g_strcmp0(prop, "MinimumRate") == 0)    return g_variant_new_double(1.0);
     if (g_strcmp0(prop, "MaximumRate") == 0)    return g_variant_new_double(1.0);
     if (g_strcmp0(prop, "CanGoNext") == 0)      return g_variant_new_boolean(true);
@@ -288,6 +308,8 @@ void mpris_update(const Value& d) {
     g_variant_builder_init(&player_changed, G_VARIANT_TYPE("a{sv}"));
     bool metadata_changed = false;
     bool status_changed = false;
+    bool seeked = false;
+    long long seeked_to_us = 0;
 
     {
         std::lock_guard<std::mutex> lk(s.mutex);
@@ -304,6 +326,8 @@ void mpris_update(const Value& d) {
         Value vo = const_cast<Value&>(d).as_dict()["volume"];
         Value sh = const_cast<Value&>(d).as_dict()["shuffle"];
         Value rp = const_cast<Value&>(d).as_dict()["repeat"]; // "off"|"track"|"queue"
+        Value cu = const_cast<Value&>(d).as_dict()["cue"];
+        long long new_cue = cu.is_num() ? static_cast<long long>(cu.as_float()) : s.cue;
         long long new_duration_us = dm.is_null() ? 0 : static_cast<long long>(dm.as_float() * 1000.0);
         long long new_position_us = pm.is_null() ? 0 : static_cast<long long>(pm.as_float() * 1000.0);
         double new_volume = vo.is_null() ? s.volume : vo.as_float();
@@ -319,10 +343,14 @@ void mpris_update(const Value& d) {
         bool volume_changed = new_volume != s.volume;
         bool shuffle_changed = new_shuffle != s.shuffle;
         bool loop_changed = new_loop != s.loop_status;
+        seeked = new_has_track && s.has_track && new_track_id == s.track_id &&
+                 s.cue >= 0 && new_cue != s.cue;
 
         s.track_id = new_track_id; s.title = new_title; s.artist = new_artist;
         s.album = new_album; s.art_url = new_art; s.duration_us = new_duration_us;
         s.status = new_status; s.position_us = new_position_us; s.volume = new_volume;
+        s.position_at = std::chrono::steady_clock::now(); s.cue = new_cue;
+        seeked_to_us = new_position_us;
         s.shuffle = new_shuffle; s.loop_status = new_loop; s.has_track = new_has_track;
 
         if (metadata_changed) g_variant_builder_add(&player_changed, "{sv}", "Metadata", build_metadata_locked());
@@ -336,6 +364,11 @@ void mpris_update(const Value& d) {
     // ~1/s tick would just be a stream of Seeked-shaped noise otherwise).
     if (metadata_changed || status_changed) emit_changed("org.mpris.MediaPlayer2.Player", &player_changed);
     else g_variant_builder_clear(&player_changed);
+    if (seeked && g_conn) {
+        g_dbus_connection_emit_signal(g_conn, nullptr, "/org/mpris/MediaPlayer2",
+            "org.mpris.MediaPlayer2.Player", "Seeked",
+            g_variant_new("(x)", static_cast<gint64>(seeked_to_us)), nullptr);
+    }
 }
 
 void mpris_shutdown() {

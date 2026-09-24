@@ -5,11 +5,106 @@
 
 #include <sqlite3.h>
 
+#include <cctype>
 #include <cstring>
 
 namespace lux_script {
 
 namespace {
+
+// Expands a List argument into as many `?` placeholders as it has elements,
+// e.g. `where id in (?)` with args = [["a","b","c"]] becomes
+// `where id in (?,?,?)` bound to "a","b","c" individually. Lux Script has no
+// spread/variadic syntax (GUIDE.md), so a query like "ids in (...)" over a
+// list whose length is only known at RUN time could not otherwise be
+// expressed with real bind parameters — the only alternative was building
+// the `in (...)` literal by hand and sanitizing it with a character
+// whitelist instead of parameterizing it for real. An empty list becomes
+// `(NULL)`: valid SQL, and `x IN (NULL)` is never true for any `x`, the same
+// "matches nothing" behavior an empty `in (...)` is meant to have.
+//
+// A hand-rolled scanner, not a real SQL tokenizer: it only needs to walk
+// past single/double-quoted string literals and `--`/`/* */` comments so a
+// literal `?` inside one of those is not mistaken for a placeholder — the
+// same minimal amount of SQL awareness sqlite3_prepare_v2 itself needs to
+// count real parameters correctly. Every `?` still maps 1:1, in order, to
+// one element of `args`, exactly like before this function existed; only a
+// List argument now consumes more than one placeholder in the rewritten
+// text.
+bool expand_list_params(const std::string& sql, const std::vector<Value>& args,
+                        std::string& out_sql, std::vector<Value>& out_args,
+                        std::string& error) {
+    bool any_list = false;
+    for (const auto& a : args) if (a.is_list()) { any_list = true; break; }
+    if (!any_list) { out_sql = sql; out_args = args; return true; }
+
+    out_sql.clear();
+    out_sql.reserve(sql.size());
+    out_args.clear();
+    out_args.reserve(args.size());
+
+    size_t arg_i = 0;
+    bool in_squote = false, in_dquote = false;
+    for (size_t i = 0; i < sql.size(); ++i) {
+        char c = sql[i];
+        if (in_squote || in_dquote) {
+            char quote = in_squote ? '\'' : '"';
+            out_sql += c;
+            if (c == quote) {
+                if (i + 1 < sql.size() && sql[i + 1] == quote) out_sql += sql[++i]; // escaped quote
+                else { in_squote = false; in_dquote = false; }
+            }
+            continue;
+        }
+        if (c == '\'') { in_squote = true; out_sql += c; continue; }
+        if (c == '"')  { in_dquote = true; out_sql += c; continue; }
+        if (c == '-' && i + 1 < sql.size() && sql[i + 1] == '-') {
+            while (i < sql.size() && sql[i] != '\n') out_sql += sql[i++];
+            if (i < sql.size()) out_sql += sql[i]; // the newline itself
+            continue;
+        }
+        if (c == '/' && i + 1 < sql.size() && sql[i + 1] == '*') {
+            out_sql += c;
+            out_sql += sql[++i];
+            while (i + 1 < sql.size() && !(sql[i] == '*' && sql[i + 1] == '/')) out_sql += sql[++i];
+            if (i + 1 < sql.size()) out_sql += sql[++i]; // the closing '/'
+            continue;
+        }
+        if (c == '?') {
+            if (arg_i >= args.size()) { out_sql += c; continue; } // let the count check below report it
+            const Value& a = args[arg_i++];
+            if (!a.is_list()) { out_sql += c; out_args.push_back(a); continue; }
+            const auto& l = a.as_list();
+
+            // Accept both the idiomatic `in (?)` and a bare `in ?` as the
+            // list-expanding placeholder. If it is already sitting inside
+            // its own parens, expand INSIDE them instead of adding a
+            // second layer: `in ((?,?,?))` is a parenthesized row-value,
+            // not a plain expr-list, and SQLite rejects it ("row value
+            // misused") where `in (?,?,?)` is exactly what IN expects.
+            size_t back = out_sql.size();
+            while (back > 0 && std::isspace(static_cast<unsigned char>(out_sql[back - 1]))) --back;
+            size_t fwd = i + 1;
+            while (fwd < sql.size() && std::isspace(static_cast<unsigned char>(sql[fwd]))) ++fwd;
+            bool already_wrapped = back > 0 && out_sql[back - 1] == '(' &&
+                                   fwd < sql.size() && sql[fwd] == ')';
+
+            if (l.empty()) { out_sql += already_wrapped ? "NULL" : "(NULL)"; continue; }
+            if (!already_wrapped) out_sql += '(';
+            for (size_t k = 0; k < l.size(); ++k) {
+                if (k) out_sql += ',';
+                if (l[k].is_list()) { error = "sqlite: a List argument cannot contain another List"; return false; }
+                out_sql += '?';
+                out_args.push_back(l[k]);
+            }
+            if (!already_wrapped) out_sql += ')';
+            continue;
+        }
+        out_sql += c;
+    }
+    for (; arg_i < args.size(); ++arg_i) out_args.push_back(args[arg_i]);
+    return true;
+}
 
 // SQLite driver.
 //
@@ -189,31 +284,40 @@ private:
         sqlite3* db = conns_[worker];
         auto&    table = cache_[worker];
 
-        if (auto it = table.find(sql); it != table.end()) {
+        // A List argument expands the SQL text itself (one `?` becomes N),
+        // so the cache below is keyed on the EXPANDED text -- two calls
+        // with lists of different lengths are, correctly, different
+        // prepared statements. Everything after this point works on
+        // eff_sql/eff_args exactly as it always worked on sql/args.
+        std::string eff_sql;
+        std::vector<Value> eff_args;
+        if (!expand_list_params(sql, args, eff_sql, eff_args, error)) return false;
+
+        if (auto it = table.find(eff_sql); it != table.end()) {
             *out      = it->second;
             *cacheada = true;
             sqlite3_reset(*out);
             sqlite3_clear_bindings(*out);
         } else {
-            if (sqlite3_prepare_v2(db, sql.c_str(), -1, out, nullptr) != SQLITE_OK) {
+            if (sqlite3_prepare_v2(db, eff_sql.c_str(), -1, out, nullptr) != SQLITE_OK) {
                 error = std::string("sqlite: ") + sqlite3_errmsg(db);
                 return false;
             }
             *cacheada = table.size() < kMaxSentencias;
-            if (*cacheada) table.emplace(sql, *out);
+            if (*cacheada) table.emplace(eff_sql, *out);
         }
 
         int expected = sqlite3_bind_parameter_count(*out);
-        if (expected != static_cast<int>(args.size())) {
+        if (expected != static_cast<int>(eff_args.size())) {
             error = "sqlite: the query has " + std::to_string(expected) +
-                    " parameter(s) but " + std::to_string(args.size()) + " were passed";
+                    " parameter(s) but " + std::to_string(eff_args.size()) + " were passed";
             release(*out, *cacheada);
             *out = nullptr;
             return false;
         }
 
-        for (size_t i = 0; i < args.size(); ++i) {
-            const Value& v = args[i];
+        for (size_t i = 0; i < eff_args.size(); ++i) {
+            const Value& v = eff_args[i];
             int idx = static_cast<int>(i) + 1;
             int rc;
             if      (v.is_null())  rc = sqlite3_bind_null(*out, idx);

@@ -140,6 +140,10 @@ void install_window_control_hooks() {
     ctl.discord_update = [](const lux_script::Value& state) {
         luxdesktop::discord_update(state);
     };
+    ctl.eval_js = [](const std::string& js) {
+        std::lock_guard<std::mutex> lk(g_window_mutex);
+        if (g_window) g_window->eval_js(js);
+    };
 }
 
 // Lux's own Module::stamps (vendor/lux) only tracks the .lux files

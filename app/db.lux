@@ -244,6 +244,20 @@ fn void db_init():
     """)
     await sqlite.exec("insert or ignore into player_state(id) values(1)")
 
+    # Columnas del reproductor (reproductor.lux): `cue` sube cada vez que el
+    # backend quiere que el motor de audio cargue una pista o salte de
+    # posición, y `anchor_ms` es el instante de época en que la posición 0
+    # habría sonado mientras suena. ALTER idempotente: las bases creadas antes
+    # de esto no las tienen.
+    if not player_state_tiene("cue"):
+        await sqlite.exec("alter table player_state add column cue integer not null default 0")
+    if not player_state_tiene("anchor_ms"):
+        await sqlite.exec("alter table player_state add column anchor_ms integer not null default 0")
+    # Al abrir la app no se sigue sonando: se restaura EN PAUSA en la última
+    # posición conocida, como el original. db_init() corre una vez por
+    # proceso, así que esto solo ocurre al arrancar.
+    await sqlite.exec("update player_state set status = 'paused', anchor_ms = 0 where id = 1 and status = 'playing'")
+
     await sqlite.exec("insert or replace into settings(key, value, updated_at) values('schema_version', '1', unixepoch())")
 
     # el flag va al FINAL: antes de esto, cualquier otra hebra está esperando
@@ -261,6 +275,13 @@ fn bool db_error(Json r):
 
 fn string db_err_msg(Json r):
     return jstr(jget(r, "error"), "error de base de datos")
+
+fn bool player_state_tiene(string columna):
+    List<Json> cols = await sqlite.query("pragma table_info(player_state)")
+    for int i in range(0, len(cols)):
+        if jstr(cols[i]["name"], "") == columna:
+            return true
+    return false
 
 # Ajuste persistido: get con valor por defecto.
 fn string ajuste(string clave, string por_defecto):
@@ -329,24 +350,3 @@ fn int ahora():
 fn string like_escapar(string q):
     return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
-# Literal "in (...)" seguro para una lista de ids embebida en SQL: no hay
-# forma de mandar una lista de tamaño variable como parámetros con '?' (las
-# llamadas nativas tienen aridad fija), así que en vez de concatenar tal
-# cual se descarta cualquier id que no sea [A-Za-z0-9_-] — la única forma que
-# toman los ids de este esquema (hex generado, ids de YouTube, UUIDs de
-# MusicBrainz) — y no queda comilla ni backslash con los que escapar el
-# literal.
-fn string ids_sql_lista(List<string> ids):
-    List<string> limpios = []
-    string alfabeto = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
-    for int i in range(0, len(ids)):
-        string id = ids[i]
-        bool ok = len(id) > 0
-        for int k in range(0, len(id)):
-            if alfabeto.index_of(id.slice(k, k + 1)) < 0:
-                ok = false
-        if ok and not limpios.contains("'" + id + "'"):
-            limpios.add("'" + id + "'")
-    if len(limpios) == 0:
-        return "('')"
-    return "(" + limpios.join(",") + ")"

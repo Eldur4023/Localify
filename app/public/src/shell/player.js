@@ -4,15 +4,13 @@
 * Vive fuera del router y no se desmonta nunca: navegar no puede cortar la
 * música ni parpadear los controles.
 *
-* ## La posición se sondea; el resto llega por eventos
+* ## La posición sale del motor de audio, y solo de ahí
 *
-* Son dos ritmos distintos a propósito. La posición cambia sesenta veces por
-* segundo y no vale la pena mandarla por el bus: se pide con un temporizador a
-* 250 ms, que es un comando que solo lee atómicos. Cambiar de canción o pausar
-* ocurre cuando el usuario actúa, y eso sí llega por evento.
-*
-* Mandar la posición como evento saturaría el puente IPC para mover una barra
-* de progreso.
+* Llega como `positionTick`, que el motor emite según avanza el propio audio
+* (y al saltar). Antes la barra se pintaba desde dos sitios --el audio real y
+* la posición guardada en el backend, que iba por detrás-- y daba tirones.
+* Los estados que llegan del backend ya traen la posición del motor
+* (ipc/reproductor.js, conTiempoLocal), así que pintar() tampoco la contradice.
 *
 * ## Arrastrar la barra no salta hasta soltar
 *
@@ -26,8 +24,6 @@ import { botonIcono, cambiarIcono, icono } from "../ui/icons.js";
 import { ponerPortadaDePista } from "../ui/cards.js";
 import { abrirMenu } from "../ui/menu.js";
 import { opcionesDePista } from "../ui/opciones-pista.js";
-/** Cada cuánto se pide la posición. */
-const SONDEO_MS = 250;
 /** Formatea una duración como `m:ss`. */
 export function duracion(ms) {
 	const total = Math.max(0, Math.floor(ms / 1e3));
@@ -265,17 +261,11 @@ export function mountPlayerBar(contenedor, opciones) {
 				refrescar();
 				break;
 			case "positionTick":
-				if (!arrastrando && estado?.status === "playing") pintarPosicion(evento.positionMs, estado?.durationMs ?? 0);
+				if (!arrastrando) pintarPosicion(evento.positionMs, evento.durationMs || (estado?.durationMs ?? 0));
 				break;
 			default: break;
 		}
 	});
-	const temporizador = globalThis.setInterval(() => {
-		if (estado?.status !== "playing" || arrastrando) return;
-		void player.position().then((p) => {
-			pintarPosicion(p.positionMs, estado?.durationMs ?? 0);
-		});
-	}, SONDEO_MS);
 	/**
 	* La barra espaciadora pausa y reanuda.
 	*
@@ -309,7 +299,6 @@ export function mountPlayerBar(contenedor, opciones) {
 	return {
 		refrescar,
 		destroy() {
-			globalThis.clearInterval(temporizador);
 			globalThis.removeEventListener("keydown", alEspacio);
 			dejarEventos();
 			dejarIdioma();

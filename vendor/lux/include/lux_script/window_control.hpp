@@ -75,6 +75,13 @@ struct WindowControl {
     // discord_rpc.cpp (app-specific, not part of this vendored tree,
     // same relationship to this hook as mpris.cpp has to mpris_update).
     std::function<void(const Value& state)> discord_update;
+
+    // Runs a snippet of JavaScript inside the window's page, from any
+    // thread -- the push half of "loopback HTTP is the whole IPC": the page
+    // can always call the backend, but without this the backend could only
+    // wait for the page to ask (a poll), and WebKitGTK throttles a hidden
+    // window's timers to a few seconds. Fire-and-forget: no return value.
+    std::function<void(const std::string& js)> eval_js;
 };
 
 WindowControl& window_control();
