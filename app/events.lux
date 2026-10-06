@@ -21,6 +21,12 @@ post endpoint("/api/events/poll"):
                 ytm_buscar_pistas(q, 15)
             ready.add({ "queryId": jint(trabajo["queryId"], 0) })
 
+    # La salida elegida en Ajustes, en cuanto exista el flujo de WebKit (se
+    # crea con la página). Sin salida elegida no se toca: manda PipeWire.
+    if state.get("salida_aplicada", "") == "":
+        if jstr(jget(jget(ajustes_estructurados(), "audio"), "outputDeviceId"), "") == "" or aplicar_salida() > 0:
+            state.set("salida_aplicada", "1")
+
     EstadoCola e = leer_estado()
     List<Json> marcas = await sqlite.query("""
         select coalesce(max(cast(value as integer)), 0) as nunca from settings where key like 'stamp_%'

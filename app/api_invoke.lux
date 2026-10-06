@@ -132,13 +132,6 @@ fn Json artist_row_dto(Json a):
 
 # ─── DTOs del reproductor ────────────────────────────────────────────────────
 
-fn Json contexto_dto():
-    EstadoCola e = leer_estado()
-    Json? ctx = parse_json(e.context)
-    if ctx == null:
-        return null
-    return ctx
-
 # PlayerStateDto: ver estado_dto() en reproductor.lux.
 
 # QueueSnapshotDto: revision, current {entryId, track}, userQueue,
@@ -424,26 +417,8 @@ fn Json despachar(string cmd, Json args):
     # ── búsqueda e inicio ──
     if cmd == "search_query":
         return await cmd_search_query(args)
-    if cmd == "search_suggest":
-        string pref = normalizar(arg_str(args, "prefix", ""))
-        if pref == "":
-            return []
-        string patron = pref + "%"
-        List<Json> filas = await sqlite.query("""
-            select distinct t.title as texto from tracks t where t.title_norm like ? escape '\\'
-            union select ar.name from artists ar where ar.name_norm like ? escape '\\'
-            union select al.title from albums al where al.title_norm like ? escape '\\'
-            limit ?
-            """, patron, patron, patron, jint(jget(args, "limit"), 8))
-        List<Json> out = []
-        for int i in range(0, len(filas)):
-            out.add(jstr(filas[i]["texto"], ""))
-        return out
     if cmd == "home_sections":
         return await cmd_home()
-    if cmd == "reco_similar_to_track":
-        return await cmd_reco(arg_str(args, "trackId", ""), jint(jget(args, "limit"), 8))
-
     # ── playlists ──
     if cmd == "playlist_list":
         return await cmd_playlist_list()
@@ -518,9 +493,6 @@ fn Json despachar(string cmd, Json args):
         await sqlite.exec("update playlists set cover_path = null, updated_at = unixepoch() where id = ?", plid2)
         tocar_playlists()
         return null
-    if cmd == "playlist_suggestions":
-        return await cmd_playlist_sugerencias(arg_str(args, "playlistId", ""), jint(jget(args, "limit"), 10))
-
     # ── letras, ajustes, estadísticas, sistema ──
     if cmd == "lyrics_get":
         return await cmd_lyrics(arg_str(args, "trackId", ""))
@@ -529,18 +501,11 @@ fn Json despachar(string cmd, Json args):
     if cmd == "settings_patch":
         return await cmd_settings_patch(jget(args, "patch"))
     if cmd == "settings_audio_devices":
-        return [ { "id": "default", "name": "Predeterminado", "isDefault": true } ]
+        return dispositivos_salida()
     if cmd == "settings_eq_profiles":
         return perfiles_eq()
     if cmd == "settings_preview_eq":
         return null
-    if cmd == "settings_set_spotify_credentials":
-        ajuste_poner("spotify_client_id", arg_str(args, "clientId", ""))
-        ajuste_poner("spotify_client_secret", arg_str(args, "clientSecret", ""))
-        tocar_ajustes()
-        return null
-    if cmd == "settings_test_spotify":
-        return { "status": "notConfigured" }
     if cmd == "settings_open_external":
         return null
     if cmd == "settings_test_cookies":
@@ -563,11 +528,6 @@ fn Json despachar(string cmd, Json args):
         return "mig-" + str(ahora())
     if cmd == "stats_get":
         return await cmd_stats()
-    if cmd == "api_version":
-        return "1.0.0-lux"
-    if cmd == "updates_open_release_page":
-        return null
-
     return error_api("INVALID", "error.invalid").status(400)
 
 class PeticionLog:

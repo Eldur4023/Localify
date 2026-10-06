@@ -266,16 +266,6 @@ fn void db_init():
 
 # ─── Utilidades ──────────────────────────────────────────────────────────────
 
-# true si el resultado de sqlite trae la clave "error" (los fallos del motor
-# no revientan el handler: llegan como Json).
-fn bool db_error(Json r):
-    if r == null:
-        return false
-    return jget(r, "error") != null
-
-fn string db_err_msg(Json r):
-    return jstr(jget(r, "error"), "error de base de datos")
-
 fn bool player_state_tiene(string columna):
     List<Json> cols = await sqlite.query("pragma table_info(player_state)")
     for int i in range(0, len(cols)):

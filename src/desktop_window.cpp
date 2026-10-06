@@ -1,7 +1,6 @@
 #include "desktop_window.hpp"
 #include <webview/webview.h>
 #include <gtk/gtk.h>
-#include <gio/gio.h>
 
 #include <future>
 
@@ -85,31 +84,10 @@ void DesktopWindow::eval_js(const std::string& js) {
         copy);
 }
 
-void DesktopWindow::set_title(const std::string& title) {
-    // webview_set_title's thread-safety isn't documented (unlike
-    // webview_terminate/webview_dispatch, which explicitly are), so this
-    // goes through webview_dispatch just like everything else here that
-    // touches the GTK window.
-    auto* copy = new std::string(title);
-    webview_dispatch(static_cast<webview_t>(handle_),
-        [](webview_t w, void* arg) {
-            auto* t = static_cast<std::string*>(arg);
-            webview_set_title(w, t->c_str());
-            delete t;
-        }, copy);
-}
-
 void DesktopWindow::minimize() {
     webview_dispatch(static_cast<webview_t>(handle_),
         [](webview_t w, void*) {
             gtk_window_iconify(GTK_WINDOW(webview_get_window(w)));
-        }, nullptr);
-}
-
-void DesktopWindow::maximize() {
-    webview_dispatch(static_cast<webview_t>(handle_),
-        [](webview_t w, void*) {
-            gtk_window_maximize(GTK_WINDOW(webview_get_window(w)));
         }, nullptr);
 }
 
@@ -120,28 +98,6 @@ void DesktopWindow::restore() {
             gtk_window_unmaximize(win);
             gtk_window_deiconify(win);
         }, nullptr);
-}
-
-void DesktopWindow::fullscreen() {
-    webview_dispatch(static_cast<webview_t>(handle_),
-        [](webview_t w, void*) {
-            gtk_window_fullscreen(GTK_WINDOW(webview_get_window(w)));
-        }, nullptr);
-}
-
-void DesktopWindow::unfullscreen() {
-    webview_dispatch(static_cast<webview_t>(handle_),
-        [](webview_t w, void*) {
-            gtk_window_unfullscreen(GTK_WINDOW(webview_get_window(w)));
-        }, nullptr);
-}
-
-void DesktopWindow::set_always_on_top(bool on_top) {
-    webview_dispatch(static_cast<webview_t>(handle_),
-        [](webview_t w, void* arg) {
-            gtk_window_set_keep_above(GTK_WINDOW(webview_get_window(w)),
-                                       arg != nullptr);
-        }, reinterpret_cast<void*>(static_cast<intptr_t>(on_top)));
 }
 
 namespace {
@@ -188,65 +144,4 @@ std::string DesktopWindow::pick_file(const std::string& suggested_name, bool sav
         }, ctx);
 
     return future.get();
-}
-
-void DesktopWindow::notify(const std::string& title, const std::string& body) {
-    // org.freedesktop.Notifications.Notify -- the same D-Bus call
-    // notify-send/libnotify make, done directly over GDBus (already part
-    // of GTK3's own dependency chain) instead of adding libnotify as a
-    // separate one. GDBus is documented thread-safe; called directly, no
-    // webview_dispatch needed, unlike everything above that touches GTK.
-    GError* error = nullptr;
-    GDBusProxy* proxy = g_dbus_proxy_new_for_bus_sync(
-        G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, nullptr,
-        "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
-        "org.freedesktop.Notifications", nullptr, &error);
-    if (!proxy) { g_clear_error(&error); return; }
-
-    GVariantBuilder actions, hints;
-    g_variant_builder_init(&actions, G_VARIANT_TYPE("as"));
-    g_variant_builder_init(&hints, G_VARIANT_TYPE("a{sv}"));
-
-    GVariant* result = g_dbus_proxy_call_sync(proxy, "Notify",
-        g_variant_new("(susssasa{sv}i)",
-            "Lux Desktop", 0u, "", title.c_str(), body.c_str(),
-            &actions, &hints, 5000),
-        G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
-    if (result) g_variant_unref(result);
-    else        g_clear_error(&error); // no notification daemon running: not fatal
-    g_object_unref(proxy);
-}
-
-namespace {
-struct ClipboardReadCtx { std::promise<std::string> result; };
-} // namespace
-
-std::string DesktopWindow::clipboard_read() {
-    auto* ctx = new ClipboardReadCtx();
-    auto future = ctx->result.get_future();
-    // GtkClipboard is tied to the default GdkDisplay, which is only safe
-    // to touch from the thread running the GTK main loop -- same
-    // webview_dispatch + future round-trip as pick_file(), just a much
-    // shorter wait (a local X11 round-trip, not a human).
-    webview_dispatch(static_cast<webview_t>(handle_),
-        [](webview_t, void* arg) {
-            auto* ctx = static_cast<ClipboardReadCtx*>(arg);
-            GtkClipboard* clipboard = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
-            gchar* text = gtk_clipboard_wait_for_text(clipboard);
-            ctx->result.set_value(text ? text : "");
-            if (text) g_free(text);
-            delete ctx;
-        }, ctx);
-    return future.get();
-}
-
-void DesktopWindow::clipboard_write(const std::string& text) {
-    auto* copy = new std::string(text);
-    webview_dispatch(static_cast<webview_t>(handle_),
-        [](webview_t, void* arg) {
-            auto* t = static_cast<std::string*>(arg);
-            GtkClipboard* clipboard = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
-            gtk_clipboard_set_text(clipboard, t->c_str(), -1);
-            delete t;
-        }, copy);
 }

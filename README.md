@@ -136,66 +136,25 @@ devtools, no icon) and the window falls back to `app: name` for its title.
 ## Controlling the window from a route
 
 Same `import window`, now called from inside a handler — the window is the
-same process, so this is a plain function call, not a message across a
-bridge:
+same process, so this is a plain function call:
 
 ```lux
-post endpoint("/rename", string name):
-    window.set_title(name)
-    return { "ok": true }
-
 post endpoint("/minimize"):
-    window.minimize()   # also: .maximize(), .restore(), .close(),
-                        # .fullscreen(), .unfullscreen(),
-                        # .set_always_on_top(true/false)
+    window.minimize()   # also: .restore()
     return status(204)
 
 get endpoint("/pick-file"):
     string path = await window.open_file()      # "" if the user canceled
     return { "path": path }
-
-get endpoint("/pick-save"):
-    string path = await window.save_file("export.csv")
-    return { "path": path }
-
-post endpoint("/ping-me"):
-    window.notify("Lux Desktop", "Something finished in the background.")
-    return status(204)
 ```
 
 `open_file`/`save_file` open a native GTK file chooser and need `await`:
 showing a dialog and waiting on the user is an unbounded wait, so they run
-on Lux's shared worker pool instead of the event loop thread — the rest of
-the app (and the window itself) stays responsive while the dialog is open.
+on Lux's shared worker pool instead of the event loop thread.
 
-`notify` sends a real desktop notification (the freedesktop D-Bus spec —
-the same thing `notify-send` uses) rather than a browser-style alert. It is
-synchronous: a local D-Bus round-trip has no unbounded wait, so it needs no
-`await`. No extra dependency either — it talks to
-`org.freedesktop.Notifications` over GDBus, which ships with GTK3 already.
-
-## Clipboard
-
-```lux
-post endpoint("/copy", string text):
-    window.clipboard_write(text)
-    return status(204)
-
-get endpoint("/paste"):
-    string text = await window.clipboard_read()
-    return { "text": text }
-```
-
-The system clipboard (X11 `CLIPBOARD`, via `GtkClipboard`), not the
-webview's own `navigator.clipboard` — which needs a user gesture and a
-permission prompt WebKit gives no way to pre-approve, so it is not usable
-from a script-triggered action. `clipboard_write` is synchronous: claiming
-ownership is local and unilateral. `clipboard_read` needs `await` — it
-waits on whatever OTHER process currently owns the selection to answer
-over X11, which is only as fast as that process feels like being; reading
-back something this same app just wrote is instant, reading from a
-different, slow-to-respond owner is a real, observed unbounded wait, the
-same class of thing `open_file`/`save_file` already needed `await` for.
+Anything else in the `window` module (title, maximize, fullscreen,
+notifications, clipboard, menu, tray) is a no-op here: this app never used
+it, so the runtime doesn't wire it.
 
 ## Build
 
@@ -247,5 +206,3 @@ never goes down over a typo. Devtools are always on in this mode.
 ## What this is not (yet)
 
 - **Linux only**, same as Lux itself (epoll, `sendfile(2)`, `SO_REUSEPORT`).
-- No native menu bar or tray icon (`window.set_menu`/`window.set_tray` are
-  no-ops here).

@@ -102,10 +102,9 @@ fn List<Json> lrc_a_lineas(string lrc):
     return out
 
 # ─── Ajustes ─────────────────────────────────────────────────────────────────
-# SettingsDto completo: language, libraryPath, metadataProvider, audio
-# (crossfadeMs, gapless, eqProfile, normalizeVolume, outputDeviceId),
-# download (preferredFormat, maxConcurrent, maxRetries, cookiesBrowser,
-# cookiesFile), spotify, integrations, ui.
+# SettingsDto completo: language, libraryPath, audio (crossfadeMs, gapless,
+# eqProfile, outputDeviceId), download (preferredFormat, maxConcurrent,
+# maxRetries, cookiesBrowser, cookiesFile), integrations.
 
 fn List<Json> perfiles_eq():
     return [
@@ -118,7 +117,7 @@ fn List<Json> perfiles_eq():
         { "id": "rock", "nameKey": "eq.rock", "gainsDb": [5.0, 4.0, 2.0, 0.0, -1.0, -1.0, 1.0, 3.0, 4.0, 4.0] }
     ]
 
-# El ajuste estructurado (audio/download/ui/integrations) vive como un JSON
+# El ajuste estructurado (audio/download/integrations) vive como un JSON
 # único en settings('settings_json'); las claves simples quedan para el resto.
 fn Json ajustes_estructurados():
     Json? guardados = parse_json(ajuste("settings_json", "{}"))
@@ -134,7 +133,6 @@ fn Json cmd_settings_get():
             "crossfadeMs": 0,
             "gapless": true,
             "eqProfile": { "id": "flat", "nameKey": "eq.flat", "gainsDb": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] },
-            "normalizeVolume": false,
             "outputDeviceId": null
         }
     Json download = jget(guardados, "download")
@@ -146,32 +144,24 @@ fn Json cmd_settings_get():
         elif modo == "file":
             d["cookiesFile"] = ajuste("cookies_file", "")
         download = d
-    Json spotify = jget(guardados, "spotify")
-    if spotify == null:
-        string cid = ajuste("spotify_client_id", "")
-        spotify = { "configured": cid != "", "clientId": cid == "" ? null : cid }
     Json integraciones = jget(guardados, "integrations")
     if integraciones == null:
         integraciones = { "discordEnabled": false, "discordClientId": null }
-    Json ui = jget(guardados, "ui")
-    if ui == null:
-        ui = { "listDensity": "comfortable", "startView": "home" }
     return {
         "language": ajuste("language", "es"),
         "libraryPath": biblioteca_raiz(),
-        "metadataProvider": ajuste("metadata_provider", "combined"),
         "audio": audio,
         "download": download,
-        "spotify": spotify,
-        "integrations": integraciones,
-        "ui": ui
+        "integrations": integraciones
     }
 
 fn Json cmd_settings_patch(Json cambios):
     if cambios == null:
         return null
     Json actuales = ajustes_estructurados()
+    bool otra_salida = false
     if jget(cambios, "audio") != null:
+        otra_salida = jget(jget(cambios, "audio"), "outputDeviceId") != jget(jget(actuales, "audio"), "outputDeviceId")
         actuales["audio"] = jget(cambios, "audio")
     if jget(cambios, "download") != null:
         Json d = jget(cambios, "download")
@@ -187,16 +177,14 @@ fn Json cmd_settings_patch(Json cambios):
             ajuste_poner("cookies_mode", "none")
     if jget(cambios, "integrations") != null:
         actuales["integrations"] = jget(cambios, "integrations")
-    if jget(cambios, "ui") != null:
-        actuales["ui"] = jget(cambios, "ui")
     if jget(cambios, "language") != null:
         ajuste_poner("language", jstr(jget(cambios, "language"), "es"))
-    if jget(cambios, "metadataProvider") != null:
-        ajuste_poner("metadata_provider", jstr(jget(cambios, "metadataProvider"), "combined"))
     await sqlite.exec("""
         insert into settings(key, value, updated_at) values('settings_json', ?, unixepoch())
         on conflict(key) do update set value = excluded.value, updated_at = unixepoch()
         """, str(actuales))
+    if otra_salida:
+        aplicar_salida()
     tocar_ajustes()
     return null
 
@@ -250,3 +238,42 @@ fn Json cmd_stats():
         "topTracks": top_out,
         "topArtists": artistas_out
     }
+
+# ─── Salida de audio ─────────────────────────────────────────────────────────
+# WebKitGTK no tiene setSinkId: la salida se elige moviendo el flujo de la
+# app en PipeWire/PulseAudio con pactl. LC_ALL=C porque pactl traduce sus
+# etiquetas ("Nombre:", "Descripción:").
+
+fn List<Json> dispositivos_salida():
+    Json r = await os.run("env", ["LC_ALL=C", "pactl", "list", "sinks"])
+    List<Json> out = []
+    string nombre = ""
+    List<string> lineas = jstr(r["stdout"], "").split("\n")
+    for int i in range(0, len(lineas)):
+        string l = lineas[i].trim()
+        if l.starts_with("Name: "):
+            nombre = l.slice(6)
+        elif l.starts_with("Description: ") and nombre != "":
+            out.add({ "id": nombre, "name": l.slice(13) })
+    return out
+
+# Mueve los flujos de Localify a la salida guardada (o a la predeterminada).
+# Devuelve cuántos movió: al arrancar, el flujo de WebKit puede no existir
+# aún, y events.lux lo reintenta hasta que haya uno.
+fn int aplicar_salida():
+    Json audio = jget(ajustes_estructurados(), "audio")
+    string destino = jstr(jget(audio, "outputDeviceId"), "")
+    if destino == "":
+        destino = "@DEFAULT_SINK@"
+    Json r = await os.run("env", ["LC_ALL=C", "pactl", "list", "sink-inputs"])
+    int movidos = 0
+    string flujo = ""
+    List<string> lineas = jstr(r["stdout"], "").split("\n")
+    for int i in range(0, len(lineas)):
+        string l = lineas[i].trim()
+        if l.starts_with("Sink Input #"):
+            flujo = l.slice(12)
+        elif l == "application.name = \"localify\"" and flujo != "":
+            await os.run("pactl", ["move-sink-input", flujo, destino])
+            movidos = movidos + 1
+    return movidos

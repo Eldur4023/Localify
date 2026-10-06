@@ -154,10 +154,6 @@ fn string video_id_de(Json elemento):
     Json boton = jget(jget(overlay, "musicPlayButtonRenderer"), "playNavigationEndpoint")
     return jstr(jget(jget(boton, "watchEndpoint"), "videoId"), "")
 
-# browse_id (álbum, artista, lista).
-fn string browse_id_de(Json elemento):
-    return jstr(jget(jget(jget(elemento, "navigationEndpoint"), "browseEndpoint"), "browseId"), "")
-
 # duracion_ms: "5:29" o "1:02:03" → ms. Exige al menos dos partes: un número
 # suelto es un año, no una duración.
 fn int duracion_ms_de(string texto):
@@ -374,31 +370,6 @@ fn void guardar_pista(PistaCatalogo p):
 
     for int i in range(0, len(p.artista_ids)):
         await sqlite.exec("insert or ignore into track_artists(track_id, artist_id, position) values(?, ?, ?)", p.id, p.artista_ids[i], i)
-
-# pista_de_reproductor: para un videoId suelto (artista sin id de canal
-# dedicado a música, relecturas del catálogo).
-fn void ytm_pista_de_video(string video_id):
-    List<Json> ex = await sqlite.query("select id from tracks where id = ?", video_id)
-    if len(ex) > 0:
-        return
-    Json? r = ytm_reproductor(video_id)
-    if r == null:
-        return
-    Json d = jget(r, "videoDetails")
-    if d == null:
-        return
-    PistaCatalogo p = PistaCatalogo()
-    p.id = video_id
-    p.title = jstr(d["title"], "").trim()
-    if p.title == "":
-        return
-    p.duration_ms = jint(d["lengthSeconds"], 0) * 1000
-    string canal = jstr(d["channelId"], "")
-    string autor = jstr(d["author"], "")
-    if canal != "" and autor != "":
-        p.artista_ids.add(canal)
-        p.artista_nombres.add(autor)
-    guardar_pista(p)
 
 # ─── Búsqueda de pistas para el frontend ─────────────────────────────────────
 

@@ -10,7 +10,6 @@
 //
 // This is the ONLY difference from src/runtime.cpp: that one embeds a
 // frozen snapshot of app/ into the binary and never watches anything again.
-#include "desktop_window.hpp"
 #include "mpris.hpp"
 #include "discord_rpc.hpp"
 #include "desktop_common.hpp"
@@ -18,21 +17,14 @@
 #include <lux_script/project.hpp>
 #include <lux_script/vm.hpp>
 #include <lux_script/window_config.hpp>
-#include <lux_script/window_control.hpp>
 #include <lux/app.hpp>
 #include <lux/logger.hpp>
 
-#include <arpa/inet.h>
 #include <atomic>
-#include <cctype>
 #include <csignal>
-#include <cstring>
-#include <fstream>
 #include <iostream>
 #include <mutex>
-#include <netinet/in.h>
 #include <optional>
-#include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
 

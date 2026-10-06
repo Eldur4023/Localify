@@ -69,10 +69,6 @@ fn void asegurar_descarga(string track_id, string prioridad):
             updated_at = unixepoch()
         """, track_id, prioridad, video == "" ? null : video)
 
-# Lista de trabajos activos (con progreso) para el frontend.
-fn List<Json> lista_descargas():
-    return descargas_activas()
-
 # ─── Promoción de la cola ────────────────────────────────────────────────────
 
 fn int activos_descarga():

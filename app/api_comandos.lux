@@ -563,22 +563,6 @@ fn Json cmd_home():
         secciones.add(seccion_pistas("home.favorites", fav_rows))
     return secciones
 
-fn Json cmd_reco(string track_id, int limite):
-    if track_id == "":
-        return []
-    List<Json> pista = await sqlite.query("select album_id from tracks where id = ?", track_id)
-    if len(pista) == 0:
-        return []
-    List<Json> filas = await sqlite.query(sql_pista_dto() + """
-        where t.id != ?
-          and (t.album_id = ?
-               or t.id in (select ta2.track_id from track_artists ta2
-                           where ta2.artist_id in (select artist_id from track_artists where track_id = ?)))
-          and af.track_id is not null
-        order by coalesce(hp.cnt, 0) desc, t.added_at desc limit ?
-        """, track_id, jstr(pista[0]["album_id"], ""), track_id, limite)
-    return track_rows_de(filas)
-
 # ─── Playlists ───────────────────────────────────────────────────────────────
 
 fn Json playlist_summary_dto(Json f):
@@ -708,23 +692,6 @@ fn void cmd_playlist_reorder_lista(string plid, int destino):
     orden = insertar_en(orden, destino, plid)
     for int i in range(0, len(orden)):
         await sqlite.exec("update playlists set position = ? where id = ?", (i + 1) * 1.0, orden[i])
-
-fn Json cmd_playlist_sugerencias(string plid, int limite):
-    List<Json> propias = await sqlite.query("""
-        select distinct ta.artist_id as id from playlist_items pi
-        join track_artists ta on ta.track_id = pi.track_id
-        where pi.playlist_id = ?
-        """, plid)
-    if len(propias) == 0:
-        return []
-    List<Json> filas = await sqlite.query(sql_pista_dto() + """
-        join track_artists ta on ta.track_id = t.id and ta.artist_id in (select artist_id from (select distinct ta2.artist_id from playlist_items pi
-             join track_artists ta2 on ta2.track_id = pi.track_id where pi.playlist_id = ?))
-        left join playlist_items pi2 on pi2.track_id = t.id and pi2.playlist_id = ?
-        where pi2.id is null and af.track_id is not null
-        order by coalesce(hp.cnt, 0) desc limit ?
-        """, plid, plid, limite)
-    return track_rows_de(filas)
 
 fn Json cmd_playlist_import(string url):
     string id_pl = extraer_id_lista(url)

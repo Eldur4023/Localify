@@ -53,31 +53,14 @@ public:
     // how the hooks get wired up. All thread-safe: a route handler calling
     // these runs on an event-loop or blocking_pool thread, never the
     // window's own.
-    void set_title(const std::string& title);
     void minimize();
-    void maximize();
     void restore();
-    void fullscreen();
-    void unfullscreen();
-    void set_always_on_top(bool on_top);
 
     // Blocking: shows a native file chooser and waits for it to close.
     // Returns the chosen path, or "" if the user canceled. Must be called
     // from a thread that can afford to block (window.open_file()/
     // save_file() are `is_async`, so that is always true here).
     std::string pick_file(const std::string& suggested_name, bool save_mode);
-
-    // A freedesktop desktop notification, sent over the session D-Bus
-    // directly (org.freedesktop.Notifications) -- not a libnotify
-    // dependency, GLib/GIO already ships with GTK3. Thread-safe: GDBus is,
-    // by its own documentation, safe to call from any thread.
-    void notify(const std::string& title, const std::string& body);
-
-    // The system clipboard (X11 CLIPBOARD selection via GtkClipboard), not
-    // the webview's own `navigator.clipboard`. Both are quick, bounded
-    // local X11 round-trips, same threading posture as notify().
-    std::string clipboard_read();
-    void        clipboard_write(const std::string& text);
 
     // The window's own size as of its last resize -- kept up to date by a
     // "configure-event" handler connected at construction time rather than

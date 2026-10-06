@@ -400,8 +400,7 @@
 
 /* ── Controles de formulario ─────────────────────────────────────────────── */
 
-.select,
-.chk {
+.select {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);

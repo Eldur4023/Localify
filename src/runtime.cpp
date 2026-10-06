@@ -16,12 +16,10 @@
 #include <lux_script/project.hpp>
 #include <lux_script/vm.hpp>
 #include <lux_script/window_config.hpp>
-#include <lux_script/window_control.hpp>
 #include <lux/app.hpp>
 #include <lux/logger.hpp>
 
 #include <arpa/inet.h>
-#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>

@@ -155,10 +155,6 @@ export const search = {
 		q,
 		scope,
 		page: req
-	}),
-	suggest: (prefix, limit) => invoke("search_suggest", {
-		prefix,
-		limit
 	})
 };
 export const playlists = {
@@ -208,19 +204,9 @@ export const playlists = {
 		playlistId,
 		imagePath
 	}),
-	clearCover: (playlistId) => invoke("playlist_clear_cover", { playlistId }),
-	suggestions: (playlistId, limit) => invoke("playlist_suggestions", {
-		playlistId,
-		limit
-	})
+	clearCover: (playlistId) => invoke("playlist_clear_cover", { playlistId })
 };
-export const home = {
-	sections: () => invoke("home_sections"),
-	similarToTrack: (trackId, limit) => invoke("reco_similar_to_track", {
-		trackId,
-		limit
-	})
-};
+export const home = { sections: () => invoke("home_sections") };
 export const lyrics = { 
 /** `null` significa que no hay letra. No es un error. */
 get: (trackId) => invoke("lyrics_get", { trackId }) };
@@ -229,11 +215,6 @@ export const settings = {
 	patch: (patch) => invoke("settings_patch", { patch }),
 	audioDevices: () => invoke("settings_audio_devices"),
 	eqProfiles: () => invoke("settings_eq_profiles"),
-	setSpotifyCredentials: (clientId, clientSecret) => invoke("settings_set_spotify_credentials", {
-		clientId,
-		clientSecret
-	}),
-	testSpotify: () => invoke("settings_test_spotify"),
 	/**
 	* Abre en el navegador una página de configuración conocida.
 	*
@@ -279,12 +260,3 @@ export const settings = {
 export const stats = { 
 /** Tiempo total escuchado y las canciones y artistas que más se llevan. */
 get: () => invoke("stats_get") };
-export const system = { apiVersion: () => invoke("api_version") };
-export const updates = { 
-/**
-* Abre en el navegador la página del release que se detectó disponible.
-*
-* No se le pasa ninguna URL: la decide Rust con lo último que encontró la
-* comprobación de fondo. Mismo motivo que `settings.openExternal`.
-*/
-openReleasePage: () => invoke("updates_open_release_page") };

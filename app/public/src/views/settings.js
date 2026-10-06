@@ -45,11 +45,9 @@ const FICHERO = "::fichero::";
 function patchVacio() {
 	return {
 		language: null,
-		metadataProvider: null,
 		audio: null,
 		download: null,
-		integrations: null,
-		ui: null
+		integrations: null
 	};
 }
 /** Convierte la configuración de audio vigente en algo que se pueda enviar. */
@@ -58,7 +56,6 @@ function audioEnviable(s) {
 		crossfadeMs: s.audio.crossfadeMs,
 		gapless: s.audio.gapless,
 		eqProfile: { ...s.audio.eqProfile },
-		normalizeVolume: s.audio.normalizeVolume,
 		outputDeviceId: s.audio.outputDeviceId
 	};
 }
@@ -422,33 +419,6 @@ export function mountSettingsView(contenedor) {
 					language: v
 				});
 			})));
-			cuerpo.append(campo(
-				t("settings.provider"),
-				selector([
-					{
-						valor: "combinado",
-						texto: t("settings.provider.combinado")
-					},
-					{
-						valor: "ytmusic",
-						texto: t("settings.provider.ytmusic")
-					},
-					{
-						valor: "musicbrainz",
-						texto: t("settings.provider.musicbrainz")
-					},
-					{
-						valor: "spotify",
-						texto: t("settings.provider.spotify")
-					}
-				], s.metadataProvider, (v) => void aplicar({
-					...patchVacio(),
-					metadataProvider: v
-				})),
-				// Elegir Spotify sin credenciales deja la búsqueda muda, así que se
-				// dice aquí y no cuando el usuario ya está buscando sin resultados.
-				s.metadataProvider === "spotify" && !s.spotify.configured ? t("provider.not_configured") : t("settings.provider_help")
-			));
 			// El backend puede no saber todavía dónde está: una fila con la etiqueta
 			// y nada al lado parece un fallo de pintado, no un dato ausente.
 			const ruta = document.createElement("code");
@@ -528,7 +498,6 @@ export function mountSettingsView(contenedor) {
 					elegirPerfil.value = p.id;
 				}
 			});
-			cuerpo.append(campo(t("settings.normalize"), interruptor(s.audio.normalizeVolume, (v) => guardarAudio({ normalizeVolume: v }))));
 			cuerpo.append(campo(t("settings.device"), selector([{
 				valor: "",
 				texto: t("settings.device_default")
@@ -629,62 +598,11 @@ export function mountSettingsView(contenedor) {
 			cuerpo.append(nota);
 			panel.append(bloque);
 		}
-		// Integraciones: Spotify y Discord comparten pestaña porque las dos son
-		// "presta tus propias credenciales a un servicio externo" — la misma
-		// decisión, con el mismo motivo (ADR: incrustarlas en el binario las
-		// volvería compartidas por todo el mundo).
-		// Spotify
-		if (pestañaActiva === "integraciones") {
-			const { el: bloque, cuerpo } = seccion(t("settings.spotify"));
-			const ayuda = document.createElement("p");
-			ayuda.className = "ajustes__ayuda";
-			ayuda.textContent = t("settings.spotify_help");
-			cuerpo.append(ayuda);
-			const id = document.createElement("input");
-			id.type = "text";
-			id.className = "ajustes__input";
-			id.autocomplete = "off";
-			id.value = s.spotify.clientId ?? "";
-			const secreto = document.createElement("input");
-			secreto.type = "password";
-			secreto.className = "ajustes__input";
-			secreto.autocomplete = "off";
-			// Nunca se rellena: el backend no lo devuelve y fingir que sí —con
-			// puntos de relleno— haría creer que dejarlo así lo conserva.
-			secreto.placeholder = s.spotify.configured ? "••••••••" : "";
-			const estado = document.createElement("span");
-			estado.className = "ajustes__estado";
-			estado.textContent = s.spotify.configured ? t("settings.saved") : "";
-			const guardar = document.createElement("button");
-			guardar.type = "button";
-			guardar.className = "boton";
-			guardar.textContent = t("settings.save");
-			guardar.addEventListener("click", () => {
-				void (async () => {
-					try {
-						const r = await api.setSpotifyCredentials(id.value.trim(), secreto.value);
-						secreto.value = "";
-						estado.textContent = r.state === "ready" ? t("settings.saved") : r.state === "unavailable" ? t(r.reasonKey) : t("provider.not_configured");
-						actual = await api.get();
-					} catch (e) {
-						estado.textContent = t("error.invalid");
-						mostrarError(t("error.invalid"), String(e));
-					}
-				})();
-			});
-			cuerpo.append(campo(t("settings.client_id"), id), campo(t("settings.client_secret"), secreto));
-			const acciones = document.createElement("div");
-			acciones.className = "ajustes__acciones";
-			acciones.append(guardar, estado);
-			cuerpo.append(acciones);
-			panel.append(bloque);
-		}
 		// Discord
 		//
-		// Pide credenciales de una aplicación registrada por el usuario, por el
-		// mismo motivo que Spotify: incrustarlas en el binario las convertiría en
-		// credenciales compartidas por todo el mundo, sacables del ejecutable con
-		// un editor de texto.
+		// Pide credenciales de una aplicación registrada por el usuario:
+		// incrustarlas en el binario las convertiría en credenciales compartidas
+		// por todo el mundo, sacables del ejecutable con un editor de texto.
 		if (pestañaActiva === "integraciones") {
 			const { el: bloque, cuerpo } = seccion(t("settings.discord_section"));
 			cuerpo.append(pasos([
