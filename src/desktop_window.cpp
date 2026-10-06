@@ -6,6 +6,14 @@
 
 DesktopWindow::DesktopWindow(Options opts) {
     auto w = webview_create(opts.devtools ? 1 : 0, nullptr);
+    // GDK puts WM_COMMAND on its X11 group-leader window, and KDE's ksmserver
+    // saves every window carrying it as a "legacy session" app and relaunches
+    // it at login -- outside the .desktop launcher (so the pinned taskbar
+    // icon never binds to that window) and racing the autostart launch.
+    // Session restore is the autostart script's job, not the WM's.
+    if (GdkDisplay* display = gdk_display_get_default())
+        gdk_property_delete(gdk_display_get_default_group(display),
+                            gdk_atom_intern_static_string("WM_COMMAND"));
     webview_set_title(w, opts.title.c_str());
     webview_set_size(w, opts.width, opts.height,
                       opts.resizable ? WEBVIEW_HINT_NONE : WEBVIEW_HINT_FIXED);
@@ -94,9 +102,10 @@ void DesktopWindow::minimize() {
 void DesktopWindow::restore() {
     webview_dispatch(static_cast<webview_t>(handle_),
         [](webview_t w, void*) {
-            auto* win = GTK_WINDOW(webview_get_window(w));
-            gtk_window_unmaximize(win);
-            gtk_window_deiconify(win);
+            // present(), not unmaximize()+deiconify(): this is "show the
+            // window" (second launch, MPRIS Raise), and unmaximizing threw
+            // away a maximized window's size every time.
+            gtk_window_present(GTK_WINDOW(webview_get_window(w)));
         }, nullptr);
 }
 

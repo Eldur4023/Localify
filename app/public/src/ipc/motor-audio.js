@@ -281,6 +281,9 @@ function alAcabarVoz(s, voz) {
 		// Se acabó el principio decodificado y la versión completa aún no ha
 		// llegado: se espera ahí (la posición no miente: no suena nada).
 		s.posParada = voz.fuente.buffer.duration - MARGEN_TROZO_S;
+		// La completa llegó cuando ya era tarde para el cambio sin corte
+		// (completarVoz la dejó para aquí): se sigue desde donde acaba el trozo.
+		if (s === slotActivo() && s.completo && quiereSonar && sonar(s, s.posParada)) return;
 		if (s === slotActivo()) {
 			cerrarTramo();
 			pararTicks();

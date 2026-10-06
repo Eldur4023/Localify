@@ -94,6 +94,12 @@ struct State {
     bool        shuffle = false;
     std::string loop_status = "None"; // None | Track | Playlist
     bool        has_track = false;
+    // publicar_integraciones() runs on several server threads at once (after
+    // each command, each poll, each engine report), each with the state as
+    // it read it: without this, a stale "Playing" landing after a newer
+    // "Paused" stayed published, and Plasma routes media keys to whichever
+    // player says it is playing.
+    long long   revision = -1;
 };
 
 State&            state() { static State s; return s; }
@@ -308,11 +314,19 @@ void mpris_update(const Value& d) {
     g_variant_builder_init(&player_changed, G_VARIANT_TYPE("a{sv}"));
     bool metadata_changed = false;
     bool status_changed = false;
+    bool any_changed = false;
     bool seeked = false;
     long long seeked_to_us = 0;
 
     {
         std::lock_guard<std::mutex> lk(s.mutex);
+        Value rv = const_cast<Value&>(d).as_dict()["revision"];
+        long long new_revision = rv.is_num() ? static_cast<long long>(rv.as_float()) : s.revision;
+        if (new_revision < s.revision) {
+            g_variant_builder_clear(&player_changed);
+            return;
+        }
+        s.revision = new_revision;
         std::string new_track_id = jstr(d, "trackId");
         std::string new_title    = jstr(d, "title");
         std::string new_artist   = jstr(d, "artist");
@@ -353,6 +367,8 @@ void mpris_update(const Value& d) {
         seeked_to_us = new_position_us;
         s.shuffle = new_shuffle; s.loop_status = new_loop; s.has_track = new_has_track;
 
+        any_changed = metadata_changed || status_changed || volume_changed ||
+                      shuffle_changed || loop_changed;
         if (metadata_changed) g_variant_builder_add(&player_changed, "{sv}", "Metadata", build_metadata_locked());
         if (status_changed)   g_variant_builder_add(&player_changed, "{sv}", "PlaybackStatus", g_variant_new_string(s.status.c_str()));
         if (volume_changed)   g_variant_builder_add(&player_changed, "{sv}", "Volume", g_variant_new_double(s.volume));
@@ -362,7 +378,7 @@ void mpris_update(const Value& d) {
     // Position deliberately has no PropertiesChanged signal: the MPRIS
     // spec says not to (clients that care poll Position directly, and a
     // ~1/s tick would just be a stream of Seeked-shaped noise otherwise).
-    if (metadata_changed || status_changed) emit_changed("org.mpris.MediaPlayer2.Player", &player_changed);
+    if (any_changed) emit_changed("org.mpris.MediaPlayer2.Player", &player_changed);
     else g_variant_builder_clear(&player_changed);
     if (seeked && g_conn) {
         g_dbus_connection_emit_signal(g_conn, nullptr, "/org/mpris/MediaPlayer2",

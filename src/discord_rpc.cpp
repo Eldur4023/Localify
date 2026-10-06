@@ -76,6 +76,8 @@ struct State {
     Clock::time_point retry_at{};
     Clock::duration backoff = kFirstBackoff;
     long long nonce = 0;
+    long long revision = -1; // same out-of-order guard as mpris.cpp's
+
 };
 
 State& state() { static State s; return s; }
@@ -340,6 +342,11 @@ void discord_update(const Value& d) {
 
     State& s = state();
     std::lock_guard<std::mutex> lk(s.mutex);
+
+    const Value* rv = field(d, "revision");
+    long long new_revision = rv && rv->is_num() ? static_cast<long long>(rv->as_float()) : s.revision;
+    if (new_revision < s.revision) return;
+    s.revision = new_revision;
 
     if (client_id.empty()) {
         // Off, or no Application ID: dropping the IPC connection is enough

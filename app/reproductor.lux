@@ -264,7 +264,8 @@ fn void publicar_integraciones():
         "volume": e.volume,
         "shuffle": e.shuffle,
         "repeat": e.repeat_mode,
-        "cue": e.cue
+        "cue": e.cue,
+        "revision": e.revision
     })
 
     Json integraciones = jget(ajustes_estructurados(), "integrations")
@@ -284,4 +285,4 @@ fn void publicar_integraciones():
             "startS": inicio,
             "endS": dur > 0 ? inicio + int(dur / 1000) : 0
         }
-    window.discord_update({ "clientId": discord_id, "activity": actividad })
+    window.discord_update({ "clientId": discord_id, "activity": actividad, "revision": e.revision })

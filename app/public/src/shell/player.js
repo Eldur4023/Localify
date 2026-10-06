@@ -156,6 +156,10 @@ export function mountPlayerBar(contenedor, opciones) {
 		repetir.title = etiqueta;
 	}
 	function pintar(nuevo) {
+		// Las respuestas llegan en cualquier orden (16 hebras en el servidor):
+		// una más vieja que lo pintado dejaba el botón al revés de lo que suena,
+		// y nada lo corregía hasta el siguiente cambio de estado.
+		if (estado && nuevo.revision < estado.revision) return;
 		estado = nuevo;
 		titulo.textContent = nuevo.track?.title ?? t("player.nothing");
 		artista.textContent = nuevo.track?.artistDisplay ?? "";
@@ -217,8 +221,11 @@ export function mountPlayerBar(contenedor, opciones) {
 	});
 	// Teclado (Tab + flechas/Home/End): no hay pointerdown, así que sin esto
 	// "change" llega con arrastrando aún en false y alSoltarBarra no hace nada.
-	rango.addEventListener("keydown", () => {
-		arrastrando = true;
+	// Solo las teclas que mueven el control: cualquier otra (Alt, Super para
+	// minimizar, espacio...) no dispara "change" y dejaba la barra congelada.
+	const TECLAS_BARRA = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"]);
+	rango.addEventListener("keydown", (e) => {
+		if (TECLAS_BARRA.has(e.key)) arrastrando = true;
 	});
 	rango.addEventListener("input", () => {
 		// Mientras se arrastra se muestra el destino, aunque el audio siga donde
@@ -253,6 +260,9 @@ export function mountPlayerBar(contenedor, opciones) {
 	}
 	const dejarEventos = alRecibir((evento) => {
 		switch (evento.type) {
+			// Cada revision nueva, no solo los cambios de estado que el sondeo
+			// llega a ver: una pausa→suena entre dos sondeos no cambia "status".
+			case "queueChanged":
 			case "trackChanged":
 			case "playStatusChanged":
 			case "shuffleChanged":
@@ -281,7 +291,7 @@ export function mountPlayerBar(contenedor, opciones) {
 	const alEspacio = (e) => {
 		if (e.code !== "Space" || e.repeat) return;
 		const activo = document.activeElement;
-		const escribiendo = activo instanceof HTMLInputElement || activo instanceof HTMLTextAreaElement || activo instanceof HTMLSelectElement || activo instanceof HTMLElement && activo.isContentEditable;
+		const escribiendo = activo instanceof HTMLInputElement && activo.type !== "range" || activo instanceof HTMLTextAreaElement || activo instanceof HTMLSelectElement || activo instanceof HTMLElement && activo.isContentEditable;
 		const yaLoManeja = activo instanceof HTMLButtonElement || activo instanceof HTMLAnchorElement;
 		if (escribiendo || yaLoManeja) return;
 		// Sin esto la página se desplazaría, que es lo que hace el espacio por
