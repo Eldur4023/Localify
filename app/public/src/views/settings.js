@@ -434,6 +434,19 @@ export function mountSettingsView(contenedor) {
 			caja.className = "ajustes__carpeta";
 			caja.append(ruta, cambiar);
 			cuerpo.append(campo(t("settings.library_folder"), caja));
+			// Una canción que llega con otro id (otro vídeo, una lista importada) acaba
+			// dos veces en la biblioteca: esto las funde sin perder listas ni favoritos.
+			cuerpo.append(campo(t("settings.duplicates"), boton(t("settings.duplicates_find"), async () => {
+				const grupos = await library.findDuplicates();
+				if (grupos.length === 0) {
+					await confirmar(t("settings.duplicates_none"), t("common.confirm"), undefined, false);
+					return;
+				}
+				const ejemplos = grupos.slice(0, 5).map((g) => `${g.title} — ${g.artist}`).join("\n");
+				if (!await confirmar(t("settings.duplicates_found", { count: grupos.length }), t("settings.duplicates_merge"), ejemplos, false)) return;
+				const r = await library.mergeDuplicates();
+				await confirmar(t("settings.duplicates_done", { count: r.merged }), t("common.confirm"), undefined, false);
+			}), t("settings.duplicates_help")));
 			// Mientras la copia corre se dice cuánto lleva. Cambiar de carpeta es la
 			// única operación de la aplicación que puede durar minutos y bloquear
 			// otra igual, así que es la única que muestra progreso explícito.

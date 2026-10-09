@@ -267,5 +267,16 @@ export default {
 	"error.server_error": "The server answered with an error",
 	"error.server_not_configured": "Connect to a server first",
 	"error.username_taken": "That username already exists",
-	"error.user_not_found": "That user does not exist"
+	"error.user_not_found": "That user does not exist",
+	"settings.duplicates": "Duplicate songs",
+	"settings.duplicates_find": "Find and merge…",
+	"settings.duplicates_help": "The same song can arrive under another identifier (another video, an imported list). It is recognised by title, artist and duration; merging keeps playlists, favourites and history.",
+	"settings.duplicates_none": "There are no duplicate songs.",
+	"settings.duplicates_found": "There are {count} repeated songs. Merge them?",
+	"settings.duplicates_merge": "Merge",
+	"settings.duplicates_done": "{count} duplicates merged.",
+	"social.contribute_library": "Contribute my library",
+	"social.contribute_library_run": "Upload what is missing",
+	"social.contribute_library_help": "Uploads downloaded songs the server does not have yet. Ones it already has (same title, artist and duration) are not uploaded again.",
+	"social.contribute_progress": "Uploaded: {uploaded} · already there: {existing}"
 };

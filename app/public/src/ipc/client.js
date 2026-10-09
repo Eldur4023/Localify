@@ -88,6 +88,10 @@ export const queue = {
 	jumpTo: (entryId) => invoke("queue_jump_to", { entryId })
 };
 export const library = {
+	/** Grupos de pistas que son la misma canción (título + artista + duración ±3 s). */
+	findDuplicates: () => invoke("library_find_duplicates"),
+	/** Funde cada grupo en una sola pista; no se pierde nada (listas, favoritos, historial). */
+	mergeDuplicates: () => invoke("library_merge_duplicates"),
 	tracks: (filter, sort, req = page()) => invoke("library_tracks", {
 		filter,
 		sort,
@@ -283,6 +287,8 @@ export const social = {
 	}),
 	logout: () => invoke("server_logout"),
 	setUpload: (enabled) => invoke("server_set_upload", { enabled }),
+	/** Sube un lote de la biblioteca descargada; repetir con `next` hasta `done`. */
+	syncLibrary: (offset) => invoke("server_sync_library", { offset }),
 	me: () => invoke("social_me"),
 	updateMe: (displayName, bio) => invoke("social_update_me", {
 		displayName,

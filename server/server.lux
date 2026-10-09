@@ -47,10 +47,12 @@ on start:
             title text not null, artist text not null default '', album text not null default '',
             duration_ms integer not null default 0,
             search_norm text not null default '',
+            title_norm text not null default '', artist_norm text not null default '',
             ext text not null, size integer not null,
             uploaded_by integer references users(id) on delete set null,
             created_at integer not null default (unixepoch())
         )""")
+    await sqlite.exec("create index if not exists idx_tracks_key on tracks(title_norm, artist_norm)")
     await sqlite.exec("""
         create table if not exists playlists(
             id integer primary key,
@@ -73,6 +75,7 @@ on start:
             track_id text not null,
             title text not null, artist text not null default '', album text not null default '',
             duration_ms integer not null default 0,
+            title_norm text not null default '', artist_norm text not null default '',
             added_by integer references users(id) on delete set null,
             primary key(playlist_id, position)
         )""")
@@ -109,6 +112,26 @@ fn bool id_valido(string id):
 fn Json user_dto(Json u):
     return { "username": u["username"], "displayName": u["display_name"], "bio": u["bio"] }
 
+# Identidad de una canción: título + artista normalizados (los normaliza el
+# cliente, con la misma función que su biblioteca) y, para no mezclar versiones
+# distintas con el mismo nombre, una duración compatible (±3 s; 0 = desconocida).
+# Devuelve el id de la pista del servidor, o "" si no hay.
+fn string id_por_identidad(string titulo_norm, string artista_norm, int duracion_ms):
+    if titulo_norm == "":
+        return ""
+    List<Json> r = await sqlite.query("""
+        select id from tracks where title_norm = ? and artist_norm = ?
+          and (duration_ms = 0 or ? = 0 or abs(duration_ms - ?) <= 3000)
+        order by created_at limit 1""", titulo_norm, artista_norm, duracion_ms, duracion_ms)
+    return len(r) == 0 ? "" : str(r[0]["id"])
+
+# La pista de una referencia (por id o, si no, por identidad), "" si el servidor no la tiene
+fn string id_de_referencia(string id, string titulo_norm, string artista_norm, int duracion_ms):
+    List<Json> r = await sqlite.query("select id from tracks where id = ?", id)
+    if len(r) > 0:
+        return id
+    return id_por_identidad(titulo_norm, artista_norm, duracion_ms)
+
 # nivel de acceso a una playlist: "owner" | "member" | "reader" | "" (ninguno)
 fn string acceso(int pid, int uid):
     List<Json> p = await sqlite.query("select owner_id, visibility from playlists where id = ?", pid)
@@ -144,20 +167,31 @@ fn string sql_resumen():
                (select count(*) from playlist_tracks pt where pt.playlist_id = p.id) as n_tracks
         from playlists p join users u on u.id = p.owner_id """
 
-# Sustituye las pistas de una playlist por la lista dada (referencias).
+# ¿Ya está esta canción en la lista? (mismo id o misma identidad título + artista)
+fn bool ya_en_playlist(int pid, string tid, string titulo_norm, string artista_norm):
+    List<Json> r = await sqlite.query("""
+        select 1 from playlist_tracks where playlist_id = ?
+          and (track_id = ? or (? != '' and title_norm = ? and artist_norm = ?)) limit 1""",
+        pid, tid, titulo_norm, titulo_norm, artista_norm)
+    return len(r) > 0
+
+fn void insertar_pista(int pid, Json p, int uid):
+    string tid = s_of(p, "id", "")
+    string tn = s_of(p, "titleNorm", "")
+    string an = s_of(p, "artistNorm", "")
+    if tid == "" or s_of(p, "title", "") == "" or ya_en_playlist(pid, tid, tn, an):
+        return
+    await sqlite.exec("""
+        insert into playlist_tracks(playlist_id, position, track_id, title, artist, album, duration_ms, title_norm, artist_norm, added_by)
+        values(?, (select coalesce(max(position) + 1, 0) from playlist_tracks where playlist_id = ?), ?, ?, ?, ?, ?, ?, ?, ?)""",
+        pid, pid, tid, s_of(p, "title", ""), s_of(p, "artist", ""), s_of(p, "album", ""),
+        i_of(p, "durationMs", 0), tn, an, uid)
+
+# Sustituye las pistas de una playlist por la lista dada (referencias, sin repetidas).
 fn void escribir_pistas(int pid, List<Json> pistas, int uid):
     await sqlite.exec("delete from playlist_tracks where playlist_id = ?", pid)
-    int pos = 0
     for int i in range(0, len(pistas)):
-        string tid = s_of(pistas[i], "id", "")
-        if tid == "" or s_of(pistas[i], "title", "") == "":
-            continue
-        await sqlite.exec("""
-            insert into playlist_tracks(playlist_id, position, track_id, title, artist, album, duration_ms, added_by)
-            values(?, ?, ?, ?, ?, ?, ?, ?)""",
-            pid, pos, tid, s_of(pistas[i], "title", ""), s_of(pistas[i], "artist", ""),
-            s_of(pistas[i], "album", ""), i_of(pistas[i], "durationMs", 0), uid)
-        pos = pos + 1
+        insertar_pista(pid, pistas[i], uid)
     await sqlite.exec("update playlists set updated_at = unixepoch() where id = ?", pid)
 
 # ─── Público ─────────────────────────────────────────────────────────────────
@@ -250,14 +284,35 @@ group("/api"):
         if limit > 50:
             limit = 50
         List<Json> r = await sqlite.query("""
-            select id, title, artist, album, duration_ms from tracks
+            select id, title, artist, album, duration_ms, title_norm, artist_norm from tracks
             where search_norm like ? escape '\\' and search_norm like ? escape '\\' and search_norm like ? escape '\\'
               and search_norm like ? escape '\\' and search_norm like ? escape '\\' and search_norm like ? escape '\\'
-            order by created_at desc limit ?""", p[0], p[1], p[2], p[3], p[4], p[5], limit)
+            order by created_at limit ?""", p[0], p[1], p[2], p[3], p[4], p[5], limit * 3)
         List<Json> out = []
+        List<string> vistas = []
         for int i in range(0, len(r)):
+            if len(out) >= limit:
+                break
+            # una sola fila por canción: título + artista + duración compatible
+            string clave = str(r[i]["title_norm"]) + "|" + str(r[i]["artist_norm"]) + "|" + str(int(r[i]["duration_ms"]) / 3000)
+            if r[i]["title_norm"] != "" and vistas.contains(clave):
+                continue
+            vistas.add(clave)
             out.add({ "id": r[i]["id"], "title": r[i]["title"], "artist": r[i]["artist"],
                       "album": r[i]["album"], "durationMs": r[i]["duration_ms"] })
+        return out
+
+    # Qué pistas del cliente tiene ya el servidor, por identidad (título + artista
+    # normalizados + duración) o por id: [{id, titleNorm, artistNorm, durationMs}]
+    # -> [{id, serverId}] con serverId "" si no la tiene (hasta 200)
+    post endpoint("/tracks/match", Json b):
+        List<Json> items = b["items"] == null ? [] : b["items"]
+        List<Json> out = []
+        for int i in range(0, len(items)):
+            if i >= 200:
+                break
+            string cid = s_of(items[i], "id", "")
+            out.add({ "id": cid, "serverId": id_de_referencia(cid, s_of(items[i], "titleNorm", ""), s_of(items[i], "artistNorm", ""), i_of(items[i], "durationMs", 0)) })
         return out
 
     # ids que el servidor ya tiene, de una lista (hasta 100)
@@ -279,7 +334,7 @@ group("/api"):
         return send_file("./data/audio/" + id + "." + str(r[0]["ext"]))
 
     # subida: el cliente que acaba de descargar una pista la aporta al servidor
-    put endpoint("/tracks/:id", string id, File audio, string title = "", string artist = "", string album = "", int duration_ms = 0, string search_norm = "", string ext = "opus"):
+    put endpoint("/tracks/:id", string id, File audio, string title = "", string artist = "", string album = "", int duration_ms = 0, string search_norm = "", string title_norm = "", string artist_norm = "", string ext = "opus"):
         if not id_valido(id):
             return { "error": "invalid_id" }.status(400)
         if not ["opus", "ogg", "webm", "m4a", "mp3", "flac"].contains(ext):
@@ -289,14 +344,18 @@ group("/api"):
             return { "error": "invalid" }.status(400)
         List<Json> ya = await sqlite.query("select 1 from tracks where id = ?", id)
         if len(ya) > 0:
-            return { "stored": false }
+            return { "stored": false, "id": id }
+        # la misma canción subida por otra persona con otro id: no se duplica
+        string igual = id_por_identidad(title_norm, artist_norm, duration_ms)
+        if igual != "":
+            return { "stored": false, "id": igual, "duplicate": true }
         audio.save("./data/audio", id + "." + ext)
         await sqlite.exec("""
-            insert or ignore into tracks(id, title, artist, album, duration_ms, search_norm, ext, size, uploaded_by)
-            values(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            insert or ignore into tracks(id, title, artist, album, duration_ms, search_norm, title_norm, artist_norm, ext, size, uploaded_by)
+            values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             id, titulo, artist, album, duration_ms,
-            search_norm.trim(), ext, audio.size, yo())
-        return { "stored": true }.status(201)
+            search_norm.trim(), title_norm.trim(), artist_norm.trim(), ext, audio.size, yo())
+        return { "stored": true, "id": id }.status(201)
 
     # ── playlists ──
     get endpoint("/playlists"):
@@ -328,15 +387,19 @@ group("/api"):
         Json dto = playlist_resumen(r[0])
         dto["access"] = nivel
         List<Json> ts = await sqlite.query("""
-            select pt.track_id, pt.title, pt.artist, pt.album, pt.duration_ms, u.username as added_by,
-                   exists(select 1 from tracks t where t.id = pt.track_id) as available
+            select pt.track_id, pt.title, pt.artist, pt.album, pt.duration_ms, pt.title_norm, pt.artist_norm,
+                   u.username as added_by
             from playlist_tracks pt left join users u on u.id = pt.added_by
             where pt.playlist_id = ? order by pt.position""", id)
         List<Json> tracks = []
         for int i in range(0, len(ts)):
+            # serverId: la pista del servidor que equivale a esta referencia (puede
+            # tener otro id si la subió otra persona), "" si no la tiene
+            string sid = id_de_referencia(str(ts[i]["track_id"]), str(ts[i]["title_norm"]), str(ts[i]["artist_norm"]), int(ts[i]["duration_ms"]))
             tracks.add({ "id": ts[i]["track_id"], "title": ts[i]["title"], "artist": ts[i]["artist"],
                          "album": ts[i]["album"], "durationMs": ts[i]["duration_ms"],
-                         "addedBy": ts[i]["added_by"], "available": int(ts[i]["available"]) == 1 })
+                         "titleNorm": ts[i]["title_norm"], "artistNorm": ts[i]["artist_norm"],
+                         "addedBy": ts[i]["added_by"], "available": sid != "", "serverId": sid })
         dto["tracks"] = tracks
         List<Json> ms = await sqlite.query("select u.username, u.display_name from playlist_members m join users u on u.id = m.user_id where m.playlist_id = ?", id)
         List<Json> members = []
@@ -375,14 +438,7 @@ group("/api"):
             return status(403)
         List<Json> nuevas = b["tracks"] == null ? [] : b["tracks"]
         for int i in range(0, len(nuevas)):
-            string tid = s_of(nuevas[i], "id", "")
-            if tid == "" or s_of(nuevas[i], "title", "") == "":
-                continue
-            await sqlite.exec("""
-                insert into playlist_tracks(playlist_id, position, track_id, title, artist, album, duration_ms, added_by)
-                values(?, (select coalesce(max(position) + 1, 0) from playlist_tracks where playlist_id = ?), ?, ?, ?, ?, ?, ?)""",
-                id, id, tid, s_of(nuevas[i], "title", ""), s_of(nuevas[i], "artist", ""),
-                s_of(nuevas[i], "album", ""), i_of(nuevas[i], "durationMs", 0), yo())
+            insertar_pista(id, nuevas[i], yo())
         await sqlite.exec("update playlists set updated_at = unixepoch() where id = ?", id)
         return status(204)
 

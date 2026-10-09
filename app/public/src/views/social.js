@@ -196,6 +196,27 @@ export function mountSocialView(contenedor, ruta) {
 		etiqueta.htmlFor = "so-upload";
 		filaSubida.append(etiqueta, subida, nodo("p", "ajustes__ayuda", t("social.upload_help")));
 		cuerpo.append(filaSubida);
+		// Aportar lo que ya tengo descargado: lo que el servidor ya tenga (misma
+		// canción por título + artista + duración) no se vuelve a subir.
+		const progreso = nodo("p", "ajustes__ayuda");
+		const filaBiblioteca = nodo("div", "ajustes__campo");
+		filaBiblioteca.append(nodo("label", "ajustes__etiqueta", t("social.contribute_library")), boton(t("social.contribute_library_run"), "boton--sutil", async () => {
+			let desde = 0;
+			let subidas = 0;
+			let existentes = 0;
+			for (;;) {
+				const r = await social.syncLibrary(desde);
+				subidas += r.uploaded;
+				existentes += r.alreadyThere;
+				progreso.textContent = t("social.contribute_progress", {
+					uploaded: subidas,
+					existing: existentes
+				});
+				if (r.done) break;
+				desde = r.next;
+			}
+		}, progreso), progreso, nodo("p", "ajustes__ayuda", t("social.contribute_library_help")));
+		cuerpo.append(filaBiblioteca);
 		const acciones = nodo("div", "ajustes__acciones");
 		acciones.append(boton(t("social.logout"), "boton--sutil", async () => {
 			await social.logout();

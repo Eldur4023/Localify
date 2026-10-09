@@ -411,6 +411,10 @@ fn Json despachar(string cmd, Json args):
         string tid = arg_str(args, "trackId", "")
         await sqlite.exec("update tracks set metadata_locked = 0, metadata_at = null where id = ?", tid)
         return null
+    if cmd == "library_find_duplicates":
+        return grupos_duplicados()
+    if cmd == "library_merge_duplicates":
+        return await cmd_fusionar_duplicados()
     if cmd == "library_search_candidates":
         return await cmd_buscar_candidatos(args)
     if cmd == "library_assign_metadata":

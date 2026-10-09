@@ -84,31 +84,21 @@ fn void srv_traer_coincidencias(string q):
         if p.id == "" or p.title == "":
             continue
         List<Json> ya = await sqlite.query("select 1 from tracks where id = ?", p.id)
-        if len(ya) == 0:
+        if len(ya) == 0 and equivalente_local(normalizar(p.title), normalizar(jstr(items[i]["artist"], "")), jint(items[i]["durationMs"], 0), "", false) == "":
             guardar_pista(p)
 
-# Id de la pista en el servidor: el mismo si lo tiene, o el de una pista que
-# coincida por título y duración (listas importadas de Spotify, etc.). "" si no.
+# Id de la pista en el servidor: la identidad (título + artista normalizados +
+# duración) manda, no el id; "" si el servidor no la tiene.
 fn string srv_id_de(string tid):
-    Json? h = srv("POST", "/tracks/have", { "ids": [tid] })
-    if h == null:
+    List<Json> f = await sqlite.query("select title_norm, artist_norm, duration_ms from tracks where id = ?", tid)
+    if len(f) == 0:
         return ""
-    if h["status"] == 200 and len(jlist(h["body"])) > 0:
-        return tid
-    DatosPista p = datos_de_pista(tid)
-    if p.title == "":
+    Json? r = srv("POST", "/tracks/match", { "items": [{
+        "id": tid, "titleNorm": jstr(f[0]["title_norm"], ""), "artistNorm": jstr(f[0]["artist_norm"], ""),
+        "durationMs": jint(f[0]["duration_ms"], 0) }] })
+    if r == null or r["status"] != 200 or len(jlist(r["body"])) == 0:
         return ""
-    string artista = len(p.artistas) > 0 ? p.artistas[0] : ""
-    List<Json> items = srv_buscar(artista + " " + p.title, 10)
-    for int i in range(0, len(items)):
-        if normalizar(jstr(items[i]["title"], "")) != normalizar(p.title):
-            continue
-        int dif = jint(items[i]["durationMs"], 0) - p.duracion_ms
-        if dif < 0:
-            dif = -dif
-        if p.duracion_ms == 0 or jint(items[i]["durationMs"], 0) == 0 or dif <= 3000:
-            return jstr(items[i]["id"], "")
-    return ""
+    return jstr(r["body"][0]["serverId"], "")
 
 # Descarga la pista del servidor al temporal del trabajo y lo deja en
 # 'finalizing'. false = el servidor no la tiene (o no hay servidor): seguir con
@@ -134,45 +124,73 @@ fn bool srv_obtener(string tid):
     await sqlite.exec("update download_jobs set tmp_path = ?, state = 'finalizing', updated_at = unixepoch() where track_id = ?", destino, tid)
     return true
 
+# Sube un fichero de audio al servidor. true si lo guardó (o ya lo tenía).
+fn bool srv_poner(string tid, string ruta, string ext, string titulo, string artista, string album, int duracion_ms):
+    Dict<string, string> cab = { "Authorization": "Bearer " + ajuste("server_token", "") }
+    try:
+        Json r = await http.put(srv_base() + "/tracks/" + tid, {
+            "title": titulo, "artist": artista, "album": album, "ext": ext,
+            "duration_ms": str(duracion_ms),
+            "search_norm": normalizar(titulo + " " + artista + " " + album),
+            "title_norm": normalizar(titulo), "artist_norm": normalizar(artista)
+        }, cab, { "files": { "audio": ruta }, "timeout_ms": 120000 })
+        return jint(r["status"], 0) < 300
+    catch e:
+        state.set("srv_caido", "1", 30000)
+        return false
+
 # Aporta al servidor una pista que acabo de descargar de YouTube. Nunca falla
-# la descarga por esto. No sube lo que vino del propio servidor.
+# la descarga por esto. No sube lo que vino del propio servidor, ni lo que el
+# servidor ya tiene (aunque sea con otro id: la identidad es título + artista).
 fn void srv_subir(string tid, string ruta, string ext, string titulo, string artista, string album, int duracion_ms):
     if state.get("srvdl:" + tid, "") != "":
         state.remove("srvdl:" + tid)
         return
     if not srv_activo() or ajuste("server_upload", "1") != "1":
         return
-    Json? h = srv("POST", "/tracks/have", { "ids": [tid] })
-    if h == null or h["status"] != 200 or len(jlist(h["body"])) > 0:
+    if srv_id_de(tid) != "":
         return
-    Dict<string, string> cab = { "Authorization": "Bearer " + ajuste("server_token", "") }
-    try:
-        await http.put(srv_base() + "/tracks/" + tid, {
-            "title": titulo, "artist": artista, "album": album, "ext": ext,
-            "duration_ms": str(duracion_ms),
-            "search_norm": normalizar(titulo + " " + artista + " " + album)
-        }, cab, { "files": { "audio": ruta }, "timeout_ms": 120000 })
-    catch e:
-        state.set("srv_caido", "1", 30000)
+    srv_poner(tid, ruta, ext, titulo, artista, album, duracion_ms)
 
 # ─── Playlists locales <-> servidor ──────────────────────────────────────────
 
 fn List<Json> pistas_locales_de(string plid):
     List<Json> f = await sqlite.query("""
-        select t.id, t.title, t.artist_display as artist, coalesce(al.title, '') as album, t.duration_ms as durationMs
+        select t.id, t.title, t.artist_display as artist, coalesce(al.title, '') as album, t.duration_ms as durationMs,
+               t.title_norm as titleNorm, t.artist_norm as artistNorm
         from playlist_items pi join tracks t on t.id = pi.track_id
         left join albums al on al.id = t.album_id
         where pi.playlist_id = ? order by pi.position""", plid)
     return f
 
+# Añade a la playlist local la pista de una referencia del servidor, reutilizando
+# la que ya tengo si es la misma canción (por id o por identidad) en vez de crear otra.
 fn void anadir_local(string plid, Json it):
     PistaCatalogo p = srv_pista(it)
-    List<Json> ya = await sqlite.query("select 1 from tracks where id = ?", p.id)
+    string tid = p.id
+    List<Json> ya = await sqlite.query("select 1 from tracks where id = ?", tid)
     if len(ya) == 0:
-        guardar_pista(p)
+        string igual = equivalente_local(normalizar(p.title), normalizar(jstr(it["artist"], "")), jint(it["durationMs"], 0), "", false)
+        if igual != "":
+            tid = igual
+        else:
+            guardar_pista(p)
+    List<Json> ahi = await sqlite.query("select 1 from playlist_items where playlist_id = ? and track_id = ?", plid, tid)
+    if len(ahi) > 0:
+        return
     List<Json> m = await sqlite.query("select coalesce(max(position), 0) as p from playlist_items where playlist_id = ?", plid)
     await sqlite.exec("insert into playlist_items(id, playlist_id, track_id, position, added_at) values(?, ?, ?, ?, unixepoch())",
-        nuevo_id(), plid, p.id, jdbl(m[0]["p"], 0.0) + 1.0)
+        nuevo_id(), plid, tid, jdbl(m[0]["p"], 0.0) + 1.0)
+
+# Clave de identidad de una referencia del servidor o de una pista local
+fn string clave_ref(Json it):
+    string tn = jstr(it["titleNorm"], "")
+    if tn == "":
+        tn = normalizar(jstr(it["title"], ""))
+    string an = jstr(it["artistNorm"], "")
+    if an == "":
+        an = normalizar(jstr(it["artist"], ""))
+    return tn + "|" + an
 
 # id local de la playlist enlazada a una del servidor ("" si no hay)
 fn string local_de(string sid):
@@ -197,21 +215,24 @@ fn Json sincronizar(string plid, string sid):
     Json pl = r["body"]
     List<Json> remotas = jlist(pl["tracks"])
     List<Json> locales = pistas_locales_de(plid)
-    List<string> ids_locales = []
+    List<string> claves_locales = []
     for int i in range(0, len(locales)):
-        ids_locales.add(jstr(locales[i]["id"], ""))
-    List<string> ids_remotas = []
+        claves_locales.add(clave_ref(locales[i]))
+    List<string> claves_remotas = []
     for int i in range(0, len(remotas)):
-        ids_remotas.add(jstr(remotas[i]["id"], ""))
-        if not ids_locales.contains(jstr(remotas[i]["id"], "")):
+        string k = clave_ref(remotas[i])
+        claves_remotas.add(k)
+        if not claves_locales.contains(k):
             anadir_local(plid, remotas[i])
+            claves_locales.add(k)
     bool edito = pl["access"] == "owner" or (pl["access"] == "member" and pl["collaborative"] == true)
     if edito:
         List<Json> subir = []
         for int i in range(0, len(locales)):
-            if not ids_remotas.contains(jstr(locales[i]["id"], "")):
+            if not claves_remotas.contains(clave_ref(locales[i])):
                 subir.add({ "id": locales[i]["id"], "title": locales[i]["title"], "artist": locales[i]["artist"],
-                            "album": locales[i]["album"], "durationMs": locales[i]["durationMs"] })
+                            "album": locales[i]["album"], "durationMs": locales[i]["durationMs"],
+                            "titleNorm": locales[i]["titleNorm"], "artistNorm": locales[i]["artistNorm"] })
         if len(subir) > 0:
             srv("POST", "/playlists/" + sid + "/tracks", { "tracks": subir })
     tocar_playlists()
@@ -289,6 +310,39 @@ fn Json cmd_social(string cmd, Json args):
     # a partir de aquí hace falta sesión
     if not srv_sesion():
         return error_api("SERVER_AUTH", "error.server_auth").status(401)
+
+    # Aporta mi biblioteca descargada: lotes de 20 pistas por llamada (la UI repite
+    # hasta done). Lo que el servidor ya tiene (por identidad) no se vuelve a subir.
+    if cmd == "server_sync_library":
+        int desde = jint(jget(args, "offset"), 0)
+        List<Json> filas = await sqlite.query("""
+            select t.id, t.title, t.artist_display as artist, coalesce(al.title, '') as album, t.duration_ms,
+                   t.title_norm, t.artist_norm, af.rel_path, af.format
+            from audio_files af join tracks t on t.id = af.track_id left join albums al on al.id = t.album_id
+            order by t.id limit 20 offset ?""", desde)
+        List<Json> items = []
+        for int i in range(0, len(filas)):
+            items.add({ "id": filas[i]["id"], "titleNorm": filas[i]["title_norm"], "artistNorm": filas[i]["artist_norm"],
+                        "durationMs": filas[i]["duration_ms"] })
+        int ya_estaban = 0
+        int subidas = 0
+        int fallidas = 0
+        if len(items) > 0:
+            Json? r = srv("POST", "/tracks/match", { "items": items })
+            if r == null or r["status"] != 200:
+                return srv_fallo(r)
+            List<Json> res = jlist(r["body"])
+            for int i in range(0, len(filas)):
+                if jstr(res[i]["serverId"], "") != "":
+                    ya_estaban = ya_estaban + 1
+                    continue
+                string ruta = ruta_audio_abs(jstr(filas[i]["rel_path"], ""))
+                if os.is_file(ruta) and srv_poner(jstr(filas[i]["id"], ""), ruta, jstr(filas[i]["format"], "opus"), jstr(filas[i]["title"], ""),
+                                                   jstr(filas[i]["artist"], ""), jstr(filas[i]["album"], ""), jint(filas[i]["duration_ms"], 0)):
+                    subidas = subidas + 1
+                else:
+                    fallidas = fallidas + 1
+        return { "done": len(filas) < 20, "next": desde + 20, "alreadyThere": ya_estaban, "uploaded": subidas, "failed": fallidas }
 
     if cmd == "social_me":
         Json? r = srv("GET", "/me")

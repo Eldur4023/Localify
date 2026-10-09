@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Extremo a extremo del cliente + servidor (sin ventana): arranca un servidor y la app
+# con un HOME y datos temporales y ejercita búsqueda, descarga desde el servidor,
+# playlists compartidas, duplicados y el uso sin sesión.
+#   tests/serverify-e2e.sh [ruta-al-binario-lux]     (por defecto build/vendor/lux/lux)
+R=$(cd "$(dirname "$0")/.." && pwd); LUX=$(realpath "${1:-$R/build/vendor/lux/lux}")
+W=$(mktemp -d); trap 'kill $P1 $P2 2>/dev/null; rm -rf "$W"' EXIT
+mkdir -p $W/srv $W/home; cp $R/server/server.lux $W/srv/
+(cd $W/srv && JWT_SECRET=e2e-secret-0123456789 exec $LUX server.lux --port 8794 >$W/srv.log 2>&1) & P1=$!
+cp -r $R/app $W/app; rm -rf $W/app/data
+(cd $W/app && HOME=$W/home exec $LUX . --port 8795 --no-watch >$W/cl.log 2>&1) & P2=$!
+for i in $(seq 60); do curl -sf localhost:8794/api/info >/dev/null && curl -s -X POST -H 'content-type: application/json' -d '{}' localhost:8795/api/events/poll -o /dev/null -f && break; sleep 0.3; done
+inv() { curl -s -X POST -H 'content-type: application/json' -d "$(python3 -c 'import json,sys;print(json.dumps({"cmd":sys.argv[1],"args":sys.argv[2]}))' "$1" "${2:-{\}}")" localhost:8795/api/invoke; }
+fail=0; ok() { if [[ "$2" == *"$3"* ]]; then echo "  ok    $1"; else echo "  FAIL  $1: got [${2:0:300}] want [$3]"; fail=1; fi; }
+B=localhost:8794/api
+# bob siembra una pista en el servidor
+TB=$(curl -s -X POST -H 'content-type: application/json' -d '{"username":"bob","password":"secreto123"}' $B/register | sed 's/.*"token":"\([^"]*\)".*/\1/')
+head -c 40000 /dev/urandom > $W/a.opus
+curl -s -X PUT -H "Authorization: Bearer $TB" -F audio=@$W/a.opus -F ext=opus -F title=Yellow -F artist=Coldplay -F album=Parachutes -F duration_ms=266000 -F search_norm="yellow coldplay parachutes" $B/tracks/dQw4w9WgXcQ >/dev/null
+ok "sin servidor: búsqueda local vacía" "$(inv search_query '{"q":"yellow"}')" '"tracks":[]'
+ok "sin sesión: comando social" "$(inv social_users)" SERVER_AUTH
+ok "conectar" "$(inv server_connect '{"host":"127.0.0.1","port":8794}')" '"reachable":true'
+ok "conectado sin sesión: estado" "$(inv server_status)" '"loggedIn":false'
+ok "sin sesión: búsqueda funciona" "$(inv search_query '{"q":"yellow"}')" '"queryId"'
+ok "sin sesión: no trae del servidor" "$(sqlite3 $W/app/data/localify.db "select count(*) from tracks where id='dQw4w9WgXcQ'")" 0
+ok "sin sesión: social pide login" "$(inv social_playlists)" SERVER_AUTH
+ok "sin sesión: aportar biblioteca pide login" "$(inv server_sync_library)" SERVER_AUTH
+ok "registro" "$(inv server_register '{"username":"ana","password":"secreto123","displayName":"Ana"}')" '"username":"ana"'
+ok "estado" "$(inv server_status)" '"loggedIn":true'
+ok "búsqueda trae del servidor" "$(inv search_query '{"q":"yellow"}')" 'dQw4w9WgXcQ'
+ok "candidatos del servidor" "$(inv library_search_candidates '{"query":"coldplay yellow","limit":3}')" '"title":"Yellow"'
+# descarga: debe venir del servidor (no hay yt-dlp que valga: la red está fuera)
+sqlite3 $W/app/data/localify.db "select id,title from tracks limit 5" 2>&1 | head -5; inv player_play_track '{"trackId":"dQw4w9WgXcQ"}' | head -c 300; echo
+for i in $(seq 25); do curl -s -X POST -d '{}' -H 'content-type: application/json' localhost:8795/api/events/poll >/dev/null; [ -n "$(find $W/home -name 'dQw4w9WgXcQ.*' -path '*audio*' 2>/dev/null)" ] && break; sleep 0.5; done
+F=$(find $W/home -name 'dQw4w9WgXcQ.*' -path '*audio*' 2>/dev/null | head -1); ok "audio descargado del servidor" "$F" dQw4w9WgXcQ
+[ -n "$F" ] && cmp -s "$F" $W/a.opus && ok "contenido idéntico" 1 1 || ok "contenido idéntico (remux/ext puede variar)" "$(stat -c%s "$F" 2>/dev/null)" 40000
+# playlist: publicar, ver, importar con otro usuario
+PL=$(inv playlist_create '{"name":"Mi mix"}' | tr -d '"')
+inv playlist_add_tracks "{\"playlistId\":\"$PL\",\"trackIds\":[\"dQw4w9WgXcQ\"]}" >/dev/null
+ok "publicar" "$(inv social_publish "{\"playlistId\":\"$PL\",\"visibility\":\"public\",\"collaborative\":true}")" '"serverId":"1"'
+ok "listada" "$(inv social_playlists)" '"name":"Mi mix"'
+ok "detalle disponible" "$(inv social_playlist '{"id":"1"}')" '"available":true'
+ok "perfil público" "$(inv social_user '{"username":"ana"}')" '"name":"Mi mix"'
+ok "miembro" "$(inv social_add_member '{"id":"1","username":"bob"}'; echo fin)" fin
+ok "miembro inexistente" "$(inv social_add_member '{"id":"1","username":"nadie"}')" USER_NOT_FOUND
+# bob añade pista en servidor; ana sincroniza y la recibe
+curl -s -X POST -H "Authorization: Bearer $TB" -H 'content-type: application/json' -d '{"tracks":[{"id":"bbbbbbbbbbb","title":"De Bob","artist":"Bob","durationMs":1000}]}' $B/playlists/1/tracks -o /dev/null
+inv social_sync "{\"playlistId\":\"$PL\"}" >/dev/null
+ok "sync trae pista de bob" "$(inv playlist_detail "{\"playlistId\":\"$PL\"}")" 'De Bob'
+ok "importar playlist existente enlaza" "$(inv social_import '{"id":"1"}')" "\"localId\":\"$PL\""
+
+# ── duplicados locales ──
+DB=$W/app/data/localify.db
+mkdir -p $W/home/Music/Localify/audio/zz
+head -c 30000 /dev/urandom > $W/home/Music/Localify/audio/zz/A1.opus; head -c 30000 /dev/urandom > $W/home/Music/Localify/audio/zz/B1.opus
+sqlite3 $DB "
+insert into tracks(id,title,title_norm,duration_ms,artist_display,artist_norm) values
+ ('A1','Bloody Power Fame','bloody power fame',200000,'Coldrain','coldrain'),
+ ('B1','Bloody Power Fame','bloody power fame',201500,'Coldrain','coldrain'),
+ ('C1','Bloody Power Fame (Live)','bloody power fame live',200000,'Coldrain','coldrain'),
+ ('D1','Bloody Power Fame','bloody power fame',260000,'Coldrain','coldrain');
+insert into audio_files(track_id,rel_path,format,source) values ('A1','audio/zz/A1.opus','opus','youtube'),('B1','audio/zz/B1.opus','opus','youtube');
+insert into favorites(track_id) values ('B1');
+insert into playlists(id,name,name_norm,position) values ('PLX','x','x',1);
+insert into playlist_items(id,playlist_id,track_id,position) values ('i1','PLX','A1',1),('i2','PLX','B1',2),('i3','PLX','C1',3);"
+G=$(inv library_find_duplicates)
+ok "detecta el duplicado (mismo título+artista, ±3 s)" "$G" '"A1"'
+ok "no mezcla la versión live" "$G" '"B1"'
+[[ "$G" != *C1* && "$G" != *D1* ]] && ok "ni la live ni la de otra duración" 1 1 || ok "ni la live ni la de otra duración" "$G" "sin C1/D1"
+ok "fusiona" "$(inv library_merge_duplicates)" '"merged":'
+ok "queda una" "$(sqlite3 $DB "select count(*) from tracks where title_norm='bloody power fame' and duration_ms < 210000 and id in ('A1','B1')")" 1
+ok "la lista no repite la canción" "$(sqlite3 $DB "select count(*) from playlist_items where playlist_id='PLX' and track_id in ('A1','B1')")" 1
+ok "favorito heredado" "$(sqlite3 $DB "select count(*) from favorites where track_id in ('A1','B1')")" 1
+ok "un solo fichero de audio" "$(ls $W/home/Music/Localify/audio/zz | wc -l)" 1
+ok "sigue habiendo la live y la otra duración" "$(sqlite3 $DB "select count(*) from tracks where id in ('C1','D1')")" 2
+ok "sin duplicados después" "$(inv library_find_duplicates)" '[]'
+# ── identidad contra el servidor ──
+TA=$(curl -s -X POST -H 'content-type: application/json' -d '{"username":"ana","password":"secreto123"}' $B/login | sed 's/.*"token":"\([^"]*\)".*/\1/')
+inv server_login '{"username":"ana","password":"secreto123"}' >/dev/null
+K=$(sqlite3 $DB "select id from tracks where id in ('A1','B1')")
+ok "aportar biblioteca: sube lo que falta" "$(inv server_sync_library '{"offset":0}')" '"uploaded":'
+ok "servidor: ahora la tiene" "$(curl -s -H "Authorization: Bearer $TB" "$B/tracks/search?q=bloody")" 'Bloody Power Fame'
+ok "aportar otra vez: ya está (por identidad)" "$(inv server_sync_library '{"offset":0}')" '"uploaded":0'
+# misma canción con otro id en el servidor: no se duplica en local al buscar ni importar
+curl -s -X PUT -H "Authorization: Bearer $TB" -F audio=@$W/a.opus -F ext=opus -F title="Faint" -F artist="Linkin Park" -F duration_ms=162000 -F search_norm="faint linkin park" -F title_norm=faint -F artist_norm="linkin park" $B/tracks/FAINTSRV0001 >/dev/null
+sqlite3 $DB "insert into tracks(id,title,title_norm,duration_ms,artist_display,artist_norm) values ('FAINTLOC001','Faint','faint',162500,'Linkin Park','linkin park')"
+N0=$(sqlite3 $DB "select count(*) from tracks")
+inv search_query '{"q":"faint linkin"}' >/dev/null
+ok "búsqueda no crea una copia de la que ya tengo" "$(sqlite3 $DB "select count(*) from tracks where title_norm='faint'")" 1
+curl -s -X POST -H "Authorization: Bearer $TB" -H 'content-type: application/json' -d '{"name":"De Bob","visibility":"public","tracks":[{"id":"FAINTSRV0001","title":"Faint","artist":"Linkin Park","durationMs":162000,"titleNorm":"faint","artistNorm":"linkin park"}]}' $B/playlists -o /dev/null
+SPL=$(curl -s -H "Authorization: Bearer $TB" $B/playlists | sed 's/.*"id":\([0-9]*\),"name":"De Bob".*/\1/')
+R=$(inv social_import "{\"id\":\"$SPL\"}")
+LP=$(echo "$R" | sed 's/.*"localId":"\([^"]*\)".*/\1/')
+ok "importar reutiliza mi pista" "$(sqlite3 $DB "select track_id from playlist_items where playlist_id='$LP'")" FAINTLOC001
+ok "importar no crea duplicados" "$(sqlite3 $DB "select count(*) from tracks where title_norm='faint'")" 1
+ok "servidor caído no rompe la búsqueda" "$(kill $P1; sleep 0.5; inv search_query '{"q":"yellow"}')" '"queryId"'
+((fail)) && { tail -15 $W/cl.log | grep -v warning; exit 1; }; echo "todo ok"

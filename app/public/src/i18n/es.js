@@ -267,5 +267,16 @@ export default {
 	"error.server_error": "El servidor respondió con un error",
 	"error.server_not_configured": "Primero conecta con un servidor",
 	"error.username_taken": "Ese usuario ya existe",
-	"error.user_not_found": "Ese usuario no existe"
+	"error.user_not_found": "Ese usuario no existe",
+	"settings.duplicates": "Canciones duplicadas",
+	"settings.duplicates_find": "Buscar y fusionar…",
+	"settings.duplicates_help": "Una misma canción puede llegar con otro identificador (otro vídeo, una lista importada). Se reconoce por título, artista y duración; al fusionarla se conservan las listas, los favoritos y el historial.",
+	"settings.duplicates_none": "No hay canciones duplicadas.",
+	"settings.duplicates_found": "Hay {count} canciones repetidas. ¿Fusionarlas?",
+	"settings.duplicates_merge": "Fusionar",
+	"settings.duplicates_done": "Se han fusionado {count} duplicados.",
+	"social.contribute_library": "Aportar mi biblioteca",
+	"social.contribute_library_run": "Subir lo que falta",
+	"social.contribute_library_help": "Sube las canciones ya descargadas que el servidor aún no tiene. Las que ya tiene (mismo título, artista y duración) no se vuelven a subir.",
+	"social.contribute_progress": "Subidas: {uploaded} · ya estaban: {existing}"
 };

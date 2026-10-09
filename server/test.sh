@@ -19,16 +19,23 @@ TB=$(sed 's/.*"token":"\([^"]*\)".*/\1/' <<<"$(j POST '{"username":"bob","passwo
 T=$TA; ok me "$(curl -s -H "Authorization: Bearer $T" $B/me)" '"username":"ana"'
 ok "editar perfil" "$(j PUT '{"displayName":"Ana G","bio":"hola"}' $B/me)" 'Ana G'
 head -c 20000 /dev/urandom > "$W/a.opus"
-up() { curl -s -X PUT -H "Authorization: Bearer $T" -F audio=@"$W/a.opus" -F ext=opus -F title="Yellow" -F artist=Coldplay -F album=Parachutes -F duration_ms=266000 -F search_norm="yellow coldplay parachutes" -w ' %{http_code}' $B/tracks/dQw4w9WgXcQ; }
+up() { curl -s -X PUT -H "Authorization: Bearer $T" -F audio=@"$W/a.opus" -F ext=opus -F title="Yellow" -F artist=Coldplay -F album=Parachutes -F duration_ms=266000 -F search_norm="yellow coldplay parachutes" -F title_norm=yellow -F artist_norm=coldplay -w ' %{http_code}' $B/tracks/dQw4w9WgXcQ; }
 ok "subida" "$(up)" '201'
 ok "subida repetida" "$(up)" '"stored":false'
+# duplicados: misma canción (título + artista + duración ±3 s) con otro id no se guarda dos veces
+dup() { curl -s -X PUT -H "Authorization: Bearer $T" -F audio=@"$W/a.opus" -F ext=opus -F title="Yellow" -F artist=Coldplay -F duration_ms=$1 -F search_norm="yellow coldplay" -F title_norm=yellow -F artist_norm=coldplay $B/tracks/otroIdDistinto; }
+ok "duplicado por identidad" "$(dup 267500)" '"duplicate":true'
+ok "otra versión (duración distinta) sí" "$(dup 200000)" '"stored":true'
+ok "match por identidad" "$(j POST '{"items":[{"id":"x1","titleNorm":"yellow","artistNorm":"coldplay","durationMs":266000},{"id":"x2","titleNorm":"nada","artistNorm":"nadie","durationMs":1}]}' $B/tracks/match)" '"id":"x1","serverId":"dQw4w9WgXcQ"'
+ok "match sin coincidencia" "$(j POST '{"items":[{"id":"x2","titleNorm":"nada","artistNorm":"nadie","durationMs":1}]}' $B/tracks/match)" '"serverId":""'
 ok "id inválido" "$(curl -s -o /dev/null -w %{http_code} -X PUT -H "Authorization: Bearer $T" -F audio=@"$W/a.opus" -F title=x $B/tracks/..%2Fx)" 4
+ok "búsqueda sin repetidas" "$(curl -s -H "Authorization: Bearer $T" "$B/tracks/search?q=yellow" | grep -o '"title":"Yellow"' | wc -l)" 2
 ok "búsqueda" "$(curl -s -H "Authorization: Bearer $T" "$B/tracks/search?q=coldplay%20yell")" dQw4w9WgXcQ
 ok "búsqueda vacía" "$(curl -s -H "Authorization: Bearer $T" "$B/tracks/search?q=zzz")" '[]'
 ok "have" "$(j POST '{"ids":["dQw4w9WgXcQ","nope"]}' $B/tracks/have)" '["dQw4w9WgXcQ"]'
 curl -s -H "Authorization: Bearer $T" $B/tracks/dQw4w9WgXcQ/audio | cmp -s - "$W/a.opus" && ok "descarga idéntica" 1 1 || ok "descarga idéntica" 0 1
 # playlists
-P='{"name":"Mix","visibility":"public","collaborative":true,"tracks":[{"id":"dQw4w9WgXcQ","title":"Yellow","artist":"Coldplay"},{"id":"zzzzzzzzzzz","title":"Otra"}]}'
+P='{"name":"Mix","visibility":"public","collaborative":true,"tracks":[{"id":"dQw4w9WgXcQ","title":"Yellow","artist":"Coldplay"},{"id":"OTRO","title":"Yellow","artist":"Coldplay","titleNorm":"yellow","artistNorm":"coldplay","durationMs":266100},{"id":"zzzzzzzzzzz","title":"Otra"}]}'
 ok "crear playlist" "$(j POST "$P" $B/playlists)" '"id":1'
 D=$(curl -s -H "Authorization: Bearer $T" $B/playlists/1); ok "detalle" "$D" '"available":true'; ok "no disponible" "$D" '"available":false'
 T=$TB; ok "pública legible" "$(curl -s -H "Authorization: Bearer $T" $B/playlists/1)" '"access":"reader"'

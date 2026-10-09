@@ -101,6 +101,13 @@ fn void promover_cola():
                 continue
             string tid = jstr(siguientes[i]["track_id"], "")
             string vid = jstr(siguientes[i]["video_id"], "")
+            # ¿Ya la tengo descargada con otro id? Es la misma canción: se fusiona y no se baja
+            string copia = equivalente_de(tid, true)
+            if copia != "":
+                fusionar_pistas(tid, copia)
+                await sqlite.exec("delete from download_jobs where track_id = ?", tid)
+                promovido = true
+                break
             # Serverify: primero el servidor común (si hay y la tiene); dlh="srv"
             # marca el trabajo como vivo para el control de zombis mientras baja
             if srv_activo():
@@ -577,6 +584,7 @@ fn void finalizar(string tid):
         """, tid, rel, ext_final, codec, os.file_size(destino_abs), duracion_real_ms > 0 ? duracion_real_ms : null,
         seleccionar_youtube_id(tid))
 
+    consolidar(tid)
     srv_subir(tid, destino_abs, ext_final, titulo, artista, album, duracion_real_ms > 0 ? duracion_real_ms : esperado_ms)
 
     os.remove_file(origen)

@@ -1,0 +1,138 @@
+# duplicados.lux — Una canción es una sola canción.
+#
+# Identidad: título + artista normalizados (las columnas title_norm/artist_norm
+# de tracks) y, para no mezclar versiones distintas con el mismo nombre
+# (single, radio edit, directo...), una duración compatible (±3 s; 0 =
+# desconocida). El id de la pista NO es la identidad: la misma canción llega
+# con ids distintos (otro vídeo de YouTube, una lista de Spotify importada, el
+# servidor...) y sin esto acababa dos veces en la biblioteca, y descargada dos
+# veces.
+#
+# Se evita al descargar (promover_cola / finalizar), al traer pistas del
+# servidor (serverify.lux) y se puede arreglar lo ya existente con
+# cmd_buscar_duplicados / cmd_fusionar_duplicados.
+
+# Pista local equivalente a (título, artista, duración) distinta de `excepto`;
+# "" si no hay. Prefiere la que ya tiene audio, luego favoritas, luego la más
+# antigua. con_audio = true: solo cuenta una que ya esté descargada.
+fn string equivalente_local(string tn, string an, int dur, string excepto, bool con_audio):
+    if tn == "" or an == "":
+        return ""
+    List<Json> f = await sqlite.query("""
+        select t.id,
+               (select count(*) from audio_files af where af.track_id = t.id) as audio,
+               (select count(*) from favorites fv where fv.track_id = t.id) as fav
+        from tracks t
+        where t.title_norm = ? and t.artist_norm = ? and t.id != ?
+          and (t.duration_ms = 0 or ? = 0 or abs(t.duration_ms - ?) <= 3000)
+        order by audio desc, fav desc, t.added_at asc limit 1
+        """, tn, an, excepto, dur, dur)
+    if len(f) == 0 or (con_audio and jint(f[0]["audio"], 0) == 0):
+        return ""
+    return jstr(f[0]["id"], "")
+
+fn string equivalente_de(string tid, bool con_audio):
+    List<Json> f = await sqlite.query("select title_norm, artist_norm, duration_ms from tracks where id = ?", tid)
+    if len(f) == 0:
+        return ""
+    return equivalente_local(jstr(f[0]["title_norm"], ""), jstr(f[0]["artist_norm"], ""), jint(f[0]["duration_ms"], 0), tid, con_audio)
+
+# Reemplaza `drop` por `keep` en todas partes (listas, favoritos, historial,
+# letra, cola y reproductor) y borra `drop`. El audio se queda con `keep`: si
+# keep no tenía, hereda el de drop; si los dos tenían, se borra el fichero de drop.
+fn void fusionar_pistas(string keep, string drop):
+    if keep == drop or keep == "" or drop == "":
+        return
+    await sqlite.exec("""
+        delete from playlist_items where track_id = ?
+          and playlist_id in (select playlist_id from playlist_items where track_id = ?)""", drop, keep)
+    await sqlite.exec("update playlist_items set track_id = ? where track_id = ?", keep, drop)
+    await sqlite.exec("insert or ignore into favorites(track_id, added_at) select ?, added_at from favorites where track_id = ?", keep, drop)
+    await sqlite.exec("update play_history set track_id = ? where track_id = ?", keep, drop)
+    await sqlite.exec("update or ignore lyrics set track_id = ? where track_id = ?", keep, drop)
+    List<Json> audio = await sqlite.query("select rel_path from audio_files where track_id = ?", drop)
+    if len(audio) > 0:
+        List<Json> propio = await sqlite.query("select 1 from audio_files where track_id = ?", keep)
+        if len(propio) == 0:
+            await sqlite.exec("update audio_files set track_id = ? where track_id = ?", keep, drop)
+            await sqlite.exec("delete from download_jobs where track_id = ?", keep)
+        else:
+            os.remove_file(ruta_audio_abs(jstr(audio[0]["rel_path"], "")))
+    # reproductor y colas (los ids van entre comillas dentro del JSON)
+    string a = "\"" + drop + "\""
+    string b = "\"" + keep + "\""
+    await sqlite.exec("""
+        update player_state set
+            track_id = case when track_id = ? then ? else track_id end,
+            user_queue = replace(user_queue, ?, ?), context_queue = replace(context_queue, ?, ?),
+            play_order = replace(play_order, ?, ?), history = replace(history, ?, ?),
+            context = replace(context, ?, ?), revision = revision + 1
+        where id = 1""", drop, keep, a, b, a, b, a, b, a, b, a, b)
+    await sqlite.exec("delete from tracks where id = ?", drop)
+    tocar_biblioteca()
+    tocar_playlists()
+
+# Tras terminar una descarga: cualquier otra copia de la misma canción se funde en esta.
+fn void consolidar(string tid):
+    for int i in range(0, 8):
+        string otra = equivalente_de(tid, false)
+        if otra == "":
+            return
+        fusionar_pistas(tid, otra)
+
+# Grupos de duplicados de la biblioteca: [{ title, artist, keep, ids: [...] }]
+fn List<Json> grupos_duplicados():
+    List<Json> claves = await sqlite.query("""
+        select title_norm, artist_norm from tracks
+        where title_norm != '' and artist_norm != ''
+        group by title_norm, artist_norm having count(*) > 1""")
+    List<Json> out = []
+    for int i in range(0, len(claves)):
+        List<Json> ps = await sqlite.query("""
+            select t.id, t.title, t.artist_display, t.duration_ms,
+                   (select count(*) from audio_files af where af.track_id = t.id) as audio,
+                   (select count(*) from favorites fv where fv.track_id = t.id) as fav
+            from tracks t where t.title_norm = ? and t.artist_norm = ?
+            order by t.duration_ms""", jstr(claves[i]["title_norm"], ""), jstr(claves[i]["artist_norm"], ""))
+        # agrupar por duración compatible: mismo grupo si está a ≤ 3 s del primero
+        # del grupo (o si alguna duración se desconoce)
+        List<Json> actual = []
+        int base = 0
+        for int j in range(0, len(ps) + 1):
+            bool corta = j == len(ps)
+            if not corta and len(actual) > 0:
+                int d = jint(ps[j]["duration_ms"], 0)
+                corta = d != 0 and base != 0 and d - base > 3000
+            if corta:
+                if len(actual) > 1:
+                    # keep: con audio, luego favorita
+                    Json mejor = actual[0]
+                    for int k in range(1, len(actual)):
+                        int pm = jint(mejor["audio"], 0) * 2 + jint(mejor["fav"], 0)
+                        int pk = jint(actual[k]["audio"], 0) * 2 + jint(actual[k]["fav"], 0)
+                        if pk > pm:
+                            mejor = actual[k]
+                    List<string> ids = []
+                    for int k in range(0, len(actual)):
+                        ids.add(jstr(actual[k]["id"], ""))
+                    out.add({ "title": jstr(mejor["title"], ""), "artist": jstr(mejor["artist_display"], ""),
+                              "keep": jstr(mejor["id"], ""), "ids": ids })
+                actual = []
+                base = 0
+            if j < len(ps):
+                if len(actual) == 0:
+                    base = jint(ps[j]["duration_ms"], 0)
+                actual.add(ps[j])
+    return out
+
+fn Json cmd_fusionar_duplicados():
+    List<Json> grupos = grupos_duplicados()
+    int fusionadas = 0
+    for int i in range(0, len(grupos)):
+        string keep = jstr(grupos[i]["keep"], "")
+        List<Json> ids = jlist(grupos[i]["ids"])
+        for int k in range(0, len(ids)):
+            if jstr(ids[k], "") != keep:
+                fusionar_pistas(keep, jstr(ids[k], ""))
+                fusionadas = fusionadas + 1
+    return { "groups": len(grupos), "merged": fusionadas }
