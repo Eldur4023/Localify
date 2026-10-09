@@ -1,0 +1,389 @@
+# serverify.lux — Cliente del servidor común opcional (ver server/server.lux).
+#
+# Localify sigue siendo local y offline al 100%: todo lo de aquí es un
+# atajo OPCIONAL. Si no hay servidor configurado, si no hay sesión o si no
+# responde, cada función devuelve "nada" y el flujo de siempre (YouTube
+# Music + yt-dlp) sigue exactamente igual. Las descargas las hace siempre este
+# cliente: del servidor si ya tiene la canción, de yt-dlp si no.
+#
+# Ajustes (tabla settings): server_host, server_port, server_token,
+# server_user, server_upload ("1" = aportar al servidor lo que descargo).
+
+# ─── Conexión ────────────────────────────────────────────────────────────────
+
+fn string srv_base():
+    return "http://" + ajuste("server_host", "") + ":" + ajuste("server_port", "8787") + "/api"
+
+# Hay servidor configurado y sesión iniciada
+fn bool srv_sesion():
+    return ajuste("server_host", "") != "" and ajuste("server_token", "") != ""
+
+# Disponible para los atajos: sesión y sin fallo reciente (un servidor caído no
+# debe costar el timeout en cada búsqueda)
+fn bool srv_activo():
+    return srv_sesion() and state.get("srv_caido", "") == ""
+
+# Petición con el token. Devuelve { status, body } o null si no hay conexión.
+# Un 401 borra el token (caducado o usuario borrado): la UI vuelve a pedir login.
+fn Json? srv(string metodo, string ruta, Json cuerpo = null, int timeout_ms = 4000):
+    Dict<string, string> cab = { "Authorization": "Bearer " + ajuste("server_token", "") }
+    Json r = null
+    try:
+        string url = srv_base() + ruta
+        Dict<string, Json> op = { "timeout_ms": timeout_ms }
+        if metodo == "GET":
+            r = await http.get(url, cab, op)
+        elif metodo == "POST":
+            r = await http.post(url, cuerpo == null ? {} : cuerpo, cab, op)
+        elif metodo == "PUT":
+            r = await http.put(url, cuerpo == null ? {} : cuerpo, cab, op)
+        else:
+            r = await http.delete(url, cab, op)
+    catch e:
+        state.set("srv_caido", "1", 30000)
+        return null
+    if jint(r["status"], 0) == 401:
+        ajuste_poner("server_token", "")
+    return { "status": jint(r["status"], 0), "body": r["body"] }
+
+# ─── Atajos de descarga y búsqueda ───────────────────────────────────────────
+
+fn PistaCatalogo srv_pista(Json it):
+    PistaCatalogo p = PistaCatalogo()
+    p.id = jstr(it["id"], "")
+    p.title = jstr(it["title"], "")
+    p.duration_ms = jint(it["durationMs"], 0)
+    if p.duration_ms <= 0:
+        p.duration_ms = 1
+    string artista = jstr(it["artist"], "")
+    if artista != "":
+        p.artista_ids = ["srv:" + normalizar(artista)]
+        p.artista_nombres = [artista]
+    string album = jstr(it["album"], "")
+    if album != "":
+        p.album_id = "srv:" + normalizar(album)
+        p.album_titulo = album
+    return p
+
+# Pistas que el servidor tiene para una consulta (lista vacía si no hay).
+fn List<Json> srv_buscar(string q, int limite = 20):
+    if not srv_activo() or normalizar(q) == "":
+        return []
+    Json? r = srv("GET", "/tracks/search?limit=" + str(limite) + "&q=" + http.url_encode(normalizar(q)))
+    if r == null or r["status"] != 200:
+        return []
+    return jlist(r["body"])
+
+# Búsqueda del usuario: las coincidencias del servidor se guardan como pistas
+# del catálogo local (igual que las de YouTube Music), así que el resto de la
+# búsqueda las encuentra sin saber de dónde vienen. No pisa las que ya existen.
+fn void srv_traer_coincidencias(string q):
+    List<Json> items = srv_buscar(q)
+    for int i in range(0, len(items)):
+        PistaCatalogo p = srv_pista(items[i])
+        if p.id == "" or p.title == "":
+            continue
+        List<Json> ya = await sqlite.query("select 1 from tracks where id = ?", p.id)
+        if len(ya) == 0:
+            guardar_pista(p)
+
+# Id de la pista en el servidor: el mismo si lo tiene, o el de una pista que
+# coincida por título y duración (listas importadas de Spotify, etc.). "" si no.
+fn string srv_id_de(string tid):
+    Json? h = srv("POST", "/tracks/have", { "ids": [tid] })
+    if h == null:
+        return ""
+    if h["status"] == 200 and len(jlist(h["body"])) > 0:
+        return tid
+    DatosPista p = datos_de_pista(tid)
+    if p.title == "":
+        return ""
+    string artista = len(p.artistas) > 0 ? p.artistas[0] : ""
+    List<Json> items = srv_buscar(artista + " " + p.title, 10)
+    for int i in range(0, len(items)):
+        if normalizar(jstr(items[i]["title"], "")) != normalizar(p.title):
+            continue
+        int dif = jint(items[i]["durationMs"], 0) - p.duracion_ms
+        if dif < 0:
+            dif = -dif
+        if p.duracion_ms == 0 or jint(items[i]["durationMs"], 0) == 0 or dif <= 3000:
+            return jstr(items[i]["id"], "")
+    return ""
+
+# Descarga la pista del servidor al temporal del trabajo y lo deja en
+# 'finalizing'. false = el servidor no la tiene (o no hay servidor): seguir con
+# yt-dlp. El trabajo ya está en 'downloading' con dlh="srv" (ver promover_cola).
+fn bool srv_obtener(string tid):
+    if not srv_activo():
+        return false
+    string sid = srv_id_de(tid)
+    if sid == "":
+        return false
+    garantizar_biblioteca()
+    string destino = os.path_join(biblioteca_raiz(), ".tmp", tid + ".webm")
+    Dict<string, string> cab = { "Authorization": "Bearer " + ajuste("server_token", "") }
+    try:
+        Json r = await http.get(srv_base() + "/tracks/" + sid + "/audio", cab, { "save_to": destino, "timeout_ms": 120000 })
+        if jint(r["status"], 0) != 200 or os.file_size(destino) < 16384:
+            os.remove_file(destino)
+            return false
+    catch e:
+        os.remove_file(destino)
+        return false
+    state.set("srvdl:" + tid, "1")
+    await sqlite.exec("update download_jobs set tmp_path = ?, state = 'finalizing', updated_at = unixepoch() where track_id = ?", destino, tid)
+    return true
+
+# Aporta al servidor una pista que acabo de descargar de YouTube. Nunca falla
+# la descarga por esto. No sube lo que vino del propio servidor.
+fn void srv_subir(string tid, string ruta, string ext, string titulo, string artista, string album, int duracion_ms):
+    if state.get("srvdl:" + tid, "") != "":
+        state.remove("srvdl:" + tid)
+        return
+    if not srv_activo() or ajuste("server_upload", "1") != "1":
+        return
+    Json? h = srv("POST", "/tracks/have", { "ids": [tid] })
+    if h == null or h["status"] != 200 or len(jlist(h["body"])) > 0:
+        return
+    Dict<string, string> cab = { "Authorization": "Bearer " + ajuste("server_token", "") }
+    try:
+        await http.put(srv_base() + "/tracks/" + tid, {
+            "title": titulo, "artist": artista, "album": album, "ext": ext,
+            "duration_ms": str(duracion_ms),
+            "search_norm": normalizar(titulo + " " + artista + " " + album)
+        }, cab, { "files": { "audio": ruta }, "timeout_ms": 120000 })
+    catch e:
+        state.set("srv_caido", "1", 30000)
+
+# ─── Playlists locales <-> servidor ──────────────────────────────────────────
+
+fn List<Json> pistas_locales_de(string plid):
+    List<Json> f = await sqlite.query("""
+        select t.id, t.title, t.artist_display as artist, coalesce(al.title, '') as album, t.duration_ms as durationMs
+        from playlist_items pi join tracks t on t.id = pi.track_id
+        left join albums al on al.id = t.album_id
+        where pi.playlist_id = ? order by pi.position""", plid)
+    return f
+
+fn void anadir_local(string plid, Json it):
+    PistaCatalogo p = srv_pista(it)
+    List<Json> ya = await sqlite.query("select 1 from tracks where id = ?", p.id)
+    if len(ya) == 0:
+        guardar_pista(p)
+    List<Json> m = await sqlite.query("select coalesce(max(position), 0) as p from playlist_items where playlist_id = ?", plid)
+    await sqlite.exec("insert into playlist_items(id, playlist_id, track_id, position, added_at) values(?, ?, ?, ?, unixepoch())",
+        nuevo_id(), plid, p.id, jdbl(m[0]["p"], 0.0) + 1.0)
+
+# id local de la playlist enlazada a una del servidor ("" si no hay)
+fn string local_de(string sid):
+    List<Json> f = await sqlite.query("select key from settings where key like 'srvpl:%' and value = ?", sid)
+    if len(f) == 0:
+        return ""
+    return jstr(f[0]["key"], "").slice(6)
+
+fn Json srv_fallo(Json? r):
+    if r == null:
+        return error_api("SERVER_UNREACHABLE", "error.server_unreachable").status(502)
+    if r["status"] == 401:
+        return error_api("SERVER_AUTH", "error.server_auth").status(401)
+    return error_api("SERVER_ERROR", "error.server_error").status(jint(r["status"], 500))
+
+# Une local y servidor sin perder nada de ninguno: lo que falta en cada lado se
+# añade en el otro (las eliminaciones no se propagan).
+fn Json sincronizar(string plid, string sid):
+    Json? r = srv("GET", "/playlists/" + sid)
+    if r == null or r["status"] != 200:
+        return srv_fallo(r)
+    Json pl = r["body"]
+    List<Json> remotas = jlist(pl["tracks"])
+    List<Json> locales = pistas_locales_de(plid)
+    List<string> ids_locales = []
+    for int i in range(0, len(locales)):
+        ids_locales.add(jstr(locales[i]["id"], ""))
+    List<string> ids_remotas = []
+    for int i in range(0, len(remotas)):
+        ids_remotas.add(jstr(remotas[i]["id"], ""))
+        if not ids_locales.contains(jstr(remotas[i]["id"], "")):
+            anadir_local(plid, remotas[i])
+    bool edito = pl["access"] == "owner" or (pl["access"] == "member" and pl["collaborative"] == true)
+    if edito:
+        List<Json> subir = []
+        for int i in range(0, len(locales)):
+            if not ids_remotas.contains(jstr(locales[i]["id"], "")):
+                subir.add({ "id": locales[i]["id"], "title": locales[i]["title"], "artist": locales[i]["artist"],
+                            "album": locales[i]["album"], "durationMs": locales[i]["durationMs"] })
+        if len(subir) > 0:
+            srv("POST", "/playlists/" + sid + "/tracks", { "tracks": subir })
+    tocar_playlists()
+    return { "localId": plid, "serverId": sid }
+
+# ─── Comandos (server_* ajustes/sesión, social_* usuarios y playlists) ───────
+
+fn Json sesion_guardada(Json? r):
+    if r == null or (r["status"] != 200 and r["status"] != 201):
+        if r != null and r["status"] == 409:
+            return error_api("USERNAME_TAKEN", "error.username_taken").status(409)
+        if r != null and (r["status"] == 401 or r["status"] == 400 or r["status"] == 429):
+            return error_api("SERVER_AUTH", "error.server_auth_" + str(r["status"])).status(r["status"])
+        return srv_fallo(r)
+    ajuste_poner("server_token", jstr(r["body"]["token"], ""))
+    ajuste_poner("server_user", jstr(r["body"]["user"]["username"], ""))
+    state.remove("srv_caido")
+    return r["body"]["user"]
+
+fn Json cmd_social(string cmd, Json args):
+    if cmd == "server_status":
+        bool alcanzable = false
+        if ajuste("server_host", "") != "":
+            try:
+                Json i = await http.get(srv_base() + "/info", null, { "timeout_ms": 3000 })
+                alcanzable = jint(i["status"], 0) == 200
+            catch e:
+                alcanzable = false
+        if alcanzable:
+            state.remove("srv_caido")
+        return {
+            "host": ajuste("server_host", ""), "port": int(ajuste("server_port", "8787")),
+            "reachable": alcanzable, "loggedIn": ajuste("server_token", "") != "",
+            "username": ajuste("server_user", ""), "upload": ajuste("server_upload", "1") == "1"
+        }
+    if cmd == "server_connect":
+        string host = arg_str(args, "host", "").trim()
+        int puerto = jint(jget(args, "port"), 8787)
+        if host == "" or puerto < 1 or puerto > 65535 or host.contains("/") or host.contains(" "):
+            return error_api("INVALID", "error.invalid").status(400)
+        if host != ajuste("server_host", "") or str(puerto) != ajuste("server_port", "8787"):
+            ajuste_poner("server_token", "")
+            ajuste_poner("server_user", "")
+        ajuste_poner("server_host", host)
+        ajuste_poner("server_port", str(puerto))
+        state.remove("srv_caido")
+        return await cmd_social("server_status", {})
+    if cmd == "server_disconnect":
+        ajuste_poner("server_host", "")
+        ajuste_poner("server_token", "")
+        ajuste_poner("server_user", "")
+        return null
+    if cmd == "server_logout":
+        ajuste_poner("server_token", "")
+        ajuste_poner("server_user", "")
+        return null
+    if cmd == "server_set_upload":
+        ajuste_poner("server_upload", jget(args, "enabled") == true ? "1" : "0")
+        return null
+    if cmd == "server_login" or cmd == "server_register":
+        if ajuste("server_host", "") == "":
+            return error_api("SERVER_NOT_CONFIGURED", "error.server_not_configured").status(400)
+        Dict<string, Json> cuerpo = { "username": arg_str(args, "username", ""), "password": arg_str(args, "password", "") }
+        if cmd == "server_register":
+            cuerpo["displayName"] = arg_str(args, "displayName", "")
+        Dict<string, string> sin = {}
+        Json r = null
+        try:
+            Json h = await http.post(srv_base() + (cmd == "server_login" ? "/login" : "/register"), cuerpo, sin, { "timeout_ms": 15000 })
+            r = { "status": jint(h["status"], 0), "body": h["body"] }
+        catch e:
+            r = null
+        return sesion_guardada(r)
+
+    # a partir de aquí hace falta sesión
+    if not srv_sesion():
+        return error_api("SERVER_AUTH", "error.server_auth").status(401)
+
+    if cmd == "social_me":
+        Json? r = srv("GET", "/me")
+        return r != null and r["status"] == 200 ? r["body"] : srv_fallo(r)
+    if cmd == "social_update_me":
+        Json? r = srv("PUT", "/me", { "displayName": arg_str(args, "displayName", ""), "bio": arg_str(args, "bio", "") })
+        return r != null and r["status"] == 200 ? r["body"] : srv_fallo(r)
+    if cmd == "social_users":
+        Json? r = srv("GET", "/users")
+        return r != null and r["status"] == 200 ? r["body"] : srv_fallo(r)
+    if cmd == "social_user":
+        Json? r = srv("GET", "/users/" + http.url_encode(arg_str(args, "username", "")))
+        return r != null and r["status"] == 200 ? r["body"] : srv_fallo(r)
+    if cmd == "social_playlists":
+        Json? r = srv("GET", "/playlists")
+        if r == null or r["status"] != 200:
+            return srv_fallo(r)
+        List<Json> out = []
+        List<Json> ls = jlist(r["body"])
+        for int i in range(0, len(ls)):
+            Json p = ls[i]
+            p["localId"] = local_de(str(p["id"]))
+            out.add(p)
+        return out
+    if cmd == "social_playlist":
+        string sid = arg_str(args, "id", "")
+        Json? r = srv("GET", "/playlists/" + sid)
+        if r == null or r["status"] != 200:
+            return srv_fallo(r)
+        Json p = r["body"]
+        p["localId"] = local_de(sid)
+        return p
+    if cmd == "social_playlist_link":
+        List<Json> f = await sqlite.query("select value from settings where key = ?", "srvpl:" + arg_str(args, "playlistId", ""))
+        return len(f) == 0 ? null : jstr(f[0]["value"], "")
+
+    # publicar (o actualizar ajustes de) una playlist local
+    if cmd == "social_publish":
+        string plid = arg_str(args, "playlistId", "")
+        List<Json> pl = await sqlite.query("select name from playlists where id = ?", plid)
+        if len(pl) == 0:
+            return error_api("NOT_FOUND", "error.not_found").status(404)
+        Dict<string, Json> cuerpo = {
+            "name": jstr(pl[0]["name"], ""), "visibility": arg_str(args, "visibility", "private"),
+            "collaborative": jget(args, "collaborative") == true
+        }
+        List<Json> enlace = await sqlite.query("select value from settings where key = ?", "srvpl:" + plid)
+        if len(enlace) > 0:
+            string sid = jstr(enlace[0]["value"], "")
+            Json? r = srv("PUT", "/playlists/" + sid, cuerpo)
+            if r == null or r["status"] >= 300:
+                return srv_fallo(r)
+            return sincronizar(plid, sid)
+        cuerpo["tracks"] = pistas_locales_de(plid)
+        Json? r = srv("POST", "/playlists", cuerpo)
+        if r == null or r["status"] != 201:
+            return srv_fallo(r)
+        string sid = str(r["body"]["id"])
+        ajuste_poner("srvpl:" + plid, sid)
+        return { "localId": plid, "serverId": sid }
+    if cmd == "social_unpublish":
+        string plid = arg_str(args, "playlistId", "")
+        List<Json> enlace = await sqlite.query("select value from settings where key = ?", "srvpl:" + plid)
+        if len(enlace) > 0:
+            srv("DELETE", "/playlists/" + jstr(enlace[0]["value"], ""))
+            await sqlite.exec("delete from settings where key = ?", "srvpl:" + plid)
+        return null
+    if cmd == "social_sync":
+        string plid = arg_str(args, "playlistId", "")
+        List<Json> enlace = await sqlite.query("select value from settings where key = ?", "srvpl:" + plid)
+        if len(enlace) == 0:
+            return error_api("NOT_FOUND", "error.not_found").status(404)
+        return sincronizar(plid, jstr(enlace[0]["value"], ""))
+    # traer a mi biblioteca una playlist del servidor (suya, compartida o pública)
+    if cmd == "social_import":
+        string sid = arg_str(args, "id", "")
+        Json? r = srv("GET", "/playlists/" + sid)
+        if r == null or r["status"] != 200:
+            return srv_fallo(r)
+        string plid = local_de(sid)
+        if plid == "":
+            plid = nuevo_id()
+            string nombre = jstr(r["body"]["name"], "")
+            List<Json> f = await sqlite.query("select coalesce(max(position), 0) as p from playlists")
+            await sqlite.exec("insert into playlists(id, name, name_norm, position, created_at, updated_at) values(?, ?, ?, ?, unixepoch(), unixepoch())",
+                plid, nombre, normalizar(nombre), jdbl(f[0]["p"], 0.0) + 1.0)
+            ajuste_poner("srvpl:" + plid, sid)
+        sincronizar(plid, sid)
+        return { "localId": plid, "serverId": sid }
+    if cmd == "social_add_member":
+        Json? r = srv("POST", "/playlists/" + arg_str(args, "id", "") + "/members", { "username": arg_str(args, "username", "") })
+        if r != null and r["status"] == 404:
+            return error_api("USER_NOT_FOUND", "error.user_not_found").status(404)
+        return r != null and r["status"] < 300 ? null : srv_fallo(r)
+    if cmd == "social_remove_member":
+        Json? r = srv("DELETE", "/playlists/" + arg_str(args, "id", "") + "/members/" + http.url_encode(arg_str(args, "username", "")))
+        return r != null and r["status"] < 300 ? null : srv_fallo(r)
+    return error_api("UNKNOWN_COMMAND", "error.unknown_command").status(404)

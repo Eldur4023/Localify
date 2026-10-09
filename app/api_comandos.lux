@@ -264,11 +264,15 @@ fn Json cmd_buscar_candidatos(Json args):
     int limite = jint(jget(args, "limit"), 10)
     if consulta == "":
         return []
+    List<Json> out = []
+    # Serverify: primero las del servidor común
+    List<Json> del_servidor = srv_buscar(consulta, limite)
+    for int i in range(0, len(del_servidor)):
+        out.add(candidato_de(srv_pista(del_servidor[i])))
     Json? r = ytm_buscar(consulta, "canciones")
     if r == null:
-        return []
+        return out
     List<Json> elementos = elementos_de_lista(r)
-    List<Json> out = []
     for int i in range(0, len(elementos)):
         if len(out) >= limite:
             break
@@ -401,6 +405,8 @@ fn Json cmd_search_query(Json args):
     int query_id = state.incr("search_query_id")
     if q == "":
         return { "queryId": query_id, "top": null, "tracks": [], "albums": [], "artists": [], "playlists": [], "remote": { "state": "notAttempted" } }
+    # Serverify: lo que el servidor común ya tenga entra como pista del catálogo
+    srv_traer_coincidencias(q)
     string patron = "%" + like_escapar(normalizar(q)) + "%"
     # Cada término tiene que aparecer en ALGÚN sitio (título, artista o
     # álbum), no los tres juntos como una sola frase literal: así "Coldplay

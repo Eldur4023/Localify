@@ -297,6 +297,10 @@ fn Json despachar(string cmd, Json args):
     if cmd.starts_with("player_"):
         return reproductor_orden(cmd.slice(7), args)
 
+    # ── servidor común opcional (Serverify) ──
+    if cmd.starts_with("server_") or cmd.starts_with("social_"):
+        return await cmd_social(cmd, args)
+
     # ── cola ──
     if cmd == "queue_get":
         return cola_dto()

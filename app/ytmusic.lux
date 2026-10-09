@@ -338,6 +338,13 @@ fn void guardar_pista(PistaCatalogo p):
             artistas_display = artistas_display + ", "
         artistas_display = artistas_display + p.artista_nombres[i]
 
+    # los artistas primero: album_artists y track_artists los referencian (FK)
+    for int i in range(0, len(p.artista_ids)):
+        await sqlite.exec("""
+            insert into artists(id, name, name_norm, metadata_at) values(?, ?, ?, unixepoch())
+            on conflict(id) do update set name = excluded.name, name_norm = excluded.name_norm
+            """, p.artista_ids[i], p.artista_nombres[i], normalizar(p.artista_nombres[i]))
+
     if p.album_id != "":
         await sqlite.exec("""
             insert into albums(id, title, title_norm, release_date, total_tracks, cover_url, metadata_at)
@@ -346,12 +353,6 @@ fn void guardar_pista(PistaCatalogo p):
             """, p.album_id, p.album_titulo, normalizar(p.album_titulo), p.anyo == 0 ? null : str(p.anyo) + "-01-01", p.cover_url == "" ? null : p.cover_url)
         for int i in range(0, len(p.artista_ids)):
             await sqlite.exec("insert or ignore into album_artists(album_id, artist_id, position) values(?, ?, ?)", p.album_id, p.artista_ids[i], i)
-
-    for int i in range(0, len(p.artista_ids)):
-        await sqlite.exec("""
-            insert into artists(id, name, name_norm, metadata_at) values(?, ?, ?, unixepoch())
-            on conflict(id) do update set name = excluded.name, name_norm = excluded.name_norm
-            """, p.artista_ids[i], p.artista_nombres[i], normalizar(p.artista_nombres[i]))
 
     await sqlite.exec("""
         insert into tracks(id, title, title_norm, album_id, duration_ms, track_number, artist_display, artist_norm, metadata_at)

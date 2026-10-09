@@ -101,6 +101,25 @@ fn void promover_cola():
                 continue
             string tid = jstr(siguientes[i]["track_id"], "")
             string vid = jstr(siguientes[i]["video_id"], "")
+            # Serverify: primero el servidor común (si hay y la tiene); dlh="srv"
+            # marca el trabajo como vivo para el control de zombis mientras baja
+            if srv_activo():
+                int tocado = await sqlite.exec("update download_jobs set state = 'downloading', started_at = unixepoch(), updated_at = unixepoch() where track_id = ? and state = 'queued'", tid)
+                if tocado == 1:
+                    state.set("dlh:" + tid, "srv")
+                    bool del_servidor = srv_obtener(tid)
+                    state.remove("dlh:" + tid)
+                    if del_servidor:
+                        promovido = true
+                        break
+                    # el servidor no la tiene: de vuelta al flujo de siempre
+                    if vid != "":
+                        descargar_iniciar(tid, vid)
+                    else:
+                        await sqlite.exec("update download_jobs set state = 'matching', updated_at = unixepoch() where track_id = ?", tid)
+                    promovido = true
+                    break
+                continue
             if vid != "":
                 int tocado = await sqlite.exec("update download_jobs set state = 'downloading', started_at = unixepoch(), updated_at = unixepoch() where track_id = ? and state = 'queued'", tid)
                 if tocado == 1:
@@ -336,6 +355,8 @@ fn void descargar_tick(string tid):
         # reinicio de la app: el handle se perdió; reencolar
         await sqlite.exec("update download_jobs set state = 'queued', updated_at = unixepoch() where track_id = ? and state = 'downloading'", tid)
         return
+    if hval == "srv":
+        return
     int h = int(hval)
 
     # drenar líneas de progreso
@@ -556,6 +577,8 @@ fn void finalizar(string tid):
         """, tid, rel, ext_final, codec, os.file_size(destino_abs), duracion_real_ms > 0 ? duracion_real_ms : null,
         seleccionar_youtube_id(tid))
 
+    srv_subir(tid, destino_abs, ext_final, titulo, artista, album, duracion_real_ms > 0 ? duracion_real_ms : esperado_ms)
+
     os.remove_file(origen)
     await sqlite.exec("delete from download_jobs where track_id = ?", tid)
 
@@ -626,7 +649,7 @@ fn List<Json> tick_descargas():
     for int i in range(0, len(atascados)):
         string tid = jstr(atascados[i]["track_id"], "")
         string hval = state.get("dlh:" + tid, "")
-        if hval != "":
+        if hval != "" and hval != "srv":
             int h = int(hval)
             proc.kill(h)
             await proc.wait(h, 5000)
