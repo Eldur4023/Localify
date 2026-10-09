@@ -300,6 +300,8 @@ export const social = {
 	user: (username) => invoke("social_user", { username }),
 	playlists: () => invoke("social_playlists"),
 	playlist: (id) => invoke("social_playlist", { id }),
+	/** Asegura que la playlist vive en el servidor y devuelve su ficha (miembros, visibilidad). */
+	ensure: (playlistId) => invoke("social_ensure", { playlistId }),
 	/** Id de la playlist en el servidor, o `null` si no está publicada. */
 	playlistLink: (playlistId) => invoke("social_playlist_link", { playlistId }),
 	publish: (playlistId, visibility, collaborative) => invoke("social_publish", {

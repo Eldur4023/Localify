@@ -168,13 +168,14 @@ fn bool puede_editar_pistas(int pid, string nivel):
         return true
     if nivel != "member":
         return false
-    List<Json> p = await sqlite.query("select collaborative from playlists where id = ?", pid)
-    return len(p) > 0 and int(p[0]["collaborative"]) == 1
+    # Una playlist es conjunta cuando su dueña invita a alguien: quien está en la lista de
+    # miembros puede tocar las canciones. Nadie más (los lectores de una pública, tampoco).
+    return true
 
 fn Json playlist_resumen(Json p):
     return {
         "id": p["id"], "name": p["name"], "description": p["description"],
-        "visibility": p["visibility"], "collaborative": int(p["collaborative"]) == 1,
+        "visibility": p["visibility"], "collaborative": int(p["n_members"]) > 0,
         "owner": p["owner"], "ownerName": p["owner_name"],
         "nTracks": p["n_tracks"], "updatedAt": p["updated_at"]
     }
@@ -183,7 +184,8 @@ fn string sql_resumen():
     return """
         select p.id, p.name, p.description, p.visibility, p.collaborative, p.updated_at,
                u.username as owner, u.display_name as owner_name,
-               (select count(*) from playlist_tracks pt where pt.playlist_id = p.id) as n_tracks
+               (select count(*) from playlist_tracks pt where pt.playlist_id = p.id) as n_tracks,
+               (select count(*) from playlist_members pm where pm.playlist_id = p.id) as n_members
         from playlists p join users u on u.id = p.owner_id """
 
 # ¿Ya está esta canción en la lista? (mismo id o misma identidad título + artista)
@@ -533,7 +535,15 @@ group("/api"):
         List<Json> u = await sqlite.query("select id from users where username = ?", s_of(b, "username", ""))
         if len(u) == 0:
             return { "error": "user_not_found" }.status(404)
+        # invitar a la propia dueña no tiene sentido; y un tope razonable de invitados
+        List<Json> dueno = await sqlite.query("select 1 from playlists where id = ? and owner_id = ?", id, int(u[0]["id"]))
+        if len(dueno) > 0:
+            return { "error": "invalid" }.status(400)
+        List<Json> n = await sqlite.query("select count(*) as n from playlist_members where playlist_id = ?", id)
+        if int(n[0]["n"]) >= 30:
+            return { "error": "too_many" }.status(400)
         await sqlite.exec("insert or ignore into playlist_members(playlist_id, user_id) values(?, ?)", id, int(u[0]["id"]))
+        await sqlite.exec("update playlists set updated_at = unixepoch() where id = ?", id)
         return status(204)
 
     delete endpoint("/playlists/:id/members/:name", int id, string name):

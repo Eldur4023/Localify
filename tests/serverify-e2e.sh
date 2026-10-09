@@ -144,5 +144,25 @@ state2=$(curl -s -H "Authorization: Bearer $TA" $B/playlist-tombstones); ok "que
 inv2 server_pull >/dev/null
 ok "y se borra en el equipo 2 (no se vuelve a crear)" "$(sqlite3 $DB2 "select count(*) from playlists where name='Auto 2'")" 0
 ok "ni resucita en el servidor" "$(curl -s -H "Authorization: Bearer $TA" $B/playlists | grep -c '"name":"Auto 2"')" 0
+
+# ── playlist conjunta: la invitada la recibe sola, puede editarla, pero no es suya ──
+CJ=$(inv playlist_create '{"name":"Conjunta"}' | tr -d '"')
+inv playlist_add_tracks "{\"playlistId\":\"$CJ\",\"trackIds\":[\"dQw4w9WgXcQ\"]}" >/dev/null
+CSID=$(inv social_ensure "{\"playlistId\":\"$CJ\"}" | sed 's/.*"id":\([0-9]*\),"name".*/\1/')
+ok "invitar a bob" "$(inv social_add_member "{\"id\":\"$CSID\",\"username\":\"bob\"}"; echo fin)" fin
+# el equipo 2 pasa a ser de bob (otro usuario: no arrastra los enlaces de ana)
+inv2 server_logout >/dev/null
+BOBLOGIN=$(inv2 server_login '{"username":"bob","password":"secreto123"}'); ok "bob entra en el equipo 2" "$BOBLOGIN" '"username":"bob"'
+inv2 server_pull >/dev/null
+ok "bob recibe la conjunta sin pedirla" "$(sqlite3 $DB2 "select count(*) from playlists where name='Conjunta'")" 1
+ok "con la canción de ana" "$(sqlite3 $DB2 "select count(*) from playlist_items pi join playlists p on p.id=pi.playlist_id where p.name='Conjunta'")" 1
+ok "y no se llevó las playlists de ana por enlaces viejos" "$(curl -s -H "Authorization: Bearer $TB" $B/playlists | grep -c '"name":"Auto 2"')" 0
+BP=$(sqlite3 $DB2 "select id from playlists where name='Conjunta'")
+sqlite3 $DB2 "insert or ignore into tracks(id,title,title_norm,duration_ms,artist_display,artist_norm) values('BOBTRK1','De Bob','de bob',100000,'Bob','bob')"
+inv2 playlist_add_tracks "{\"playlistId\":\"$BP\",\"trackIds\":[\"BOBTRK1\"]}" >/dev/null
+poll 8796
+ok "bob añade una canción y ana la ve en el servidor" "$(curl -s -H "Authorization: Bearer $TA" $B/playlists/$CSID)" '"title":"De Bob"'
+inv2 playlist_rename "{\"playlistId\":\"$BP\",\"name\":\"Renombrada por bob\"}" >/dev/null; poll 8796
+ok "bob no puede renombrarla en el servidor" "$(curl -s -H "Authorization: Bearer $TA" $B/playlists/$CSID)" '"name":"Conjunta"'
 ok "servidor caído no rompe la búsqueda" "$(kill $P1; sleep 0.5; inv search_query '{"q":"yellow"}')" '"queryId"'
 ((fail)) && { tail -15 $W/cl.log | grep -v warning; echo "--- equipo 2:"; grep -v warning $W/cl2.log | tail -8; exit 1; }; echo "todo ok"

@@ -48,5 +48,40 @@ ok "perfil con playlists" "$(curl -s -H "Authorization: Bearer $T" $B/users/ana)
 ok "social" "$(curl -s -H "Authorization: Bearer $T" $B/users)" '"username":"bob"'
 ok "salirse" "$(j DELETE '' $B/playlists/1/members/bob)" 204
 ok "ya no edita" "$(j POST '{"tracks":[{"id":"x","title":"t"}]}' $B/playlists/1/tracks)" 403
+# ── permisos: nadie toca mi playlist salvo a quien yo invite ──
+T=$TA; PV=$(j POST '{"name":"Privada","tracks":[{"id":"zzzzzzzzzzz","title":"Secreta"}]}' $B/playlists | sed 's/.*"id":\([0-9]*\).*/\1/')
+PP=$(j POST '{"name":"Publica","visibility":"public","tracks":[{"id":"zzzzzzzzzzz","title":"Abierta"}]}' $B/playlists | sed 's/.*"id":\([0-9]*\).*/\1/')
+T=$TB
+ok "privada: otro usuario no la ve" "$(curl -s -o /dev/null -w %{http_code} -H "Authorization: Bearer $T" $B/playlists/$PV)" 404
+ok "privada: no aparece en su lista" "$(curl -s -H "Authorization: Bearer $T" $B/playlists | grep -c Privada)" 0
+ok "privada: no puede añadir" "$(j POST '{"tracks":[{"id":"x","title":"t"}]}' $B/playlists/$PV/tracks)" 403
+ok "privada: no puede borrarla" "$(j DELETE '' $B/playlists/$PV)" 404
+ok "privada: no puede invitarse" "$(j POST '{"username":"bob"}' $B/playlists/$PV/members)" 404
+ok "pública: la ve pero solo lectura" "$(curl -s -H "Authorization: Bearer $T" $B/playlists/$PP)" '"access":"reader"'
+ok "pública: no puede añadir" "$(j POST '{"tracks":[{"id":"x","title":"t"}]}' $B/playlists/$PP/tracks)" 403
+ok "pública: no puede quitar" "$(j DELETE '' $B/playlists/$PP/tracks/zzzzzzzzzzz)" 403
+ok "pública: no puede reescribirla" "$(j PUT '{"name":"Hackeada","tracks":[]}' $B/playlists/$PP)" 403
+ok "pública: ni cambiarle el nombre" "$(j PUT '{"name":"Hackeada"}' $B/playlists/$PP)" 204
+T=$TA; ok "pública: sigue intacta" "$(curl -s -H "Authorization: Bearer $T" $B/playlists/$PP)" '"name":"Publica"'
+ok "pública: sin conjunta todavía" "$(curl -s -H "Authorization: Bearer $T" $B/playlists/$PP)" '"collaborative":false'
+# hacerla conjunta = invitar a alguien (sin casillas)
+ok "invitar a bob" "$(j POST '{"username":"bob"}' $B/playlists/$PV/members)" 204
+ok "y ya es conjunta" "$(curl -s -H "Authorization: Bearer $T" $B/playlists/$PV)" '"collaborative":true'
+ok "no puede invitarse a sí misma" "$(j POST '{"username":"ana"}' $B/playlists/$PV/members)" 400
+T=$TB
+ok "invitado: la ve" "$(curl -s -H "Authorization: Bearer $T" $B/playlists/$PV)" '"access":"member"'
+ok "invitado: puede añadir" "$(j POST '{"tracks":[{"id":"inv1","title":"Del invitado"}]}' $B/playlists/$PV/tracks)" 204
+ok "invitado: puede quitar" "$(j DELETE '' $B/playlists/$PV/tracks/inv1)" 204
+ok "invitado: no la renombra" "$(j PUT '{"name":"Mia ahora"}' $B/playlists/$PV)" 204
+ok "invitado: no la borra" "$(j DELETE '' $B/playlists/$PV)" 404
+ok "invitado: no invita a otros" "$(j POST '{"username":"bob"}' $B/playlists/$PV/members)" 404
+ok "invitado: no la hace pública" "$(j PUT '{"visibility":"public"}' $B/playlists/$PV)" 204
+T=$TA; D=$(curl -s -H "Authorization: Bearer $T" $B/playlists/$PV)
+ok "sigue llamándose igual" "$D" '"name":"Privada"'
+ok "sigue siendo privada" "$D" '"visibility":"private"'
+ok "la dueña la expulsa" "$(j DELETE '' $B/playlists/$PV/members/bob)" 204
+T=$TB; ok "expulsado: ya no la ve" "$(curl -s -o /dev/null -w %{http_code} -H "Authorization: Bearer $T" $B/playlists/$PV)" 404
+ok "expulsado: no puede añadir" "$(j POST '{"tracks":[{"id":"x","title":"t"}]}' $B/playlists/$PV/tracks)" 403
+T=$TA; ok "dueña: puede borrarla" "$(j DELETE '' $B/playlists/$PV)" 204
 T=$TA; ok "dueño borra" "$(j DELETE '' $B/playlists/1)" 204
 ((fail)) && { echo; tail -5 "$W/log"; exit 1; }; echo "todo ok"

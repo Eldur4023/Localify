@@ -282,6 +282,10 @@ fn void marcar_sincronizada(string plid, string sid, int actualizada):
     ajuste_poner("srvpm:" + plid, meta_local(plid))
     ajuste_poner("srvpu:" + plid, str(actualizada))
 
+# Otro usuario u otro servidor en este equipo: los enlaces con la nube anterior no valen.
+fn void olvidar_enlaces():
+    await sqlite.exec("delete from settings where key like 'srvp%'")
+
 fn void olvidar_playlist(string plid):
     await sqlite.exec("delete from settings where key in (?, ?, ?, ?)", "srvpl:" + plid, "srvph:" + plid, "srvpm:" + plid, "srvpu:" + plid)
 
@@ -331,7 +335,7 @@ fn Json sync_una(string plid, string sid):
         return { "localId": plid, "serverId": sid }
     bool local_cambio = lh != ultimo_h or ml != ultimo_m
     bool server_cambio = sh != ultimo_h or ms != ultimo_m
-    bool puede_pistas = pl["access"] == "owner" or (pl["access"] == "member" and pl["collaborative"] == true)
+    bool puede_pistas = pl["access"] == "owner" or pl["access"] == "member"
     bool puede_meta = pl["access"] == "owner"
     if local_cambio and not server_cambio and puede_pistas:
         # empujo mis cambios
@@ -457,10 +461,12 @@ fn void srv_reconciliar():
                 else:
                     srv("DELETE", "/playlists/" + sid + "/members/" + http.url_encode(yo))
             olvidar_playlist(plid)
-    # 3) mías en el servidor que este equipo aún no tiene (equipo nuevo): se traen
+    # 3) las mías y las conjuntas a las que me invitaron que este equipo aún no tiene: se traen.
+    # (La lista del servidor solo trae las mías y aquellas en las que soy miembro.) Si no
+    # la quiero, la borro aquí y con eso salgo de ella.
     for int i in range(0, len(lista)):
         string sid = str(lista[i]["id"])
-        if jstr(lista[i]["owner"], "") == yo and not enlazadas.contains(sid) and local_de(sid) == "":
+        if not enlazadas.contains(sid) and not borradas.contains(int(sid)) and local_de(sid) == "":
             importar_playlist(sid)
 
 # ─── Comandos (server_* ajustes/sesión, social_* usuarios y playlists) ───────
@@ -472,6 +478,11 @@ fn Json sesion_guardada(Json? r):
         if r != null and (r["status"] == 401 or r["status"] == 400 or r["status"] == 429):
             return error_api("SERVER_AUTH", "error.server_auth_" + str(r["status"])).status(r["status"])
         return srv_fallo(r)
+    # server_cuenta sobrevive al cierre de sesión: volver a entrar con el mismo usuario conserva
+    # los enlaces; entrar con otro (u otro servidor) los descarta
+    if ajuste("server_cuenta", "") != jstr(r["body"]["user"]["username"], ""):
+        olvidar_enlaces()
+    ajuste_poner("server_cuenta", jstr(r["body"]["user"]["username"], ""))
     ajuste_poner("server_token", jstr(r["body"]["token"], ""))
     ajuste_poner("server_user", jstr(r["body"]["user"]["username"], ""))
     state.remove("srv_caido")
@@ -501,6 +512,8 @@ fn Json cmd_social(string cmd, Json args):
         if host != ajuste("server_host", "") or str(puerto) != ajuste("server_port", "8787"):
             ajuste_poner("server_token", "")
             ajuste_poner("server_user", "")
+            olvidar_enlaces()
+            ajuste_poner("server_cuenta", "")
         ajuste_poner("server_host", host)
         ajuste_poner("server_port", str(puerto))
         state.remove("srv_caido")
@@ -674,7 +687,7 @@ fn Json cmd_social(string cmd, Json args):
             return error_api("NOT_FOUND", "error.not_found").status(404)
         bool publica = cmd == "social_publish"
         string vis = publica ? arg_str(args, "visibility", "private") : "private"
-        bool colab = publica and jget(args, "collaborative") == true
+        bool colab = false
         string sid = ajuste("srvpl:" + plid, "")
         if sid == "":
             sid = crear_en_servidor(plid, vis, colab)
@@ -687,6 +700,20 @@ fn Json cmd_social(string cmd, Json args):
         if r == null or r["status"] >= 300:
             return srv_fallo(r)
         return { "localId": plid, "serverId": sid }
+    # Asegura que la playlist local vive en el servidor y devuelve su ficha (miembros, visibilidad)
+    if cmd == "social_ensure":
+        string plid = arg_str(args, "playlistId", "")
+        string sid = ajuste("srvpl:" + plid, "")
+        if sid == "":
+            sid = crear_en_servidor(plid)
+            if sid == "":
+                return srv_fallo(null)
+        Json? r = srv("GET", "/playlists/" + sid)
+        if r == null or r["status"] != 200:
+            return srv_fallo(r)
+        Json p = r["body"]
+        p["localId"] = plid
+        return p
     if cmd == "social_sync":
         string plid = arg_str(args, "playlistId", "")
         string sid = ajuste("srvpl:" + plid, "")
