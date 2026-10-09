@@ -112,4 +112,4 @@ endfunction()
 # app/ is where the work happens: app.lux, templates/, static assets, window
 # title/size (via the window: block) -- everything. This line is the only
 # thing in this file that ever names it.
-add_lux_desktop_app(app DIR ${CMAKE_CURRENT_SOURCE_DIR}/app ID localify)
+add_lux_desktop_app(app DIR ${CMAKE_CURRENT_SOURCE_DIR}/app ID serverify)

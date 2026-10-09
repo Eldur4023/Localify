@@ -7,6 +7,7 @@
 # canción, el cliente usa su método de siempre.
 #
 #   cd server && JWT_SECRET=<secreto largo> lux server.lux     # puerto 8787
+#   SERVERIFY_HOST=<ip> limita la escucha a una interfaz (p. ej. la de Tailscale).
 #   (hay que lanzarlo desde server/: ./data y la BD cuelgan de ahí)
 #
 # Datos en ./data (serverify.db + audio/), relativo al directorio de trabajo.
@@ -19,7 +20,7 @@ import json
 app:
     name     "Serverify"
     port     8787
-    host     "0.0.0.0"
+    host     env("SERVERIFY_HOST", "0.0.0.0")
     max_body "256MB"
 
     jwt:
