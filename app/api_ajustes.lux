@@ -195,7 +195,7 @@ fn Json cmd_probar_cookies():
     List<string> extra = args_cookies()
     if len(extra) == 0:
         return { "status": { "kind": "unavailable", "reasonKey": "settings.cookies_none" } }
-    Json r = await os.run("yt-dlp", ["--dump-json", "--flat-playlist", "--playlist-end", "1"] + extra + ["ytsearch1:test"])
+    Json r = await os.run(ytdlp_bin(), ["--dump-json", "--flat-playlist", "--playlist-end", "1"] + ytdlp_extra() + extra + ["ytsearch1:test"])
     if jint(r["status"], 1) == 0 and jstr(r["stdout"], "").trim() != "":
         return { "status": { "kind": "ready" } }
     return { "status": { "kind": "unavailable", "reasonKey": "settings.cookies_broken" } }

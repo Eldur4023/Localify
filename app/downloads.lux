@@ -32,6 +32,20 @@ fn bool es_video_id(string id):
             return false
     return true
 
+# yt-dlp: el de ~/.local/bin si existe (el binario autónomo que se actualiza solo con
+# `yt-dlp -U`; el del sistema suele ir años por detrás y YouTube deja de dar audio
+# con versiones viejas), si no el del PATH.
+fn string ytdlp_bin():
+    string propio = os.path_join(os.getenv("HOME", ""), ".local", "bin", "yt-dlp")
+    return os.is_file(propio) ? propio : "yt-dlp"
+
+# Las versiones nuevas resuelven YouTube con un runtime de JavaScript y solo activan
+# deno por defecto: si hay node, se le dice que lo use.
+fn List<string> ytdlp_extra():
+    if ytdlp_bin() == "yt-dlp" or not hay_binario("node"):
+        return []
+    return ["--js-runtimes", "node"]
+
 fn string formato_expr():
     return "bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best"
 
@@ -308,12 +322,12 @@ fn bool matching_continuar(string tid, string estado_actual):
     # sin un vídeo ya conocido (todo lo que no viene directo de YouTube
     # Music) fallaba siempre con "match.not_found".
     ConsultaYt q = ConsultaYt(jstr(plan[idx]["texto"], ""), jint(plan[idx]["music"], 0) == 1, jint(plan[idx]["directa"], 0) == 1, jstr(plan[idx]["origen"], ""))
-    List<string> args = [objetivo_consulta(q), "--dump-json", "--no-warnings", "--ignore-errors", "--playlist-end", "10", "--socket-timeout", "15"]
+    List<string> args = [objetivo_consulta(q), "--dump-json", "--no-warnings", "--ignore-errors", "--playlist-end", "10", "--socket-timeout", "15"] + ytdlp_extra()
     List<string> cookies = args_cookies()
     for int i in range(0, len(cookies)):
         args.add(cookies[i])
     state.set("dlout:" + tid, "")
-    int h = proc.start("yt-dlp", args)
+    int h = proc.start(ytdlp_bin(), args)
     state.set("dlh:" + tid, str(h))
     return true
 
@@ -346,12 +360,12 @@ fn void descargar_iniciar(string tid, string video_id):
         "--no-post-overwrites", "--newline", "--progress",
         "--progress-template", "LOCALIFY|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s",
         "--no-warnings", "--no-playlist", "--socket-timeout", "15"
-    ]
+    ] + ytdlp_extra()
     List<string> cookies = args_cookies()
     for int i in range(0, len(cookies)):
         args.add(cookies[i])
     string err_file = os.path_join(biblioteca_raiz(), ".tmp", tid + ".err")
-    int h = proc.start("yt-dlp", args, { "stderr": err_file })
+    int h = proc.start(ytdlp_bin(), args, { "stderr": err_file })
     state.set("dlh:" + tid, str(h))
     state.set("dlp:" + tid, "")
     await sqlite.exec("update download_jobs set tmp_path = ?, bytes_done = 0, bytes_total = null, updated_at = unixepoch() where track_id = ?", destino, tid)

@@ -519,7 +519,7 @@ fn Json despachar(string cmd, Json args):
     if cmd == "settings_test_cookies":
         return await cmd_probar_cookies()
     if cmd == "settings_update_ytdlp":
-        Json r = await os.run("yt-dlp", ["-U"])
+        Json r = await os.run(ytdlp_bin(), ["-U"])
         return { "ok": jint(r["status"], 1) == 0, "message": (jstr(r["stdout"], "") + jstr(r["stderr"], "")).trim() }
     if cmd == "settings_change_library_path":
         string ruta = arg_str(args, "path", "")
