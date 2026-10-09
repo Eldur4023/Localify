@@ -52,13 +52,23 @@ public:
     // May be null (the normal case, without --native) or shorter than
     // `functions` (functions with no entry were never compiled to native):
     // an out-of-range index is treated the same as an empty slot.
-    Result start(const Chunk& chunk, std::vector<Value> params, NativeCtx& ctx,
+    Result start(const Chunk& chunk, std::vector<Value>&& params, NativeCtx& ctx,
+                 const FunctionTable* functions = nullptr,
+                 const NativeDispatch* native = nullptr);
+    // The same, copying `params` straight into the locals: a template runs
+    // one chunk per {{ }} over the same values, and copying the whole vector
+    // for each was most of what a page cost.
+    Result start(const Chunk& chunk, const std::vector<Value>& params, NativeCtx& ctx,
                  const FunctionTable* functions = nullptr,
                  const NativeDispatch* native = nullptr);
 
     // Continues after a suspension, leaving `awaited` as the value of the
     // `await` expression.
     Result resume(Value awaited, NativeCtx& ctx);
+
+    // Continues after a suspension by raising `message` where the `await`
+    // was: a `try` around it catches it, like any other runtime error.
+    Result resume_error(std::string message, SourceLoc loc, NativeCtx& ctx);
 
     // Step cap per handler: cuts an infinite loop in a .lux instead of pinning
     // an event loop thread, which would take down every connection on that
@@ -87,11 +97,19 @@ private:
     const FunctionTable*  functions_ = nullptr;
     const NativeDispatch* native_    = nullptr;
 
+    void begin(const Chunk& chunk, const FunctionTable* functions, const NativeDispatch* native);
     Result execute(NativeCtx& ctx);
+    Result unwind(Result r, NativeCtx& ctx);   // delivers an error to the nearest catch
     Result run_until_error(NativeCtx& ctx);
 
     void  push(Value v) { stack_.push_back(std::move(v)); }
     Value pop()         { Value v = std::move(stack_.back()); stack_.pop_back(); return v; }
+    // The top `n` values, in push order (the first argument first).
+    std::vector<Value> pop_args(int n) {
+        std::vector<Value> out(static_cast<size_t>(n));
+        for (int i = n; i-- > 0;) out[static_cast<size_t>(i)] = pop();
+        return out;
+    }
 };
 
 } // namespace lux_script

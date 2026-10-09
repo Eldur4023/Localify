@@ -40,3 +40,33 @@ get endpoint("/close_twice"):
     bool first = pdf.close(doc)
     bool second = pdf.close(doc)
     return { "first": first, "second": second }
+
+get endpoint("/send"):
+    int doc = pdf.create(200, 100)
+    pdf.set_font(doc, "sans", true)
+    double w = pdf.text_width(doc, "Total: 12,50 €", 12)
+    pdf.text(doc, 190 - w, 50, "Total: 12,50 €", 12)
+    pdf.send(doc, "factura \"1\".pdf")
+    pdf.close(doc)
+
+get endpoint("/width"):
+    int doc = pdf.create(200, 100)
+    double narrow = pdf.text_width(doc, "i", 12)
+    double wide = pdf.text_width(doc, "WWWW", 12)
+    pdf.close(doc)
+    return { "wider": wide > narrow * 4, "positive": narrow > 0 }
+
+get endpoint("/bad_image"):
+    int doc = pdf.create(50, 50)
+    return { "r": pdf.image(doc, "/nonexistent.png", 0, 0) }
+
+get endpoint("/long_table"):
+    int doc = pdf.create(595, 842)
+    double y = pdf.text_box(doc, 40, 40, 200, "A paragraph long enough that it has to wrap onto several lines inside a narrow box.", 11)
+    List<Json> rows = [["Item", "Qty", "Price"]]
+    for int i in range(1, 91):
+        rows.add(["Line " + str(i) + " with a description that wraps in its column", i, "12,50 €"])
+    double end = pdf.table(doc, 40, y + 10, [300, 60, 100], rows)
+    pdf.save(doc, "/tmp/lux-pdf-table-test.pdf")
+    pdf.close(doc)
+    return { "wrapped": y > 40 + 11 * 1.3 * 2, "end": end }

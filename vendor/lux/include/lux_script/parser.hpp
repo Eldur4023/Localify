@@ -13,7 +13,7 @@ namespace lux_script {
 class Parser {
 public:
     Parser(std::vector<Token> tokens, DiagnosticBag& diags)
-        : toks_(std::move(tokens)), diags_(diags) {}
+        : toks_(std::move(tokens)), diags_(diags) { method_words_as_names(); }
 
     // Parses into `out`.  Several calls with different files accumulate onto
     // the same Program: that is what allows splitting the app across .lux files.
@@ -25,6 +25,10 @@ public:
     ExprPtr parse_single_expression();
 
 private:
+    // get/post/put/patch/delete/options/any are a route's method only right
+    // before `endpoint`; anywhere else they are ordinary names (`string post`).
+    void method_words_as_names();
+
     std::vector<Token> toks_;
     DiagnosticBag&     diags_;
     size_t             i_ = 0;
@@ -33,7 +37,7 @@ private:
     // function (or nested ones) from colliding on the same synthetic name.
     size_t             switch_count_ = 0;
 
-    // ── Navegacion ───────────────────────────────────────────────────────────
+    // ── Navigation ───────────────────────────────────────────────────────────
     const Token& peek(size_t ahead = 0) const;
     const Token& prev() const;
     bool  check(Tok k) const { return peek().is(k); }
@@ -43,26 +47,37 @@ private:
     void  error_here(std::string msg);
     void  synchronize();
     void  skip_newlines();
+    void  skip_to_eol();
 
-    // ── Declaraciones ────────────────────────────────────────────────────────
+    // ── Declarations ─────────────────────────────────────────────────────────
     void parse_declaration(Program& out);
     void parse_route(Program& out, const Token& method_tok,
                      const std::string& prefix, const std::vector<Guard>& guards);
     void parse_group(Program& out, const std::string& prefix,
                      const std::vector<Guard>& guards);
     void parse_app(Program& out);
-    // Resuelve un value de configuracion: string_value, number, booleano o env("VAR").
-    bool config_value(std::string& text, long long& number, bool& flag, int& kind);
+    void parse_tls(Program& out);
+    // Resolves a config value: string_value, number, boolean, or env("VAR").
+    // from_env (optional): true if the value came from env("VAR") -- what
+    // ends up there is decided by the deployment environment, not this
+    // file, so a validation on the value's CONTENT (e.g. a secret's
+    // minimum length) must not apply when it comes from there, whatever
+    // that content happens to be at compile time.
+    bool config_value(std::string& text, long long& number, bool& flag, int& kind,
+                      bool* from_env = nullptr);
     void parse_class(Program& out);
     void parse_enum(Program& out);
     void parse_error(Program& out);
+    void parse_every(Program& out);
+    void parse_start(Program& out);
+    void parse_command(Program& out);
+    bool size_config(const std::string& key, size_t& out);
     void parse_fn(Program& out);
 
-    // ── Sentencias ───────────────────────────────────────────────────────────
+    // ── Statements ───────────────────────────────────────────────────────────
     Block   parse_block();
     StmtPtr parse_statement();
     StmtPtr parse_if();
-    StmtPtr parse_if_from_elif();
     StmtPtr parse_while();
     StmtPtr parse_for();
     StmtPtr parse_return();
@@ -77,14 +92,15 @@ private:
     // statement function does.
     void parse_switch_into(Block& out);
 
-    // ── Tipos y parametros ───────────────────────────────────────────────────
+    // ── Types and parameters ─────────────────────────────────────────────────
     bool    looks_like_type() const;
     TypeRef parse_type();
     Param   parse_param();
 
-    // ── Expresiones, de menor a mayor precedencia ────────────────────────────
+    // ── Expressions, from lowest to highest precedence ───────────────────────
     ExprPtr parse_expr();
     ExprPtr parse_ternary();
+    ExprPtr binary(ExprPtr (Parser::*next)(), std::initializer_list<Tok> ops);
     ExprPtr parse_or();
     ExprPtr parse_and();
     ExprPtr parse_not();
@@ -97,6 +113,7 @@ private:
     ExprPtr parse_primary();
 
     ExprPtr make(ExprKind k, SourceLoc loc);
+    StmtPtr make_stmt(StmtKind k, SourceLoc loc);
 };
 
 } // namespace lux_script

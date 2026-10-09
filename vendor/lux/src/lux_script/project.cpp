@@ -7,6 +7,7 @@
 #include <lux_script/auth.hpp>
 #include <lux_script/db.hpp>
 #include <lux_script/builtin_module.hpp>
+#include <lux_script/json_bind.hpp>
 
 #include <lux/request.hpp>
 #include <lux/response.hpp>
@@ -19,6 +20,8 @@
 #include <lux/blocking_pool.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -84,34 +87,6 @@ std::string format_errors(const DiagnosticBag& diags,
 // that has to be computed, the route needs the VM and that is another milestone.
 
 namespace {
-
-// --native phase 1: for ONE specific call to
-// emit_route/emit_function/emit_method/emit_ctor/emit_error_handler/
-// emit_condition, compares the diagnostics it added against what its check_*
-// equivalent gives. Purely observational — never touches `diags`, never
-// changes the result of a real compilation — so it only runs if
-// LUX_SHADOW_CHECK is set in the environment: zero cost on the normal
-// path. It is the canary that validates, before taking the step of turning
-// emit_expr/emit_stmt/emit_call into IR consumers and stripping their own
-// checks, that check_expr/check_stmt keep reproducing the real compilation
-// on organic .lux programs too (not just the hand-written cases in
-// tests/check_*_shadow.cpp).
-bool shadow_check_enabled() {
-    static const bool v = std::getenv("LUX_SHADOW_CHECK") != nullptr;
-    return v;
-}
-
-void shadow_compare(const char* label, const DiagnosticBag& diags, size_t before,
-                    const DiagnosticBag& shadow) {
-    if (!shadow_check_enabled()) return;
-    std::vector<std::string> real, shadow_msgs;
-    for (size_t i = before; i < diags.items().size(); ++i) real.push_back(diags.items()[i].message);
-    for (const auto& it : shadow.items()) shadow_msgs.push_back(it.message);
-    if (real == shadow_msgs) return;
-    std::fprintf(stderr, "[shadow-check] discrepancy in %s\n", label);
-    for (const auto& m : real)       std::fprintf(stderr, "  real:   %s\n", m.c_str());
-    for (const auto& m : shadow_msgs) std::fprintf(stderr, "  shadow: %s\n", m.c_str());
-}
 
 // Lux Script type name for an already built value.  Used where the data is
 // constant and therefore its type is exact.
@@ -203,6 +178,33 @@ void responder_error(lux::Response& res, int code, const std::string& msg,
 
 using Action = std::function<void(lux::Request&, lux::Response&)>;
 
+// What a handler with no `await` costs per call, as a moving average in
+// microseconds. Such a handler can run on the blocking pool so it does not
+// stall its event loop, but below kInlineUs the trip there and back costs
+// more than the work itself, and it runs inline. 500us, measured: a 500-row
+// template (~140us) inline kept its p99 at 1ms instead of 3.5ms through the
+// pool, while a 0.85ms CPU route still goes to the pool (inline at 1ms, its
+// p99 doubled: whole connections stuck behind it on one loop).
+// ponytail: a timing heuristic, not preemption -- native code has no step
+// cap, so a route that is usually cheap and then loops forever pins its loop
+// thread; a watchdog that moves it back is the upgrade.
+struct RunCost {
+    static constexpr uint32_t kInlineUs = 500;
+    std::atomic<uint32_t> us{UINT32_MAX};   // unknown until the pool times one
+
+    bool cheap() const { return us.load(std::memory_order_relaxed) < kInlineUs; }
+
+    template <class F> void timed(F&& f) {
+        const auto t0 = std::chrono::steady_clock::now();
+        f();
+        const auto took = static_cast<uint32_t>(std::min<long long>(UINT32_MAX - 1,
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count()));
+        const uint32_t old = us.load(std::memory_order_relaxed);
+        us.store(old == UINT32_MAX ? took : static_cast<uint32_t>((uint64_t{old} * 7 + took) / 8),
+                 std::memory_order_relaxed);
+    }
+};
+
 // Translates the `return <expr>` of a declarative route into a native action.
 // Returns an empty Action and records the diagnostic if the expression needs
 // runtime evaluation.
@@ -269,13 +271,11 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
             diags.error(e.loc, "invalid template name: '" + name + "'");
             return {};
         }
-        std::ifstream f(std::filesystem::path(tpl_dir) / name, std::ios::binary);
-        if (!f) {
-            diags.error(e.loc, "template not found: '" + name + "' en " + tpl_dir);
+        auto source = read_whole_file(std::filesystem::path(tpl_dir) / name);
+        if (!source) {
+            diags.error(e.loc, "template not found: '" + name + "' in " + tpl_dir);
             return {};
         }
-        const std::string fuente((std::istreambuf_iterator<char>(f)),
-                                 std::istreambuf_iterator<char>());
 
         // Here the data is CONSTANT, so the type of each key is known exactly:
         // the template is checked against the real values.
@@ -287,14 +287,14 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
         }
 
         Template tpl_c;
-        if (!compilar_plantilla(fuente, name, tpl_dir, keys, diags, tpl_c)) return {};
+        if (!compile_template(*source, name, tpl_dir, keys, diags, tpl_c)) return {};
 
-        lux::Request  req_falsa;
-        lux::Response res_falsa;
-        NativeCtx        ctx{req_falsa, res_falsa};
+        lux::Request  fake_req;
+        lux::Response fake_res;
+        NativeCtx        ctx{fake_req, fake_res};
         std::string      html, err;
-        if (!render_plantilla(tpl_c, std::move(values), ctx, nullptr, html, err)) {
-            diags.error(e.loc, "al renderizar '" + name + "': " + err);
+        if (!render_template(tpl_c, std::move(values), ctx, nullptr, html, err)) {
+            diags.error(e.loc, "when rendering '" + name + "': " + err);
             return {};
         }
         return [html](lux::Request&, lux::Response& res) {
@@ -313,17 +313,25 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
     }
 
     if (*fn == "send_file") {
+        if (e.args.size() != 1) {   // a root or options: the VM handles those
+            diags.error(e.loc, "send_file() with a root or options: needs the VM");
+            return {};
+        }
         const std::string* p = need_string(0, "the file path");
         if (!p) return {};
         std::string path = *p;
-        return [path](lux::Request&, lux::Response& res) {
-            res.send_file(path);
+        return [path](lux::Request& req, lux::Response& res) {
+            send_file_checked(req, res, path);
         };
     }
 
     if (*fn == "status") {
         if (e.args.empty() || e.args[0].value->kind != ExprKind::IntLit) {
             diags.error(e.loc, "status() expects a numeric status code");
+            return {};
+        }
+        if (e.args.size() > 1) {   // status(code, "message"): the VM carries the message
+            diags.error(e.loc, "status() with a message: needs the VM");
             return {};
         }
         int code = static_cast<int>(e.args[0].value->int_value);
@@ -365,7 +373,7 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
         };
     }
 
-    diags.error(e.loc, "funcion nativa desconocida: '" + *fn + "'");
+    diags.error(e.loc, "unknown native function: '" + *fn + "'");
     return {};
 }
 
@@ -385,11 +393,6 @@ std::vector<std::string> pattern_params(const std::string& pattern) {
     return out;
 }
 
-const std::vector<std::string>& scalar_types() {
-    static const std::vector<std::string> v =
-        {"int", "long", "float", "double", "bool", "string"};
-    return v;
-}
 
 // The identifier of an asynchronous builtin is its index in the table; it is
 // looked up once so as not to depend on the order.
@@ -412,13 +415,29 @@ int async_ws_recv_id() {
 // bounds it to ~1000 resumptions/s per connection instead of as many as the
 // scheduler cares to give: no legitimate workload needs less than that.
 //
+// Upper-bounded too, not just floored: every call site immediately narrows
+// this into an `int` for SleepAwaitable::ms (task.hpp) --
+// `co_await lux::sleep(static_cast<int>(ms), ...)`. A ms value above
+// INT_MAX (trivially reachable: the language's own int is 64-bit, and a
+// route parameter or a hand-typed literal like `sleep(2147483648)` both
+// produce one) wrapped to a NEGATIVE 32-bit int on that cast -- and
+// SleepAwaitable::await_ready() treats ms <= 0 as "already elapsed",
+// resuming the coroutine WITHOUT EVER SUSPENDING. A loop of the exact
+// shape GUIDE.md's own SSE example uses (`while sse.open: await
+// sleep(every)`) with an out-of-range `every` therefore never actually
+// waits at all: confirmed against the real binary, a single request to
+// that exact example route with every=2147483648 produced over a MILLION
+// SSE events (27 MB) in 1.5 seconds instead of one every ~24 days -- the
+// same failure mode as `sleep(0)` in a tight loop (see the 1ms floor
+// above), just reached from the other end of the range instead of by
+// asking for "no wait" directly.
 long long clamp_sleep_ms(long long ms) {
-    return ms < 1 ? 1 : ms;
+    return std::clamp<long long>(ms, 1, std::numeric_limits<int>::max());
 }
 
 bool is_scalar(const std::string& t) {
-    const auto& v = scalar_types();
-    return std::find(v.begin(), v.end(), t) != v.end();
+    return t == "int" || t == "long" || t == "float" || t == "double" ||
+           t == "bool" || t == "string";
 }
 
 int async_db_query_id() { static const int id = native_id("__db_query"); return id; }
@@ -434,21 +453,15 @@ bool is_db_await(int id) {
            id == async_db_rollback_id() || id == async_db_last_id();
 }
 
-Value db_error(const std::string& msg) {
-    Value::Dict d;
-    d["error"] = Value::str(msg);
-    return Value::dict(std::move(d));
-}
-
 // Resolves a database suspension.
 //
 // The first argument is always the module name, which the emitter pushes.
-// An engine failure does not blow up the handler: it arrives as a value with
-// `error`, which the .lux can inspect or ignore.
+// A failure comes back as {"error": ...} (db_failed, db.hpp) and drive_vm
+// raises it at the `await`.
 //
 // Thin adapter over lux_script::await_db() (db.hpp/db.cpp) — the real
 // logic (resolving the driver/pool, deciding the pinned worker, invoking
-// DbAwaitable, updating pinned_workers/last_exec_workers) lives there,
+// DbAwaitable, updating pinned_workers/last_insert_ids) lives there,
 // shared with the code that generates a --native route for the same thing:
 // both paths run EXACTLY the same code, not a separate reproduction that
 // could silently diverge (the same class of bug that already caused two
@@ -477,7 +490,8 @@ lux::Task<Value> run_db(const VM::Result& r, int op, lux::Request& req,
     }
 
     Value v = co_await await_db(dbop, mod, req.loop, sql, std::move(params),
-                                ctx.pinned_workers, ctx.last_exec_workers);
+                                ctx.pinned_workers, ctx.last_insert_ids,
+                                ctx.poisoned_db);
     co_return v;
 }
 
@@ -506,27 +520,20 @@ lux::Task<Value> run_db(const VM::Result& r, int op, lux::Request& req,
 // memory-safe under that same contract, just worth calling out since
 // nothing else in the type system enforces it.
 //
-// Same error convention await_db() already established (see run_db()
-// above): a failure comes back as `{"error": message}` data the .lux can
-// inspect, never a hard fail() of the handler -- unlike this exact function
-// called SYNCHRONOUSLY (Op::CallBuiltinModule, vm.cpp), where a non-empty
-// `error` still means fail(). That is a deliberate difference, not an
-// inconsistency: is_async is an exclusive, checked-at-compile-time calling
-// convention (Emitter::check_call rejects both "is_async without await" and
-// "await on a plain function"), so a given function is reached through
-// exactly one of the two paths, never both, and each keeps the error
-// convention its callers already expect from that path (sqlite.query()'s
-// vs. a plain builtin's).
+// A failure is left in `error`, and drive_vm raises it at the `await`.
 lux::Task<Value> run_builtin_module_async(const VM::Result& r, lux::Request& req,
-                                            NativeCtx& ctx) {
+                                            NativeCtx& ctx, std::string& error) {
     const BuiltinModuleFn& fn = builtin_module_function_at(r.await_id);
     std::vector<Value> args = r.await_args;
     Value       out;
-    std::string error;
+    // io_blocking_pool(), not the default blocking_pool(): this is an
+    // is_async native module call (os.run(), http.*, a file read/write),
+    // blocked on a subprocess or a socket for as long as its own timeout
+    // allows -- not CPU-bound work. See io_blocking_pool()'s comment
+    // (blocking_pool.hpp) for the starvation this fixes.
     co_await lux::BlockingAwaitable{req.loop, [&] {
-        out = fn.fn(ctx, args, error);
-    }};
-    if (!error.empty()) co_return db_error(error);
+        out = fn.call(ctx, args, error);
+    }, &lux::io_blocking_pool()};
     co_return out;
 }
 
@@ -535,8 +542,67 @@ lux::Task<Value> run_builtin_module_async(const VM::Result& r, lux::Request& req
 // Without this, a `return` halfway through or an error would leave the
 // connection inside a transaction forever, and whoever took it from the pool
 // next would inherit that state.
-lux::Task<void> rollback_pendientes(NativeCtx& ctx, lux::Request& req) {
-    co_await rollback_pendientes_db(ctx.pinned_workers, req.loop);
+lux::Task<void> rollback_pending(NativeCtx& ctx, lux::Request& req) {
+    co_await rollback_pending_db(ctx.pinned_workers, req.loop);
+}
+
+// Runs the VM's suspend/resume loop: every time it stops on an `await`, the
+// real co_await happens here, on the engine, and the result is handed back.
+// Shared by http, ws and sse routes; `ws` is only set for a ws route (the one
+// place `await ws.recv()` can compile). Returns false if the client went away
+// mid-sleep -- by then any open transaction has already been rolled back and
+// the caller just stops.
+lux::Task<bool> drive_vm(VM& vm, VM::Result& result, lux::Request& req, NativeCtx& ctx,
+                         lux::WSConnection* ws = nullptr) {
+    while (result.status == VM::Status::Suspended) {
+        Value       produced = Value::null();
+        std::string failed;   // a module or database call that failed: raised at the await
+        if (result.await_is_module) {
+            produced = co_await run_builtin_module_async(result, req, ctx, failed);
+        }
+        else if (ws && result.await_id == async_ws_recv_id()) {
+            // The message enters the VM as the result of the `await`; null
+            // means the connection closed. Unsolicited Pongs (the shape most
+            // clients' own heartbeat uses -- RFC 6455 lets them arrive
+            // unasked, and WSState queues every one) are skipped: `await
+            // ws.recv()` returns application messages, and surfacing a Pong's
+            // (often empty) payload made every idle heartbeat look like a
+            // real message to the handler.
+            std::optional<lux::WSMessage> msg;
+            do {
+                msg = co_await ws->recv();
+            } while (msg && msg->is_pong());
+            if (msg && !msg->is_close()) produced = Value::str(msg->data);
+        }
+        else if (is_db_await(result.await_id)) {
+            produced = co_await run_db(result, result.await_id, req, ctx);
+            db_failed(produced, failed);
+        }
+        else if (result.await_id == async_sleep_id()) {
+            long long ms = result.await_args.empty() ? 0 : result.await_args[0].as_int();
+            co_await lux::sleep(static_cast<int>(clamp_sleep_ms(ms)), req.loop, req.cancel_token);
+            // sleep() wakes early if the client disconnects: stop, but an open
+            // transaction must not be abandoned -- the connection would stay
+            // pinned inside it and the next request on that worker would run
+            // silently inside it (see rollback_pending_db, db.hpp).
+            if (req.is_cancelled()) {
+                co_await rollback_pending(ctx, req);
+                co_return false;
+            }
+        }
+        result = failed.empty() ? vm.resume(std::move(produced), ctx)
+                                : vm.resume_error(std::move(failed), result.error_loc, ctx);
+    }
+    co_return true;
+}
+
+// "file:line:col" of a runtime error, or the route's own label if the VM has
+// no precise location.
+std::string error_at(const VM::Result& result, const std::string& where) {
+    return result.error_loc.file
+        ? *result.error_loc.file + ":" + std::to_string(result.error_loc.line) + ":" +
+          std::to_string(result.error_loc.col)
+        : where;
 }
 
 // ─── Classes ─────────────────────────────────────────────────────────────────
@@ -675,13 +741,7 @@ void build_classes(const Program& program, const FunctionSigs& fns,
         for (const auto& r : c.rules) {
             auto    chunk = std::make_shared<Chunk>();
             Emitter emitter(diags, &fns, &sigs, imports, nullptr, &enums);
-            size_t  antes = diags.size();
             if (!emitter.emit_condition(*r.condition, field_names, *chunk)) continue;
-            if (shadow_check_enabled()) {
-                DiagnosticBag shadow;
-                emitter.check_condition(*r.condition, field_names, *chunk, shadow);
-                shadow_compare("validate", diags, antes, shadow);
-            }
             info->rules.push_back({chunk, r.message});
         }
     }
@@ -698,7 +758,7 @@ void build_classes(const Program& program, const FunctionSigs& fns,
 
 // ─── Parameter binding ───────────────────────────────────────────────────────
 
-enum class BindKind { Path, Query, Body, File, FileList };
+enum class BindKind { Path, Query, Body, JsonBody, File, FileList };
 
 struct ParamBind {
     BindKind    kind = BindKind::Path;
@@ -756,82 +816,89 @@ bool coerce(const std::string& text, const std::string& type, Value& out) {
             return true;
         }
         if (type == "bool") {
-            if (text == "true"  || text == "1") { out = Value::boolean(true);  return true; }
-            if (text == "false" || text == "0") { out = Value::boolean(false); return true; }
+            // "on" is not a stylistic alternative to "true": it is the
+            // literal string value HTML sends for a checked <input
+            // type="checkbox"> with no explicit `value=` attribute (the
+            // common case -- <input type="checkbox" name="remember"> with
+            // nothing else), the same as "off" for one browsers occasionally
+            // do send explicitly (a hidden mirror field, some JS form
+            // libraries). A route declaring `bool remember` for the most
+            // ordinary HTML form Lux Script can receive used to 400
+            // unconditionally ("expected bool", "received": "on") for
+            // every submission where the box was checked.
+            if (text == "true"  || text == "1" || text == "on")  { out = Value::boolean(true);  return true; }
+            if (text == "false" || text == "0" || text == "off") { out = Value::boolean(false); return true; }
             return false;
         }
     } catch (...) { return false; }
     return false;
 }
 
-// Checks that a JSON value fits the field's declared type.
-// There is no conversion between families: a string in an int field is an
-// error, not an attempt to parse.
+// The class shapes the JSON body binder binds against, in the form
+// json_bind.hpp asks for: the fields of `ci` and of every class its fields
+// can reach, interned by address (index 0 is whichever class was asked for
+// first). A class that — through `?` and List fields — ends up holding
+// itself terminates the same way the tree walk always did: the recursion
+// happens while the body is being read, never while the shapes are built.
 //
-// It is deliberately strict: a "30" is not good enough where an int was
-// declared.  The body saying one thing and the class another is exactly what
-// validation exists to catch.
-//
-// Recursive for a List field (checked element by element) and for a nested
-// class field (checked field by field, against THAT class's own fields --
-// `nested_class` is the same shared_ptr ClassField::nested_class already
-// carries, resolved once in build_classes(), so this never has to look a
-// class name back up in a ClassTable it was not even given). A List of a
-// class recurses through both cases at once: `type` is List<Episode>, so
-// each element goes through the Class branch below with the SAME
-// `nested_class` (the list's element class, not a different one).
-bool value_matches(const Value& v, const Type& type,
-                   const std::shared_ptr<ClassInfo>& nested_class, Value& out) {
-    switch (type.kind()) {
-        case Type::Kind::String:
-            if (!v.is_str()) return false;
-            out = v;
-            return true;
-        case Type::Kind::Bool:
-            if (!v.is_bool()) return false;
-            out = v;
-            return true;
-        case Type::Kind::Int:
-            if (!v.is_int()) return false;
-            out = v;
-            return true;
-        case Type::Kind::Float:
-            if (!v.is_num()) return false;
-            out = Value::real(v.as_float());
-            return true;
-        case Type::Kind::List: {
-            if (!v.is_list()) return false;
-            Value::List result;
-            result.reserve(v.as_list().size());
-            for (const auto& elem : v.as_list()) {
-                Value ev;
-                if (!value_matches(elem, type.element(), nested_class, ev)) return false;
-                result.push_back(std::move(ev));
+// It is interned per request, on purpose, and never cached: a hot reload
+// swaps the whole ClassTable out under this function, and a cache keyed on
+// addresses would eventually hand a recycled ClassInfo's shape to a
+// different class. The whole thing is a handful of string_views and enums
+// per field — the parse dwarfs it.
+class ClassShapeTable final : public JsonShapeTable {
+public:
+    uint32_t intern(const ClassInfo& ci) {
+        auto [it, inserted] = index_.emplace(&ci, 0);
+        if (!inserted) return it->second;
+
+        // Claimed and RESERVED before the fields are walked: a self-reference
+        // re-enters intern() above and finds its own index waiting, and any
+        // nested class interned along the way grows the vector around the
+        // placeholder this class left at its own index.
+        const uint32_t idx = static_cast<uint32_t>(shapes_.size());
+        it->second = idx;
+        shapes_.emplace_back();
+
+        std::vector<JsonFieldSpec> fields;
+        fields.reserve(ci.fields.size());
+        for (const auto& f : ci.fields) {
+            JsonFieldSpec s;
+            s.name     = f.name;
+            s.optional = f.type.is_optional();
+            if (f.type.kind() == Type::Kind::List) {
+                s.is_list = true;
+                const Type& el = f.type.element();
+                s.kind = scalar_kind(el.kind());
+                if (el.kind() == Type::Kind::Class && f.nested_class)
+                    s.nested = intern(*f.nested_class);
+            } else {
+                s.kind = scalar_kind(f.type.kind());
+                if (f.type.kind() == Type::Kind::Class && f.nested_class)
+                    s.nested = intern(*f.nested_class);
             }
-            out = Value::list(std::move(result));
-            return true;
+            fields.push_back(std::move(s));
         }
-        case Type::Kind::Class: {
-            if (!v.is_dict() || !nested_class) return false;
-            Value::Dict result;
-            for (const auto& f : nested_class->fields) {
-                auto it = v.as_dict().find(f.name);
-                if (it == v.as_dict().end() || it->second.is_null()) {
-                    if (!f.type.is_optional()) return false;
-                    result[f.name] = Value::null();
-                    continue;
-                }
-                Value fv;
-                if (!value_matches(it->second, f.type, f.nested_class, fv)) return false;
-                result[f.name] = std::move(fv);
-            }
-            out = Value::dict(std::move(result));
-            return true;
-        }
-        default:
-            return false;
+        shapes_[idx] = std::move(fields);
+        return idx;
     }
-}
+
+    size_t               field_count(uint32_t cls) const override   { return shapes_[cls].size(); }
+    const JsonFieldSpec& field(uint32_t cls, size_t i) const override { return shapes_[cls][i]; }
+
+private:
+    static JsonScalar scalar_kind(Type::Kind k) {
+        switch (k) {
+            case Type::Kind::Bool:  return JsonScalar::Bool;
+            case Type::Kind::Int:   return JsonScalar::Int;
+            case Type::Kind::Float: return JsonScalar::Float;
+            default:                return JsonScalar::Str;
+        }
+    }
+
+    std::vector<std::vector<JsonFieldSpec>>        shapes_;
+    std::unordered_map<const ClassInfo*, uint32_t> index_;
+};
 
 // Validates the parameters against the pattern and produces the binding plan.
 bool bind_params(const RouteDecl& r, const ClassTable& classes,
@@ -875,6 +942,38 @@ bool bind_params(const RouteDecl& r, const ClassTable& classes,
             fb.name = p.name;
             fb.type = p.type.name;
             out.push_back(std::move(fb));
+            continue;
+        }
+
+        // `Json` binds to the whole request body too, but with no schema:
+        // the parameter is whatever `json.parse()` produces (object, array,
+        // string, number, bool, or null), unvalidated. For a body whose
+        // shape is not fixed (a webhook payload, a proxy passthrough) a
+        // `class` parameter is the wrong tool -- it demands a closed set of
+        // named fields, all of which the caller must send -- and before
+        // this there was no other typed way to accept "some JSON body" at
+        // all. Shares `seen_body`/`in_path`/GET-DELETE with the `class`
+        // case below: it is the same "one body per route" slot, just with
+        // a different (or no) shape check on what fills it.
+        if (p.type.name == "Json") {
+            if (in_path) {
+                diags.error(p.loc, "'" + p.name + "' is in the route pattern, "
+                                   "so it cannot be of type 'Json'");
+                ok = false;
+                continue;
+            }
+            if (seen_body) {
+                diags.error(p.loc, "there can only be one body parameter per route");
+                ok = false;
+                continue;
+            }
+            if (r.method == "GET" || r.method == "DELETE") {
+                diags.error(p.loc, "a route " + r.method + " takes no body");
+                ok = false;
+                continue;
+            }
+            seen_body = true;
+            out.push_back({BindKind::JsonBody, p.name, p.type.name, false, {}, nullptr});
             continue;
         }
 
@@ -960,58 +1059,66 @@ Action try_declarative(const RouteDecl& r, const std::string& tpl_dir) {
 
 // Builds the instance from the JSON body.
 //
+// The body is parsed straight into the class's shape (ClassShapeTable +
+// bind_json_class): each key is matched against the declared fields as it
+// arrives, unknown keys are skipped without building anything, and no
+// generic tree is ever built — that used to be a Dict per object and a
+// string per key, all of it walked and taken apart again right after.
+// The binder is deliberately as strict as the tree walk it replaced — no
+// conversion between families, a "30" is not an int — so every answer is
+// byte for byte the one the tree path gave.
+//
 // A missing required field, or one with the wrong type, or a broken validate
 // rule, is a 422 with the complete list of reasons: they are all reported at
 // once, not just the first.  The handler never runs.
+// `rules` false: the caller checks the validate: rules itself (--native
+// compiles them).
 bool bind_body(const ClassInfo& ci, const FunctionTable* fns,
                lux::Request& req, lux::Response& res,
-               NativeCtx& ctx, Value& out) {
-    Value body;
-    if (!Value::parse_json(req.body, body)) {
-        responder_error(res, 400, "invalid JSON");
-        return false;
-    }
-    if (!body.is_dict()) {
-        responder_error(res, 422, "Validacion fallida",
-                        {"the body must be a JSON object"});
-        return false;
+               NativeCtx& ctx, Value& out, bool rules = true) {
+    ClassShapeTable shapes;
+    const uint32_t  root = shapes.intern(ci);
+
+    JsonBound bound;
+    switch (bind_json_class(req.body, shapes, root, bound, /*build_instance=*/true)) {
+        case JsonBindError::InvalidJson:
+            responder_error(res, 400, "invalid JSON");
+            return false;
+        case JsonBindError::NotAnObject:
+            responder_error(res, 422, "Validation failed",
+                            {"the body must be a JSON object"});
+            return false;
+        default:
+            break;
     }
 
     std::vector<std::string> messages;
-    Value::Dict              fields;
-    std::vector<Value>       ordered;
-
-    for (const auto& f : ci.fields) {
-        auto it = body.as_dict().find(f.name);
-        if (it == body.as_dict().end() || it->second.is_null()) {
-            if (!f.type.is_optional()) messages.push_back(f.name + ": required");
-            fields[f.name] = Value::null();
-            ordered.push_back(Value::null());
-            continue;
-        }
-        Value v;
-        if (!value_matches(it->second, f.type, f.nested_class, v)) {
+    for (size_t i = 0; i < ci.fields.size(); ++i) {
+        if (bound.status[i] == JsonBindStatus::Missing) {
+            if (!ci.fields[i].type.is_optional())
+                messages.push_back(ci.fields[i].name + ": required");
+        } else if (bound.status[i] == JsonBindStatus::BadType) {
             // base_name(), not to_string(): --native's own equivalent
-            // message (native_gen.cpp's construir_clases(), CampoNativo::
-            // ortografia) has always used the bare spelling with no `?`
-            // suffix, and the native_route_shadow suite compares the two
-            // byte for byte -- a class with a List<X>/nested-class field
-            // never reaches --native's version of this message at all (see
-            // class_field_type_ok()'s comment), so this only has to agree
-            // with native_gen.cpp for the scalar/optional-scalar case,
-            // which base_name() does exactly.
-            messages.push_back(f.name + ": expected " + f.type.base_name());
-            fields[f.name] = Value::null();
-            ordered.push_back(Value::null());
-            continue;
+            // message (native_gen.cpp's codigo_bind_cuerpo) has always used
+            // the bare spelling with no `?` suffix, and the
+            // native_route_shadow suite compares the two byte for byte.
+            messages.push_back(ci.fields[i].name + ": expected " +
+                               ci.fields[i].type.base_name());
         }
-        fields[f.name] = v;
-        ordered.push_back(std::move(v));
+    }
+
+    // The values for the rules, in declaration order -- the same values the
+    // instance carries, and the same order the rule chunks expect their
+    // locals in.
+    std::vector<Value> ordered;
+    if (messages.empty() && rules && !ci.rules.empty()) {
+        ordered.reserve(ci.fields.size());
+        for (const auto& field : bound.instance.as_dict()) ordered.push_back(field.second);
     }
 
     // The rules only run if the fields are sound: evaluating them over missing
     // values would give type errors instead of the useful message.
-    if (messages.empty()) {
+    if (messages.empty() && rules) {
         thread_local VM rule_vm;
         for (const auto& rule : ci.rules) {
             VM::Result r = rule_vm.start(*rule.chunk, ordered, ctx, fns);
@@ -1027,11 +1134,11 @@ bool bind_body(const ClassInfo& ci, const FunctionTable* fns,
     if (!messages.empty()) {
         // They are left within reach of this same request's `on error 422`.
         last_validation_messages() = messages;
-        responder_error(res, 422, "Validacion fallida", messages);
+        responder_error(res, 422, "Validation failed", messages);
         return false;
     }
 
-    out = Value::dict(std::move(fields));
+    out = std::move(bound.instance);
     return true;
 }
 
@@ -1051,11 +1158,15 @@ Value make_file_value(const lux::MultipartPart& part, size_t index) {
 
 bool prepare_args(const std::vector<ParamBind>& binds, const FunctionTable* fns,
                   lux::Request& req, lux::Response& res,
-                  NativeCtx& ctx, std::vector<Value>& out) {
+                  NativeCtx& ctx, std::vector<Value>& out, bool rules = true) {
     // They are cleared on entry: a 422 the handler writes by hand must not
     // inherit the messages of an earlier validation on this thread.
     last_validation_messages().clear();
     out.reserve(binds.size());
+
+    // Lazily parsed on first use inside the loop below -- see its comment.
+    std::optional<std::unordered_map<std::string, std::string>> form_data;
+
     for (const auto& b : binds) {
         if (b.kind == BindKind::File || b.kind == BindKind::FileList) {
             if (!ctx.uploads) {
@@ -1074,7 +1185,7 @@ bool prepare_args(const std::vector<ParamBind>& binds, const FunctionTable* fns,
                 continue;
             }
             if (matches.empty()) {
-                responder_error(res, 422, "Validacion fallida",
+                responder_error(res, 422, "Validation failed",
                                 {b.name + ": the file is missing"});
                 return false;
             }
@@ -1084,7 +1195,17 @@ bool prepare_args(const std::vector<ParamBind>& binds, const FunctionTable* fns,
 
         if (b.kind == BindKind::Body) {
             Value v;
-            if (!bind_body(*b.cls, fns, req, res, ctx, v)) return false;
+            if (!bind_body(*b.cls, fns, req, res, ctx, v, rules)) return false;
+            out.push_back(std::move(v));
+            continue;
+        }
+
+        if (b.kind == BindKind::JsonBody) {
+            Value v;
+            if (!Value::parse_json(req.body, v)) {
+                responder_error(res, 400, "invalid JSON");
+                return false;
+            }
             out.push_back(std::move(v));
             continue;
         }
@@ -1098,26 +1219,73 @@ bool prepare_args(const std::vector<ParamBind>& binds, const FunctionTable* fns,
         } else {
             auto it = req.query.find(b.name);
             if (it != req.query.end()) { raw = it->second; present = true; }
-            else if (ctx.uploads && ctx.parts) {
-                // A text field of a multipart form is one more part, just like a
-                // File, only without a filename.  This branch did not exist
-                // before: a scalar parameter on a route with a File always came
-                // out empty, with no error, because only the query string was read.
-                for (const auto& part : *ctx.parts) {
-                    if (part.name == b.name && part.filename.empty()) {
-                        raw = part.body; present = true; break;
+            else {
+                // A field of an application/x-www-form-urlencoded body is
+                // bound the same way a query param is -- this used to fall
+                // straight through to "absent" for every scalar parameter
+                // on a route whose client posted an HTML <form> without
+                // enctype="multipart/form-data" (the DEFAULT enctype: a
+                // plain `<form method=post>` sends urlencoded, not
+                // multipart), even though req.form() -- available to the
+                // handler by hand -- read that exact field correctly the
+                // whole time. Parsed at most once per request (not once per
+                // parameter): req.form() itself is cheap to call again (it
+                // returns {} immediately when the content-type does not
+                // match, never touching the body), but re-parsing the same
+                // urlencoded body on every one of a route's N scalar
+                // parameters was not.
+                if (!form_data) form_data = req.form();
+                auto fit = form_data->find(b.name);
+                if (fit != form_data->end()) { raw = fit->second; present = true; }
+                else if (ctx.uploads && ctx.parts) {
+                    // A text field of a multipart form is one more part, just like a
+                    // File, only without a filename.  This branch did not exist
+                    // before: a scalar parameter on a route with a File always came
+                    // out empty, with no error, because only the query string was read.
+                    for (const auto& part : *ctx.parts) {
+                        if (part.name == b.name && part.filename.empty()) {
+                            raw = std::string(part.body); present = true; break;
+                        }
                     }
                 }
             }
             if (!present && b.has_default) { raw = b.default_text; present = true; }
+            // An HTML <input type="number"> (or <input type="date">, etc.)
+            // left blank submits its name with an EMPTY value
+            // (`?page=`), not omitted entirely -- indistinguishable from
+            // "present" above. For a non-string type that empty text can
+            // never coerce (there is no valid int/float/bool spelled ""),
+            // so a route declaring `int page = 1` 400'd on the single most
+            // common way a number field reaches "no value entered": a
+            // client leaving it blank, exactly the case `= 1` exists to
+            // paper over. `string` is deliberately excluded: an empty
+            // string IS a valid string value (`?q=` legitimately means
+            // "search for nothing"), so only the actually-uncoercible
+            // types fall back here.
+            if (present && raw.empty() && b.type != "string" && b.has_default) {
+                raw = b.default_text;
+            }
         }
 
         Value v;
         if (!present) {
-            if      (b.type == "string") v = Value::str("");
-            else if (b.type == "bool")   v = Value::boolean(false);
-            else if (b.type == "float" || b.type == "double") v = Value::real(0);
-            else                         v = Value::integer(0);
+            // Genuinely absent: no value in the query/path/multipart AND no
+            // `= default` in the signature (that case already turned into
+            // `present = true` above, with `raw` set to the default text).
+            // This used to fill in the type's zero value (""/false/0)
+            // instead, silently -- the exact same "missing" a File field or
+            // a class body field already turns into a 422 for, minus the
+            // 422. A route like `post endpoint("/login", string name)`
+            // called with NO `name` at all logged the user in as "" rather
+            // than rejecting the request: GUIDE.md's own parameter table
+            // says "A name that does not appear [in the pattern] -> Query
+            // string" with no mention of it being optional by default, and
+            // `= value` is presented as the ONLY way to make one optional
+            // ("Default value if missing from the query") -- so a
+            // parameter with no `=` was always meant to be required, the
+            // same as a class field with no `?`.
+            responder_error(res, 422, "Validation failed", {b.name + ": required"});
+            return false;
         } else if (!coerce(raw, b.type, v)) {
             Value::Dict d;
             d["error"]    = Value::str("invalid parameter");
@@ -1234,6 +1402,7 @@ std::string build_openapi(const Program& program, const ClassTable& classes) {
     for (const auto& r : program.routes) {
         // Streaming routes do not fit OpenAPI 3.0: they are advertised as GET
         // with the response they really return, without faking a schema.
+        if (r.method == "EVERY") continue;   // a scheduled task, not an endpoint
         std::string method = r.method;
         if (method == "SSE" || method == "WS") method = "GET";
         if (method == "*")                     method = "get";
@@ -1243,8 +1412,10 @@ std::string build_openapi(const Program& program, const ClassTable& classes) {
         Value::List params;
         std::string body_class;
 
+        bool json_body = false;
         for (const auto& p : r.params) {
             if (classes.count(p.type.name)) { body_class = p.type.name; continue; }
+            if (p.type.name == "Json") { json_body = true; continue; }
             if (p.type.name == "File" ||
                 (p.type.name == "List" && !p.type.args.empty() &&
                  p.type.args[0].name == "File")) {
@@ -1271,6 +1442,15 @@ std::string build_openapi(const Program& program, const ClassTable& classes) {
                 {"content",  jobj({{"multipart/form-data",
                                     jobj({{"schema", jobj({{"type", jstr("object")}})}})}})},
             });
+        } else if (json_body) {
+            // No fixed schema to $ref: `Json` accepts any JSON document, so
+            // the OpenAPI schema is deliberately empty (`{}`, OpenAPI's own
+            // spelling of "any value") rather than guessing `object`, which
+            // would wrongly reject a top-level array/string/number body.
+            op["requestBody"] = jobj({
+                {"required", Value::boolean(true)},
+                {"content",  jobj({{"application/json", jobj({{"schema", jobj({})}})}})},
+            });
         } else if (!body_class.empty()) {
             op["requestBody"] = jobj({
                 {"required", Value::boolean(true)},
@@ -1295,7 +1475,7 @@ std::string build_openapi(const Program& program, const ClassTable& classes) {
         }
         // Only the codes the server really produces are declared.
         if (!body_class.empty() && body_class != "__multipart")
-            responses["422"] = jobj({{"description", jstr("Validacion fallida")}});
+            responses["422"] = jobj({{"description", jstr("Validation failed")}});
         if (!r.guards.empty())
             responses["403"] = jobj({{"description", jstr("Group guard not passed")}});
 
@@ -1350,7 +1530,7 @@ FnSig make_sig(size_t index, const std::vector<Param>& params, const TypeRef& re
               DiagnosticBag& diags) {
     FnSig sig;
     sig.index    = index;
-    sig.devuelve = Type::from_declared(return_type);
+    sig.return_type = Type::from_declared(return_type);
     if (mentions_response_type(return_type))
         diags.error(return_type.loc,
             "'Response' cannot be used as a return type: there is no response value to "
@@ -1437,25 +1617,13 @@ void emit_class_bodies(Module& mod, const ClassSigs& classes, const FunctionSigs
             auto ms = sig.methods.find(m.name);
             if (ms == sig.methods.end()) continue;
             Emitter emitter(diags, &fns, &classes, imports, nullptr, &enums);
-            size_t  antes = diags.size();
             emitter.emit_method(c.name, m, *mod.functions[ms->second.index]);
-            if (shadow_check_enabled()) {
-                DiagnosticBag shadow;
-                emitter.check_method(c.name, m, *mod.functions[ms->second.index], shadow);
-                shadow_compare(("metodo " + c.name + "." + m.name).c_str(), diags, antes, shadow);
-            }
         }
         for (const auto& ct : c.ctors) {
             auto cs = sig.ctors.find(ct.params.size());
             if (cs == sig.ctors.end()) continue;
             Emitter emitter(diags, &fns, &classes, imports, nullptr, &enums);
-            size_t  antes = diags.size();
             emitter.emit_ctor(c.name, sig.fields, ct, *mod.functions[cs->second]);
-            if (shadow_check_enabled()) {
-                DiagnosticBag shadow;
-                emitter.check_ctor(c.name, sig.fields, ct, *mod.functions[cs->second], shadow);
-                shadow_compare(("constructor " + c.name).c_str(), diags, antes, shadow);
-            }
         }
 
         // The implicit constructor: a synthetic CtorDecl with one parameter per
@@ -1473,16 +1641,8 @@ void emit_class_bodies(Module& mod, const ClassSigs& classes, const FunctionSigs
             auto cs = sig.ctors.find(c.fields.size());
             if (cs != sig.ctors.end()) {
                 Emitter emitter(diags, &fns, &classes, imports, nullptr, &enums);
-                size_t  antes = diags.size();
                 emitter.emit_ctor(c.name, sig.fields, implicito,
                                   *mod.functions[cs->second]);
-                if (shadow_check_enabled()) {
-                    DiagnosticBag shadow;
-                    emitter.check_ctor(c.name, sig.fields, implicito, *mod.functions[cs->second],
-                                       shadow);
-                    shadow_compare(("constructor implicito " + c.name).c_str(), diags, antes,
-                                    shadow);
-                }
             }
         }
     }
@@ -1493,7 +1653,7 @@ FunctionSigs build_function_signatures(Module& mod, DiagnosticBag& diags) {
 
     for (const auto& f : mod.program.functions) {
         if (native_id(f.name) >= 0) {
-            diags.error(f.loc, "'" + f.name + "' es un builtin: elige otro name");
+            diags.error(f.loc, "'" + f.name + "' is a builtin: choose another name");
             continue;
         }
         if (index.count(f.name)) continue;   // the parser already reported the duplicate
@@ -1583,13 +1743,7 @@ void emit_function_bodies(Module& mod, const FunctionSigs& fns, const ClassSigs&
         auto it = fns.find(f.name);
         if (it == fns.end()) continue;
         Emitter emitter(diags, &fns, &classes, &mod.program.imports, nullptr, &enums);
-        size_t  antes = diags.size();
         emitter.emit_function(f, *mod.functions[it->second.index]);
-        if (shadow_check_enabled()) {
-            DiagnosticBag shadow;
-            emitter.check_function(f, *mod.functions[it->second.index], shadow);
-            shadow_compare(("funcion " + f.name).c_str(), diags, antes, shadow);
-        }
     }
 }
 
@@ -1601,15 +1755,54 @@ void build_error_handlers(Module& mod, const FunctionSigs& fns,
     for (const auto& e : mod.program.errors) {
         auto    chunk = std::make_shared<Chunk>();
         Emitter emitter(diags, &fns, &sigs, &mod.program.imports, &pctx, &enums);
-        size_t  antes = diags.size();
         if (!emitter.emit_error_handler(e, *chunk)) continue;
-        if (shadow_check_enabled()) {
-            DiagnosticBag shadow;
-            emitter.check_error_handler(e, *chunk, shadow);
-            shadow_compare(("on error " + std::to_string(e.code)).c_str(), diags, antes, shadow);
-        }
         mod.error_handlers[e.code] = std::move(chunk);
     }
+}
+
+// A ws or sse route answers its client -- the 101, or the stream's headers --
+// before its body runs, so a group guard compiled into that body could only
+// fail too late: a bad token got a socket that closed at once, never the
+// guard's 401. The guards alone, compiled as a plain route with an empty body,
+// run first against the ordinary request (guards_pass); the stream opens only
+// if none of them answered. They stay in the body too, where they now pass.
+bool compile_guards(const RouteDecl& r, Emitter& emitter, std::shared_ptr<Chunk>& out) {
+    if (r.guards.empty()) return true;
+    RouteDecl g;
+    g.method      = "GET";
+    g.pattern     = r.pattern;
+    // Without defaults (not copyable, and not needed: the arguments the
+    // guards see are already bound, defaults applied).
+    for (const auto& p : r.params) g.params.push_back(Param{p.type, p.name, nullptr, p.loc});
+    g.guards      = r.guards;
+    g.loc         = r.loc;
+    g.pattern_loc = r.pattern_loc;
+    out = std::make_shared<Chunk>();
+    return emitter.emit_route(g, *out);
+}
+
+lux::Task<bool> guards_pass(const Chunk* guards, const std::vector<Value>& args,
+                            const AuthConfig& auth, const FunctionTable* fn_table,
+                            const NativeDispatch& native_table, const std::vector<Template>* tpl_table,
+                            const std::string& where, lux::Request& req, lux::Response& res) {
+    if (!guards) co_return true;
+    NativeCtx ctx{req, res};
+    ctx.templates = tpl_table;
+    ctx.functions = fn_table;
+    SessionState session;
+    Value        claims = Value::dict();
+    begin_auth(auth, req, session, claims, ctx);
+    VM         vm;
+    VM::Result result = vm.start(*guards, args, ctx, fn_table, &native_table);
+    if (!co_await drive_vm(vm, result, req, ctx)) co_return false;
+    if (result.status == VM::Status::Error) {
+        lux::log().error(error_at(result, where) + ": " + result.error);
+        Value::Dict d;
+        d["error"] = Value::str("Internal Server Error");
+        responder(res, 500, Value::dict(std::move(d)));
+        co_return false;
+    }
+    co_return !ctx.response_written;
 }
 
 void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth,
@@ -1629,7 +1822,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 
     // Context the emitters need to compile the templates they find in a
     // render().
-    TemplateCtx pctx{mod.program.app.templates_dir, &mod.templates};
+    TemplateCtx pctx{mod.program.app.templates_dir, &mod.templates, &mod.template_keys};
 
     for (size_t ridx = 0; ridx < mod.program.routes.size(); ++ridx) {
         const auto& r = mod.program.routes[ridx];
@@ -1651,7 +1844,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
             if (!bind_params(r, classes, ws_binds, diags)) continue;
             bool body_param = false;
             for (const auto& b : ws_binds)
-                if (b.kind == BindKind::Body) body_param = true;
+                if (b.kind == BindKind::Body || b.kind == BindKind::JsonBody) body_param = true;
             if (body_param) {
                 diags.error(r.loc, "a ws route takes no body");
                 continue;
@@ -1659,13 +1852,9 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 
             auto    ws_chunk = std::make_shared<Chunk>();
             Emitter ws_emitter(diags, &fns, &sigs, &mod.program.imports, &pctx);
-            size_t  antes = diags.size();
             if (!ws_emitter.emit_route(r, *ws_chunk)) continue;
-            if (shadow_check_enabled()) {
-                DiagnosticBag shadow;
-                ws_emitter.check_route(r, *ws_chunk, shadow);
-                shadow_compare(("ws " + r.pattern).c_str(), diags, antes, shadow);
-            }
+            std::shared_ptr<Chunk> ws_guards;
+            if (!compile_guards(r, ws_emitter, ws_guards)) continue;
 
             ++mod.vm_routes;
             std::string ws_where = "WS " + r.pattern;
@@ -1674,10 +1863,54 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 
             mod.route_report.push_back({r.method, r.pattern, "ws"});
             mod.router.add_internal("GET", r.pattern,
-                lux::App::make_ws_handler(
-                    [ws_chunk, ws_binds, ws_where, auth, fn_table, native_table, tpl_table]
-                    (lux::WSConnection conn, lux::Request& req,
-                     lux::Response& res) -> lux::Task<void> {
+                // Parameters are validated BEFORE the RFC 6455 handshake,
+                // not inside it: make_ws_handler() below writes the 101
+                // Switching Protocols response the instant it runs, and
+                // once that is on the wire there is no way to instead
+                // answer a 400/422 for a missing or malformed query
+                // parameter -- the connection is already a WebSocket as
+                // far as the client is concerned. Confirmed against the
+                // real binary: a ws route with a required string parameter
+                // and no value supplied upgraded to 101 and then just sat
+                // there silently forever (prepare_args() failed and
+                // co_returned only AFTER the handshake already ran) --
+                // indistinguishable, from the client's side, from a server
+                // that accepted the connection and simply has nothing to
+                // say. This outer handler runs prepare_args() first,
+                // against the ordinary HTTP request/response pair (a
+                // failure here writes a normal 400/422 exactly like any
+                // other route), and only calls into make_ws_handler()'s
+                // upgrade logic -- with the already-validated args moved
+                // in -- once that succeeds.
+                //
+                // This does mean the Origin allowlist check (inside
+                // make_ws_handler itself) now runs AFTER parameter
+                // validation instead of before it, where it used to run
+                // first. Weighed deliberately, not missed: coerce()'ing a
+                // handful of scalar query params is in-memory, side-
+                // effect-free, and no slower than the query-string parsing
+                // every request already does regardless of origin, so a
+                // disallowed origin cannot use this to make the server do
+                // meaningfully more work than before it is rejected; and
+                // the 422 it gets back names a parameter the request it
+                // just sent already had to be built around, not something
+                // origin-gating was ever hiding from it. Swapping the two
+                // checks to preserve the old order would need
+                // make_ws_handler's origin logic duplicated or factored out
+                // on its own -- not worth it for a difference this small.
+                [ws_chunk, ws_guards, ws_binds, ws_where, auth, fn_table, native_table, tpl_table,
+                 opts](lux::Request& req, lux::Response& res) -> lux::Task<void> {
+                    NativeCtx           pre_ctx{req, res};
+                    std::vector<Value>  args;
+                    if (!prepare_args(ws_binds, fn_table, req, res, pre_ctx, args)) co_return;
+                    if (!co_await guards_pass(ws_guards.get(), args, auth, fn_table, native_table,
+                                              tpl_table, ws_where, req, res)) co_return;
+
+                    co_await lux::App::make_ws_handler(
+                        [ws_chunk, ws_where, auth, fn_table, native_table, tpl_table,
+                         args = std::move(args)]
+                        (lux::WSConnection conn, lux::Request& req,
+                         lux::Response& res) mutable -> lux::Task<void> {
                         NativeCtx    ctx{req, res};
                 ctx.templates = tpl_table;
                 ctx.functions  = fn_table;
@@ -1687,51 +1920,28 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                         ctx.ws              = &conn;
                         ctx.response_written = true;   // the upgrade already replied
 
-                        std::vector<Value> args;
-                        if (!prepare_args(ws_binds, fn_table, req, res, ctx, args)) co_return;
-
                         VM         vm;
                         VM::Result result = vm.start(*ws_chunk, std::move(args), ctx, fn_table, &native_table);
 
-                        while (result.status == VM::Status::Suspended) {
-                            Value produced = Value::null();
+                        if (!co_await drive_vm(vm, result, req, ctx, &conn)) co_return;
 
-                            if (result.await_is_module) {
-                                produced = co_await run_builtin_module_async(result, req, ctx);
-                            }
-                            else if (result.await_id == async_ws_recv_id()) {
-                                // First suspension that returns a value: the
-                                // message enters the VM as the result of the
-                                // `await`.  null means the connection closed.
-                                auto msg = co_await conn.recv();
-                                if (msg && !msg->is_close())
-                                    produced = Value::str(msg->data);
-                            }
-                            else if (is_db_await(result.await_id)) {
-                                produced = co_await run_db(result, result.await_id,
-                                                           req, ctx);
-                            }
-                            else if (result.await_id == async_sleep_id()) {
-                                long long ms = result.await_args.empty()
-                                             ? 0 : result.await_args[0].as_int();
-                                ms = clamp_sleep_ms(ms);
-                                co_await lux::sleep(static_cast<int>(ms));
-                                if (req.is_cancelled()) co_return;
-                            }
+                        // See the identical comment on the sse route below:
+                        // this is the only place left that can close a
+                        // transaction the handler opened and never closed
+                        // itself, on EITHER a normal end (Done) or an error.
+                        co_await rollback_pending(ctx, req);
 
-                            result = vm.resume(std::move(produced), ctx);
-                        }
-
-                        if (result.status == VM::Status::Error) {
-                            std::string at = result.error_loc.file
-                                ? *result.error_loc.file + ":" +
-                                  std::to_string(result.error_loc.line) + ":" +
-                                  std::to_string(result.error_loc.col)
-                                : ws_where;
-                            lux::log().error(at + ": " + result.error);
-                        }
-                    },
-                    std::move(opts)));
+                        if (result.status == VM::Status::Error)
+                            lux::log().error(error_at(result, ws_where) + ": " + result.error);
+                        },
+                        opts)(req, res);   // opts is copied, not moved: this whole
+                                           // outer handler (and its captured opts)
+                                           // is invoked once per incoming WS
+                                           // request, not once ever -- moving it
+                                           // would leave every connection after
+                                           // the first with an empty allowlist.
+                },
+                /*head_alias=*/false);
             continue;
         }
 
@@ -1742,7 +1952,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
             std::vector<ParamBind> sse_binds;
             if (!bind_params(r, classes, sse_binds, diags)) continue;
             for (const auto& b : sse_binds) {
-                if (b.kind == BindKind::Body) {
+                if (b.kind == BindKind::Body || b.kind == BindKind::JsonBody) {
                     diags.error(r.loc, "an sse route takes no body");
                     break;
                 }
@@ -1750,19 +1960,15 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 
             auto    sse_chunk = std::make_shared<Chunk>();
             Emitter sse_emitter(diags, &fns, &sigs, &mod.program.imports, &pctx);
-            size_t  antes = diags.size();
             if (!sse_emitter.emit_route(r, *sse_chunk)) continue;
-            if (shadow_check_enabled()) {
-                DiagnosticBag shadow;
-                sse_emitter.check_route(r, *sse_chunk, shadow);
-                shadow_compare(("sse " + r.pattern).c_str(), diags, antes, shadow);
-            }
+            std::shared_ptr<Chunk> sse_guards;
+            if (!compile_guards(r, sse_emitter, sse_guards)) continue;
 
             ++mod.vm_routes;
             std::string sse_where = "SSE " + r.pattern;
             mod.route_report.push_back({r.method, r.pattern, "sse"});
             mod.router.add_internal("GET", r.pattern,
-                [sse_chunk, sse_binds, sse_where, auth, fn_table, native_table, tpl_table](lux::Request& req,
+                [sse_chunk, sse_guards, sse_binds, sse_where, auth, fn_table, native_table, tpl_table](lux::Request& req,
                                                         lux::Response& res)
                     -> lux::Task<void> {
                     NativeCtx    ctx{req, res};
@@ -1774,6 +1980,8 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 
                     std::vector<Value> args;
                     if (!prepare_args(sse_binds, fn_table, req, res, ctx, args)) co_return;
+                    if (!co_await guards_pass(sse_guards.get(), args, auth, fn_table, native_table,
+                                              tpl_table, sse_where, req, res)) co_return;
 
                     // make_sse already writes the stream headers, so the
                     // response counts as sent from this point on.
@@ -1784,33 +1992,24 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                     VM         vm;
                     VM::Result result = vm.start(*sse_chunk, std::move(args), ctx, fn_table, &native_table);
 
-                    while (result.status == VM::Status::Suspended) {
-                        Value produced = Value::null();
-                        if (result.await_is_module) {
-                            produced = co_await run_builtin_module_async(result, req, ctx);
-                        }
-                        else if (is_db_await(result.await_id)) {
-                            produced = co_await run_db(result, result.await_id, req, ctx);
-                        }
-                        else if (result.await_id == async_sleep_id()) {
-                            long long ms = result.await_args.empty()
-                                         ? 0 : result.await_args[0].as_int();
-                            ms = clamp_sleep_ms(ms);
-                            co_await lux::sleep(static_cast<int>(ms));
-                            if (req.is_cancelled()) co_return;
-                        }
-                        result = vm.resume(std::move(produced), ctx);
-                    }
+                    if (!co_await drive_vm(vm, result, req, ctx)) co_return;
 
-                    if (result.status == VM::Status::Error) {
-                        std::string at = result.error_loc.file
-                            ? *result.error_loc.file + ":" +
-                              std::to_string(result.error_loc.line) + ":" +
-                              std::to_string(result.error_loc.col)
-                            : sse_where;
-                        lux::log().error(at + ": " + result.error);
-                    }
-                });
+                    // Every OTHER exit from an sse route runs through here --
+                    // the stream ending normally (Done) or the handler
+                    // erroring out (Error) -- and neither one had ANY
+                    // rollback at all before this: a `sqlite.begin()` with no
+                    // matching commit()/rollback() (by design, on error, or
+                    // just a bug in the handler) left that connection pinned
+                    // with an open transaction for the rest of the process's
+                    // life, since sse routes have no later point that could
+                    // call it. Same reasoning as ws above and as the bytecode
+                    // HTTP route below.
+                    co_await rollback_pending(ctx, req);
+
+                    if (result.status == VM::Status::Error)
+                        lux::log().error(error_at(result, sse_where) + ": " + result.error);
+                },
+                /*head_alias=*/false);
             continue;
         }
 
@@ -1851,6 +2050,8 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
         // never fail here if it already passed there.
         std::vector<ParamBind> binds;
         if (!bind_params(r, classes, binds, diags)) continue;
+        if (mod.native_binds)
+            (*static_cast<std::vector<std::vector<ParamBind>>*>(mod.native_binds.get()))[ridx] = binds;
 
         // Nivel 1.5: ruta compilada nativamente (Fase 4/5, --native). Mismo
         // criterio de "todo o nada" que una funcion: generate_native_route()
@@ -1869,6 +2070,17 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
         // con Handler (ver types.hpp), asi que se registra directa, sin
         // ningun envoltorio: envolverla en otra corrutina que la
         // co_await-ara solo anadiria un frame sin necesidad.
+        // A native route's render() finds its template by key (see
+        // TemplateCtx::by_key): emitting the route compiles them, with the
+        // same diagnostics bytecode gives; the chunk itself is dropped.
+        const bool es_nativa = mod.native &&
+            ((ridx < mod.native->rutas_async_por_indice.size() && mod.native->rutas_async_por_indice[ridx]) ||
+             (ridx < mod.native->rutas_por_indice.size() && mod.native->rutas_por_indice[ridx]));
+        if (es_nativa) {
+            Chunk   scratch;
+            Emitter emitter(diags, &fns, &sigs, &mod.program.imports, &pctx, &enums);
+            if (!emitter.emit_route(r, scratch)) continue;
+        }
         if (mod.native && ridx < mod.native->rutas_async_por_indice.size() &&
             mod.native->rutas_async_por_indice[ridx]) {
             ++mod.vm_routes;
@@ -1881,17 +2093,24 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
             auto fn = mod.native->rutas_por_indice[ridx];
             ++mod.vm_routes; // cuenta como ruta con logica, aunque no pase por el VM
             mod.route_report.push_back({r.method, r.pattern, "native"});
+            auto cost = std::make_shared<RunCost>();
             mod.router.add_internal(r.method, r.pattern,
-                [fn](lux::Request& req, lux::Response& res) -> lux::Task<void> {
+                [fn, cost](lux::Request& req, lux::Response& res) -> lux::Task<void> {
                     // No `await` anywhere in this route (that is exactly what
                     // landed it in rutas_por_indice instead of
                     // rutas_async_por_indice above): its whole body runs to
-                    // completion in one call, so it is safe to hand the
-                    // entire thing to the shared blocking pool instead of
-                    // running it inline and stalling this connection's event
-                    // loop -- and everyone else queued behind it -- for
-                    // however long it takes. See blocking_pool.hpp.
-                    co_await lux::BlockingAwaitable{req.loop, [&] { fn(req, res); }};
+                    // completion in one call, on the pool or, once known to
+                    // be cheap, inline. See RunCost and blocking_pool.hpp.
+                    if (cost->cheap()) { cost->timed([&] { fn(req, res); }); co_return; }
+                    // The validation messages an `on error` handler reads are
+                    // thread_local: filled on the pool thread, they are
+                    // carried back to this one.
+                    std::vector<std::string> messages;
+                    co_await lux::BlockingAwaitable{req.loop, [&] {
+                        cost->timed([&] { fn(req, res); });
+                        messages = last_validation_messages();
+                    }};
+                    last_validation_messages() = std::move(messages);
                 });
             continue;
         }
@@ -1899,13 +2118,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
         // Nivel 2: ruta con logica → bytecode sobre el VM.
         auto    chunk = std::make_shared<Chunk>();
         Emitter emitter(diags, &fns, &sigs, &mod.program.imports, &pctx, &enums);
-        size_t  antes = diags.size();
         if (!emitter.emit_route(r, *chunk)) continue;
-        if (shadow_check_enabled()) {
-            DiagnosticBag shadow;
-            emitter.check_route(r, *chunk, shadow);
-            shadow_compare((r.method + " " + r.pattern).c_str(), diags, antes, shadow);
-        }
 
         // A route is never itself called from elsewhere, so unlike
         // mod.functions (propagate_has_await(), already run by the time
@@ -1920,9 +2133,12 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                 needs_upload = true;
 
         std::string where = r.method + " " + r.pattern;
-        mod.route_report.push_back({r.method, r.pattern, "bytecode"});
+        mod.route_report.push_back({r.method, r.pattern,
+            ridx < mod.native_why.rutas.size() && !mod.native_why.rutas[ridx].empty()
+                ? "bytecode (" + mod.native_why.rutas[ridx] + ")" : "bytecode"});
+        auto cost = std::make_shared<RunCost>();
         mod.router.add_internal(r.method, r.pattern,
-            [chunk, binds, where, auth, needs_upload, fn_table, native_table, tpl_table](lux::Request& req, lux::Response& res)
+            [chunk, binds, where, auth, needs_upload, fn_table, native_table, tpl_table, cost](lux::Request& req, lux::Response& res)
                 -> lux::Task<void> {
                 NativeCtx    ctx{req, res};
                 ctx.templates = tpl_table;
@@ -1969,55 +2185,42 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                     // worker" here rather than "one per event loop" -- same
                     // amortization, just relative to whichever thread pool
                     // actually runs it.
-                    co_await lux::BlockingAwaitable{req.loop, [&] {
-                        result = shared_vm.start(*chunk, std::move(args), ctx, fn_table, &native_table);
-                    }};
+                    auto run = [&] {
+                        cost->timed([&] { result = shared_vm.start(*chunk, std::move(args), ctx, fn_table, &native_table); });
+                    };
+                    if (cost->cheap()) run();   // see RunCost
+                    else co_await lux::BlockingAwaitable{req.loop, run};
                 }
 
-                // The VM does not know how to wait: every time it stops, the real
-                // co_await happens here, on the engine, and the result is handed
-                // back to it.
-                while (result.status == VM::Status::Suspended) {
-                    Value produced = Value::null();
-
-                    if (result.await_is_module) {
-                        produced = co_await run_builtin_module_async(result, req, ctx);
-                    }
-                    else if (is_db_await(result.await_id)) {
-                        produced = co_await run_db(result, result.await_id, req, ctx);
-                    }
-                    else if (result.await_id == async_sleep_id()) {
-                        long long ms = result.await_args.empty()
-                                     ? 0 : result.await_args[0].as_int();
-                        ms = clamp_sleep_ms(ms);
-                        co_await lux::sleep(static_cast<int>(ms));
-                        // sleep() wakes early if the client disconnects; in that
-                        // case there is no point in carrying on.
-                        if (req.is_cancelled()) co_return;
-                    }
-
-                    // Only the has_await branch above can ever reach this
-                    // loop (the other one is guaranteed Done/Error, never
-                    // Suspended), so own_vm -- not shared_vm -- is the one
-                    // whose frame is actually live across this suspension.
-                    result = own_vm.resume(std::move(produced), ctx);
-                }
+                // Only the has_await branch can suspend, so own_vm -- not
+                // shared_vm -- is the one whose frame is live across it.
+                if (!co_await drive_vm(own_vm, result, req, ctx)) co_return;
 
                 if (result.status == VM::Status::Error) {
-                    std::string at = result.error_loc.file
-                        ? *result.error_loc.file + ":" +
-                          std::to_string(result.error_loc.line) + ":" +
-                          std::to_string(result.error_loc.col)
-                        : where;
+                    std::string at = error_at(result, where);
                     lux::log().error(at + ": " + result.error);
+                    // The 500 below ends the request without ever reaching
+                    // the rollback_pending() call a few lines down (that
+                    // one only runs on success) -- a runtime error INSIDE a
+                    // transaction (the exact case this branch exists for)
+                    // would otherwise leave the connection that opened it
+                    // pinned with the transaction still open, and the next
+                    // unrelated request routed to that same worker would run
+                    // silently inside it.
+                    co_await rollback_pending(ctx, req);
+                    last_internal_error() = result.error;
                     Value::Dict d;
-                    d["error"] = Value::str(result.error);
-                    d["en"]    = Value::str(at);
+                    if (is_production_mode()) {
+                        d["error"] = Value::str("Internal Server Error");
+                    } else {
+                        d["error"] = Value::str(result.error);
+                        d["at"]    = Value::str(at);
+                    }
                     responder(res, 500, Value::dict(std::move(d)));
                     co_return;
                 }
 
-                co_await rollback_pendientes(ctx, req);
+                co_await rollback_pending(ctx, req);
                 end_auth(auth, session, res);
 
                 if (ctx.response_written) co_return;
@@ -2029,6 +2232,12 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 }
 
 } // namespace
+
+bool prepare_native_args(const void* binds, size_t route, lux::Request& req, lux::Response& res,
+                         NativeCtx& ctx, std::vector<Value>& out, bool rules) {
+    const auto& all = *static_cast<const std::vector<std::vector<ParamBind>>*>(binds);
+    return prepare_args(all.at(route), ctx.functions, req, res, ctx, out, rules);
+}
 
 // ─── Compilation ─────────────────────────────────────────────────────────────
 
@@ -2062,6 +2271,52 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         parser.parse_into(mod->program);
     }
 
+    // A relative templates/static/database path in the `.lux` source is
+    // resolved against the DIRECTORY OF THAT SOURCE FILE, not the
+    // process's current working directory -- launching `lux
+    // /srv/blog/app.lux` from somewhere else entirely (a cron job, a
+    // systemd unit with no WorkingDirectory=, an IDE's own default cwd)
+    // used to make `templates "./templates"` fail to find anything
+    // ("template not found") and `sqlite: file "./blog.db"` silently
+    // open/create an EMPTY database in whatever directory the process
+    // happened to start in -- no error, just the app quietly acting as
+    // if every row it had ever written was gone. An already-absolute
+    // path (or one built from env(), which a deploy controls
+    // deliberately) is never touched. Runs once, right after parsing,
+    // before module activation reads `modules["sqlite"]["file"]` below
+    // or anything else reads `templates_dir`/a static mount's `fs_root`.
+    if (diags.empty() && mod->program.app.loc.file) {
+        fs::path base = fs::path(*mod->program.app.loc.file).parent_path();
+        auto resolve = [&](std::string& path) {
+            if (path.empty() || fs::path(path).is_absolute() || base.empty()) return;
+            // ":memory:" (SQLite's own convention for a private in-memory
+            // database, recognized by sqlite3_open() itself) and a
+            // "file:...?..." SQLite URI filename are not filesystem paths
+            // at all -- resolving either against `base` would corrupt it
+            // into a literal, on-disk file with that exact odd name.
+            if (path == ":memory:" || path.rfind("file:", 0) == 0) return;
+            path = (base / path).lexically_normal().string();
+        };
+        resolve(mod->program.app.templates_dir);
+        for (auto& m : mod->program.app.statics) resolve(m.fs_root);
+        auto sqlite_it = mod->program.app.modules.find("sqlite");
+        if (sqlite_it != mod->program.app.modules.end()) {
+            auto file_it = sqlite_it->second.find("file");
+            if (file_it != sqlite_it->second.end()) resolve(file_it->second);
+            // A `replicate` directory is a path like `file` (URLs are left alone).
+            auto rep_it = sqlite_it->second.find("replicate");
+            if (rep_it != sqlite_it->second.end()) {
+                std::string joined, line;
+                std::istringstream in(rep_it->second);
+                while (std::getline(in, line)) {
+                    if (line.find("://") == std::string::npos) resolve(line);
+                    joined += (joined.empty() ? "" : "\n") + line;
+                }
+                rep_it->second = joined;
+            }
+        }
+    }
+
     // Modules are checked before anything else: importing one this binary does
     // not carry, or using it unconfigured, has to be said plainly.
     if (diags.empty()) {
@@ -2072,7 +2327,7 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
                 auto it = mod->program.app.modules.find(m);
                 if (it == mod->program.app.modules.end()) {
                     diags.error(mod->program.app.loc,
-                                "'import " + m + "' without its '" + m + ":' en app:");
+                                "'import " + m + "' without its '" + m + ":' in app:");
                     continue;
                 }
                 std::string err;
@@ -2093,12 +2348,12 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
                     diags.error(mod->program.app.loc, err);
                 continue;
             }
-            auto disponibles = reg.available();
-            for (const auto& d : mod_reg.available()) disponibles.push_back(d);
+            auto available_mods = reg.available();
+            for (const auto& d : mod_reg.available()) available_mods.push_back(d);
             std::string list_;
-            for (const auto& d : disponibles) list_ += (list_.empty() ? "" : ", ") + d;
+            for (const auto& d : available_mods) list_ += (list_.empty() ? "" : ", ") + d;
             diags.error({}, "module '" + m + "' is not compiled into this binary" +
-                            (list_.empty() ? "" : "; disponibles: " + list_));
+                            (list_.empty() ? "" : "; available: " + list_));
         }
     }
 
@@ -2138,26 +2393,102 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         // de todas formas no se va a publicar.
         if (native && diags.empty())
             mod->native = compile_native(mod->program, fns, sigs, ".lux-native",
-                                          mod->native_warning);
+                                          mod->native_warning, &mod->native_why, &mod->functions, &enums);
 
         ClassTable classes;
         build_classes(mod->program, fns, sigs, enums, &mod->program.imports, classes, diags);
 
-        AuthConfig auth;
+        AuthConfig& auth = mod->auth;
         auth.session_secret  = mod->program.app.session_secret;
         auth.session_max_age = mod->program.app.session_max_age;
         auth.session_secure  = mod->program.app.session_secure;
         auth.jwt_secret      = mod->program.app.jwt_secret;
         auth.jwt_issuer      = mod->program.app.jwt_issuer;
+        if (mod->native) mod->native_binds = std::make_shared<std::vector<std::vector<ParamBind>>>(mod->program.routes.size());
+        if (mod->native && mod->native->bind)
+            mod->native->bind(&mod->functions, &mod->templates, &mod->auth, &mod->template_keys,
+                              mod->native_binds.get());
 
         if (diags.empty()) build_routes(*mod, classes, auth, fns, sigs, enums, diags);
         if (diags.empty()) build_error_handlers(*mod, fns, sigs, enums, diags);
         if (diags.empty()) mod->openapi = build_openapi(mod->program, classes);
     }
 
+    // Templates go into `stamps` too, alongside the `.lux` files above: without
+    // this, main.cpp's watch_loop() only ever saw the `.lux` files it compiled,
+    // so editing a template (templates/index.html, .../layout.html — anything
+    // {% include %}-d too, since this scans the whole directory rather than
+    // trying to track exactly which files a given render()/include chain
+    // touched) had NO effect until something ALSO touched a `.lux` file.
+    // Whole-directory rather than "only what render() actually opened": the
+    // dependency between a `.lux` route and the templates it can reach through
+    // {% include %} is not tracked anywhere durable enough to replay here, and
+    // over-watching a few unrelated files in the same folder costs nothing —
+    // it triggers one more harmless recompile, not a wrong one.
+    if (!mod->program.app.templates_dir.empty()) {
+        std::error_code walk_ec;
+        for (const auto& entry :
+             fs::recursive_directory_iterator(mod->program.app.templates_dir, walk_ec)) {
+            if (walk_ec) break;
+            if (!entry.is_regular_file(walk_ec)) continue;
+            auto stamp = fs::last_write_time(entry.path(), ec);
+            if (!ec) mod->stamps.emplace_back(entry.path(), stamp);
+        }
+    }
+
     // It is always returned: the caller checks diags.empty() to decide whether
     // to publish it.  See the note in project.hpp about SourceLoc lifetimes.
     return mod;
+}
+
+lux::Task<void> run_error_handler(const Module& mod, int code, lux::Request& req,
+                                  lux::Response& res) {
+    auto it = mod.error_handlers.find(code);
+    if (it == mod.error_handlers.end()) it = mod.error_handlers.find(0);
+    if (it == mod.error_handlers.end()) co_return;   // no handler: whatever is there is left alone
+
+    NativeCtx ctx{req, res};
+    ctx.templates  = &mod.templates;   // render() inside the handler
+    ctx.functions  = &mod.functions;
+    ctx.error_code = code;
+    // The real runtime-error text (division by zero, an out-of-range index, ...)
+    // that was put in last_internal_error() right before the 500 body was
+    // written, gated by is_production_mode() like the raw 500 body itself.
+    // Read before the first await: it belongs to this thread's last request.
+    if (res.status_code() >= 500) {
+        ctx.error_message = is_production_mode() ? "internal error" : last_internal_error();
+        // Cleared right after reading: a 500 a handler returns directly never
+        // touches it, and would inherit an earlier request's crash.
+        last_internal_error().clear();
+    } else {
+        ctx.error_message = "invalid request";
+    }
+    if (!res.error_message().empty()) ctx.error_message = res.error_message();   // status(code, "why")
+    // Copied now: another request on this thread may overwrite it across an await.
+    const std::vector<std::string> messages = last_validation_messages();
+    ctx.error_messages = &messages;
+
+    VM vm;
+    const NativeDispatch native = mod.native ? mod.native->dispatch() : NativeDispatch{};
+    VM::Result result = vm.start(*it->second, {}, ctx, &mod.functions, &native);
+    if (!co_await drive_vm(vm, result, req, ctx)) co_return;   // the client went away
+    if (result.status == VM::Status::Error) {
+        lux::log().error("on error " + std::to_string(code) + ": " + result.error);
+        co_await rollback_pending(ctx, req);
+        co_return;
+    }
+    // A transaction the handler left open is rolled back, as in any request.
+    co_await rollback_pending(ctx, req);
+    if (result.status != VM::Status::Done) co_return;
+
+    if (!ctx.response_written && !result.value.is_null())
+        res.header("Content-Type", "application/json; charset=utf-8")
+           .send(result.value.to_json_text());
+
+    // The handler describes the failure; it may redirect (a 3xx, e.g. a 401 to
+    // the login page) or pick another error, but not turn it into a success.
+    const int now = res.status_code();
+    if (!((now >= 300 && now < 400) || (now >= 400 && now < 600))) res.status(code);
 }
 
 } // namespace lux_script

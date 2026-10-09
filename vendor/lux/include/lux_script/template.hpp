@@ -1,4 +1,7 @@
 #pragma once
+#include <filesystem>
+#include <fstream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,15 +28,17 @@ namespace lux_script {
 // The template is compiled once at startup, like the routes.  Rendering is
 // walking a list of very simple instructions: paste a chunk of text, or
 // evaluate an expression and paste its escaped result.
+inline constexpr uint32_t kNoLoop = UINT32_MAX;
+
 struct Template {
     enum class Op : uint8_t {
-        Text,          // pega texts[a]
+        Text,          // pastes texts[a]
         Write,       // evaluates exprs[a] and pastes the result, escaped
         WriteRaw,  // same, unescaped (marked with |safe)
-        SaltarSiFalso,  // evalua exprs[a]; si es falso, skip a b
-        Saltar,         // skip a b
-        BucleInicio,    // exprs[a] gives the list; if empty it jumps to b
-        BucleSiguiente, // next pass: if any is left it jumps to b, otherwise it carries on
+        JumpIfFalse,   // evaluates exprs[a]; if false, skip a b
+        Jump,          // skip a b
+        LoopStart,     // exprs[a] gives the list; if empty it jumps to b
+        LoopNext,      // next pass: if any is left it jumps to b, otherwise it carries on
     };
 
     struct Instr {
@@ -41,7 +46,7 @@ struct Template {
         uint32_t  a    = 0;
         uint32_t  b    = 0;
         uint32_t  slot = 0;   // item slot, in loops
-        uint32_t  slot_loop = 0;
+        uint32_t  slot_loop = 0;   // kNoLoop: the body never reads `loop`
         SourceLoc loc;
     };
 
@@ -53,30 +58,49 @@ struct Template {
     // render(); the next ones, the loop variables.
     //
     // They carry the type along because the expressions inside are compiled
-    // against them: that is what makes `{{ who.mayusculas() }}` on a string a
+    // against them: that is what makes `{{ who.uppercase() }}` on a string a
     // compile error and not a broken page.
     std::vector<TypedName> names;
 };
+
+// Reads a whole file in binary mode, or nullopt if it can't be opened --
+// the one piece shared by every "load a template off disk" call site
+// (a top-level render(), {% include %}, {% extends %}).
+inline std::optional<std::string> read_whole_file(const std::filesystem::path& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return std::nullopt;
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
 
 // Compiles the source of a template.
 //
 // `data` are the names —with their type, if known— the route will pass to
 // render(), and they take the first slots.  `dir` is the templates folder, to
 // resolve {% include %}.  Returns false if there were errors; they go in `diags`.
-bool compilar_plantilla(const std::string& fuente, const std::string& file,
+// What the expressions inside {{ }} may call: the project's `fn`s, its classes
+// and enums, and the modules it imports (`{{ fmt_dt(x) }}`, `{{ time.format(...) }}`).
+struct TemplateEnv {
+    const FunctionSigs*          fns     = nullptr;
+    const ClassSigs*             classes = nullptr;
+    const std::set<std::string>* imports = nullptr;
+    const EnumSigs*              enums   = nullptr;
+};
+
+bool compile_template(const std::string& source, const std::string& file,
                         const std::string& dir,
                         const std::vector<TypedName>& data,
-                        DiagnosticBag& diags, Template& out);
+                        DiagnosticBag& diags, Template& out,
+                        const TemplateEnv& env = {});
 
 // Renders.  `values` arrives in the same order as the `data` it was compiled
 // with.  A runtime error —dividing by zero inside a {{ }}— comes out through
 // `error` and leaves `out` half-written.
-bool render_plantilla(const Template& p, std::vector<Value> values,
+bool render_template(const Template& p, std::vector<Value> values,
                       NativeCtx& ctx, const FunctionTable* fns,
                       std::string& out, std::string& error);
 
 // Escapes for HTML.  Public because the |safe marker also uses it when
 // deciding what NOT to escape.
-void escapar_html(const std::string& in, std::string& out);
+void escape_html(const std::string& in, std::string& out);
 
 } // namespace lux_script

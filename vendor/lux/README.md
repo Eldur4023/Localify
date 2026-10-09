@@ -1,12 +1,12 @@
 # Lux
 
-![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?style=flat&logo=cplusplus&logoColor=white)
+![C++23](https://img.shields.io/badge/C%2B%2B-23-00599C?style=flat&logo=cplusplus&logoColor=white)
 ![CMake](https://img.shields.io/badge/CMake-3.20%2B-064F8C?style=flat&logo=cmake&logoColor=white)
 ![Linux only](https://img.shields.io/badge/platform-Linux-FCC624?style=flat&logo=linux&logoColor=black)
 ![Binary size](https://img.shields.io/badge/binary-1.5_MB-informational?style=flat)
 ![Tests](https://img.shields.io/badge/tests-246_passing-brightgreen?style=flat)
 
-Lux is a web framework focused on giving both performance and a simple and easy developer experience. Its core is written in C++20, but the programming itself is done in LuxScript, a language made exclusively for the Lux framework.
+Lux is a web framework focused on giving both performance and a simple and easy developer experience. Its core is written in C++23, but the programming itself is done in LuxScript, a language made exclusively for the Lux framework.
 
 
 # So... Do I have to learn a new language?
@@ -160,7 +160,7 @@ way into templates too.
 |---|---|
 | Auth | Vendored HMAC-SHA256, HS256. No OpenSSL. RS256 is not available |
 | Real time | SSE and WebSockets |
-| Transport | Plain HTTP/1.1, TLS and HTTP/2 belong to the reverse proxy |
+| Transport | HTTP/1.1; HTTPS built in as an option (`-DLUX_TLS=ON`, `tls:` block). HTTP/2 belongs to the reverse proxy |
 | Execution | Bytecode on a custom VM, one VM per event-loop thread |
 | Compilation | Built into the binary. No external toolchain, no transpilation to C++ |
 | Persistence | `sqlite`, `postgres`, and `mysql` modules over a thread pool and `await`. `?` placeholder in all three — the postgres driver translates it to `$1` |
@@ -310,16 +310,16 @@ File, line, column, cursor. Everything you (sometimes) love about g++ and clang+
 | **Observability** | Logger with rotation, `/health`, `/metrics` in Prometheus format |
 | **Reload** | File watching and atomic module swap |
 
-**Not included:** TLS, CORS, compression, rate limiting, and security headers,
-that's the reverse proxy's job. Also no user-defined generic classes: `List<T>` and
+**Not included:** CORS, compression, rate limiting, and security headers,
+that's the reverse proxy's job (TLS is optional, see the guide). Also no user-defined generic classes: `List<T>` and
 `Dict<K,V>` exist, `class Box<T>` doesn't (yet (maybe)). I might consider implementing HTTP/2 in the future.
 
 ---
 
 ## Build
 
-Requires **Linux** since I use epoll, `sendfile(2)` and `SO_REUSEPORT`. **CMake 3.20+** and **C++20**
-(GCC 11+ or Clang 13+).
+Requires **Linux** since I use epoll, `sendfile(2)` and `SO_REUSEPORT`. **CMake 3.20+** and **C++23**
+(GCC 12+ or Clang 14+).
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -348,6 +348,48 @@ lux ./app --no-watch   # no hot reload
 lux ./app --verbose    # one log line per request
 lux ./app --autotest   # walks the endpoints after startup and after each reload
 ```
+
+### HTTPS
+
+Lux can terminate TLS itself, so a small deployment needs no reverse proxy. It is a build option
+(it links OpenSSL's `libssl`, needs `libssl-dev`); without it the binary stays free of OpenSSL:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLUX_TLS=ON
+```
+
+Then a top-level `tls:` block, next to `app:`. The port is the one in `app:`: with the block it
+speaks HTTPS, without it plain HTTP. A missing `cert` or `key`, or a file that cannot be read,
+stops the server at startup, and a binary built without `LUX_TLS` refuses to start with a `tls:`
+block instead of silently serving HTTP.
+
+```lux
+app:
+    port 443
+
+tls:
+    cert "/etc/letsencrypt/live/example.com/fullchain.pem"
+    key  "/etc/letsencrypt/live/example.com/privkey.pem"
+```
+
+**Let's Encrypt.** There is no certbot plugin for Lux (certbot edits nginx's config; it has
+nothing to edit here), so certbot only fetches the certificate and Lux is pointed at its files:
+
+```bash
+sudo certbot certonly --standalone --key-type ecdsa -d example.com   # needs port 80 free for a moment
+sudo certbot renew --deploy-hook "systemctl restart lux"
+```
+
+The certbot timer renews on its own. Lux does **not** reload certificates, so the deploy hook
+restarts it after every renewal (open connections drop for an instant). Also:
+
+- Use an ECDSA certificate (`--key-type ecdsa`, certbot's default since 2.0), not RSA: the server signs the handshake, and an RSA-2048 signature costs ~30x an ECDSA P-256 one. In a local test a new connection took ~410 µs of server CPU with ECDSA and ~1,030 µs with RSA 2048.
+- Port 443 needs root, or `AmbientCapabilities=CAP_NET_BIND_SERVICE` in the systemd unit.
+- `privkey.pem` is readable only by root: if Lux runs as another user, give it access through a
+  group or copy the files in the deploy hook.
+- Lux listens on one port and does not redirect HTTP to HTTPS. If you want that, something else
+  on port 80 has to answer with a `301`.
+- Not included: HTTP/2. A static file is encrypted in user space unless the kernel's `tls` module is loaded (`sudo modprobe tls`) and the CPU has fast AES-GCM; then Lux uses kTLS and `sendfile`. Without the module it stays in user space.
 
 ---
 
@@ -408,6 +450,21 @@ compiler needs to know about.
 The full walkthrough — including what changes if the module needs a third-party library,
 which is the one case that still needs a few lines of `CMakeLists.txt` by hand — is in
 [NATIVE-MODULES.md](NATIVE-MODULES.md) and [src/lux_script/modules/README.md](src/lux_script/modules/README.md).
+
+---
+
+## Lux Desktop
+
+An Electron/Tauri equivalent, built as a separate project on top of Lux:
+[**Lux Desktop**](https://github.com/Eldur4023/Lux-Local). A native GTK3 +
+WebKitGTK window instead of a bundled Chromium, LuxScript instead of Node,
+and a build that produces one native binary — compile it, run it, the
+window opens. Window title/size/icon, native menus (nested submenus,
+checkboxes, keyboard accelerators), a system tray icon, file dialogs,
+clipboard access and desktop notifications are all plain LuxScript, via a
+drop-in `window` native module — no changes to Lux's own grammar or
+compiler. Lux itself is vendored there as plain source and used purely as
+a library.
 
 ---
 

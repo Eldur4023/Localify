@@ -20,10 +20,6 @@ public:
     // Route registration — support both :param and {param} styles.
     // Each registration also captures compile-time type info for OpenAPI generation.
     template<typename F> App& get   (std::string path, F&& h) { router_.add("GET",    std::move(path), std::forward<F>(h)); return *this; }
-    template<typename F> App& post  (std::string path, F&& h) { router_.add("POST",   std::move(path), std::forward<F>(h)); return *this; }
-    template<typename F> App& put   (std::string path, F&& h) { router_.add("PUT",    std::move(path), std::forward<F>(h)); return *this; }
-    template<typename F> App& patch (std::string path, F&& h) { router_.add("PATCH",  std::move(path), std::forward<F>(h)); return *this; }
-    template<typename F> App& del   (std::string path, F&& h) { router_.add("DELETE", std::move(path), std::forward<F>(h)); return *this; }
     template<typename F> App& any   (std::string path, F&& h) {                                     router_.add("*",      std::move(path), std::forward<F>(h)); return *this; }
 
     // Middleware (applied in order for every request)
@@ -41,6 +37,13 @@ public:
     // stopping the loops is safe.
     //
     // It blocks the shutdown for as long as it lasts, so it must finish.
+    // Runs on the main event loop's thread, right before it starts: the
+    // place to arm timers (scheduled tasks) on it.
+    App& on_start(std::function<void(core::EventLoop&)> fn) {
+        on_start_ = std::move(fn);
+        return *this;
+    }
+
     App& on_before_stop(std::function<void()> fn) {
         before_stop_ = std::move(fn);
         return *this;
@@ -82,15 +85,6 @@ public:
         return *this;
     }
 
-    // Directory where the templates are looked up (default: "./templates")
-    App& set_templates(std::string dir) { templates_dir_ = std::move(dir); return *this; }
-
-    // Override the title and version shown in /docs and /openapi.json.
-    App& api_info(std::string title, std::string version = "0.1.0") {
-        api_title_   = std::move(title);
-        api_version_ = std::move(version);
-        return *this;
-    }
 
 
     // ── WebSocket ────────────────────────────────────────────────────────────
@@ -205,6 +199,7 @@ public:
                 co_return;
             }
 
+            req.bind_stream();
             if (!req._raw_write) {
                 res.status(500).json_text(R"({"error":"no raw writer for WS upgrade"})");
                 co_return;
@@ -227,6 +222,14 @@ public:
                 if (n == 0) co_return;
                 sent += static_cast<size_t>(n);
             }
+
+            // The 101 is out: this connection is a WebSocket now, not a
+            // bounded HTTP request/response. Cancel the connection's request
+            // timeout the same way make_sse() does for a stream response --
+            // otherwise a perfectly healthy, actively-used WS connection
+            // gets a 408 spliced into its frame stream 30s after the
+            // handshake, every single time.
+            if (req._cancel_request_timeout) req._cancel_request_timeout();
 
             auto ws_state = std::make_shared<detail::WSState>();
             ws_state->token = req.cancel_token;
@@ -315,9 +318,28 @@ public:
         return *this;
     }
 
-    // Maximum simultaneous open connections (default 10 000).
-    // Excess connections receive 503 immediately.
+    // Maximum simultaneous open connections. Excess connections receive
+    // 503 immediately. Default: what the process's file descriptors allow
+    // (run() raises their soft limit to the hard one), less 1024 kept for
+    // everything else -- database files, uploads, outgoing HTTP.
     App& max_connections(int n) { max_connections_ = n; return *this; }
+
+    // Overrides how handle_request() decides "is there a declared route for
+    // this (method, path)?" when gating static-mount serving (see its call
+    // site). The DEFAULT check — router_.match(method, path).found — is
+    // correct for an app built directly on the C++ API (get()/post()/...
+    // register on router_ itself), but wrong for the Lux Script engine: its
+    // main.cpp installs exactly two catch-all entries on router_ itself
+    // (any("/", ...), any("/*", ...)) that always match, and does the REAL
+    // per-project routing against a completely separate Router owned by the
+    // live module (mod->router), invisible to App. Without this override,
+    // the default check always reports "found" for a Lux Script app and
+    // every static mount goes permanently dark; main.cpp supplies a probe
+    // that asks mod->router instead.
+    App& set_route_probe(std::function<bool(const std::string&, const std::string&)> probe) {
+        route_probe_ = std::move(probe);
+        return *this;
+    }
 
     // Start listening — Flask style:
     //   app.run()               → 0.0.0.0:5000
@@ -342,16 +364,15 @@ private:
     Router                                    router_;
     std::vector<Middleware>                   middlewares_;
     std::vector<StaticMount>                  static_mounts_;
+    std::function<bool(const std::string&, const std::string&)> route_probe_;
     std::unordered_map<int, ErrorHandler>     error_handlers_;
     ErrorHandler                              catchall_error_handler_;
     std::unordered_map<int, AsyncErrorHandler> async_error_handlers_;
     AsyncErrorHandler                          catchall_async_error_handler_;
-    std::string                               templates_dir_ = "./templates";
     std::function<void()>                     before_stop_;
+    std::function<void(core::EventLoop&)>     on_start_;
 
-    std::string                               api_title_       = "Lux API";
-    std::string                               api_version_     = "0.1.0";
-    int                                       max_connections_ = 10'000;
+    int                                       max_connections_ = 0;   // 0: from the fd limit
 
 
     // Set to true by prepare() so docs routes are only registered once.

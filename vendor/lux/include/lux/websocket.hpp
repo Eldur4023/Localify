@@ -31,10 +31,7 @@ struct WSMessage {
     Opcode      opcode = Opcode::Text;
     std::string data;
 
-    bool is_text()   const { return opcode == Opcode::Text; }
-    bool is_binary() const { return opcode == Opcode::Binary; }
     bool is_close()  const { return opcode == Opcode::Close; }
-    bool is_ping()   const { return opcode == Opcode::Ping; }
     bool is_pong()   const { return opcode == Opcode::Pong; }
 };
 
@@ -145,9 +142,21 @@ struct WSState {
     static constexpr size_t kMaxFramePayload  = 16 * 1024 * 1024;  // 16 MB per frame
     static constexpr size_t kMaxMessageSize   = 16 * 1024 * 1024;  // 16 MB assembled
     static constexpr size_t kMaxPendingFrames = 256;
+    // Aggregate cap on bytes sitting in `pending`, on top of the per-message
+    // 16 MB cap above. A handler that produces faster than it calls
+    // ws.recv() (or simply never calls it — a broadcast-only room member,
+    // say) leaves every accepted message queued here until it does; without
+    // a byte cap, kMaxPendingFrames alone still allows 256 * 16 MB = 4 GB
+    // per connection, all from one peer that never sends anything OTHER
+    // than max-size frames. This caps one connection's queue at a much more
+    // realistic worst case while still comfortably holding several
+    // full-size messages, the legitimate "producer is briefly ahead of the
+    // consumer" case this exists to tolerate.
+    static constexpr size_t kMaxPendingBytes  = 64 * 1024 * 1024;  // 64 MB
 
     std::string            read_buf;
     std::deque<WSMessage>  pending;
+    size_t                 pending_bytes = 0;  // sum of pending[i].data.size()
 
     // For reassembling fragmented messages
     std::string  frag_buf;
@@ -180,6 +189,33 @@ struct WSState {
         // that ignores the Close frame keeps sending afterward.
         read_buf.clear();
         read_buf.shrink_to_fit();
+    }
+
+    // Pushes a message onto `pending`, enforcing the aggregate byte cap
+    // (kMaxPendingBytes) on top of the per-frame size and frame-count caps
+    // the callers below already check. By the time this runs the frame has
+    // already been fully read off the wire, so there is nothing left to
+    // reject gracefully — same as every other limit try_parse() enforces,
+    // this ends the connection via fail_close() rather than silently
+    // dropping the message (which would desync the app's view of the
+    // stream) or growing `pending` without bound.
+    bool push_pending(WSMessage msg) {
+        if (pending_bytes + msg.data.size() > kMaxPendingBytes) {
+            fail_close(1008);
+            return false;
+        }
+        pending_bytes += msg.data.size();
+        pending.push_back(std::move(msg));
+        return true;
+    }
+
+    // Pairs with push_pending(): keeps pending_bytes in sync when a message
+    // leaves the queue (RecvAwaitable::await_resume()).
+    WSMessage pop_pending() {
+        WSMessage msg = std::move(pending.front());
+        pending.pop_front();
+        pending_bytes -= msg.data.size();
+        return msg;
     }
 
     void try_parse() {
@@ -282,7 +318,7 @@ struct WSState {
                     echo += char(0);
                 }
                 raw_send(echo);
-                pending.push_back({WSMessage::Opcode::Close, std::move(payload)});
+                push_pending({WSMessage::Opcode::Close, std::move(payload)});
                 return;
             }
             if (opcode == 0x9) {  // Ping → auto-pong (RFC 6455 §5.5.3)
@@ -290,7 +326,7 @@ struct WSState {
                 continue;
             }
             if (opcode == 0xA) {  // Pong
-                pending.push_back({WSMessage::Opcode::Pong, std::move(payload)});
+                if (!push_pending({WSMessage::Opcode::Pong, std::move(payload)})) return;
                 continue;
             }
 
@@ -304,7 +340,8 @@ struct WSState {
                 }
                 frag_buf += payload;
                 if (fin) {
-                    pending.push_back({WSMessage::Opcode(frag_opcode), std::move(frag_buf)});
+                    if (!push_pending({WSMessage::Opcode(frag_opcode), std::move(frag_buf)}))
+                        return;
                     frag_buf.clear();
                     frag_opcode = 0;
                 }
@@ -316,7 +353,7 @@ struct WSState {
                     frag_opcode = opcode;
                     frag_buf    = std::move(payload);
                 } else {
-                    pending.push_back({WSMessage::Opcode(opcode), std::move(payload)});
+                    if (!push_pending({WSMessage::Opcode(opcode), std::move(payload)})) return;
                 }
             }
         }
@@ -371,7 +408,7 @@ struct WSState {
 //       while (ws.is_open()) {
 //           auto msg = co_await ws.recv();
 //           if (!msg) break;           // connection closed
-//           if (msg->is_text()) ws.send("echo: " + msg->data);
+//           ws.send("echo: " + msg->data);
 //       }
 //   });
 
@@ -403,11 +440,7 @@ public:
         }
 
         std::optional<WSMessage> await_resume() noexcept {
-            if (!s->pending.empty()) {
-                auto msg = std::move(s->pending.front());
-                s->pending.pop_front();
-                return msg;
-            }
+            if (!s->pending.empty()) return s->pop_pending();
             return std::nullopt;  // connection closed
         }
     };
@@ -418,15 +451,6 @@ public:
 
     bool send(std::string_view text) {
         return write_frame(text, 0x1);
-    }
-
-    bool send_binary(const void* data, size_t len) {
-        return write_frame(std::string_view(static_cast<const char*>(data), len), 0x2);
-    }
-
-    // Send a Ping frame.  The remote end should reply with Pong automatically.
-    bool ping(std::string_view payload = "") {
-        return write_frame(payload, 0x9);
     }
 
     // Send a Close frame and mark the connection as closed.
@@ -467,7 +491,7 @@ private:
 };
 
 // Posts `text` onto `target`'s own event-loop thread and sends it there as
-// a text frame -- unlike WSConnection::send()/send_binary()/ping()/close(),
+// a text frame -- unlike WSConnection::send()/close(),
 // which all assume the CALLING thread already owns this connection (the
 // normal case: called from inside that connection's own ws() handler),
 // this is safe to call from ANY thread. That is exactly what a

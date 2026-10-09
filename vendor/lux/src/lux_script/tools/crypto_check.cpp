@@ -59,6 +59,12 @@ int self_test() {
                            "Test Using Larger Than Block-Size Key - Hash Key First")),
            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
 
+    expect("sha1(abc)", hex(sha1("abc")), "a9993e364706816aba3e25717850c26c9cd0d89d");
+    expect("hmac_sha1(Jefe)", hex(hmac_sha1("Jefe", "what do ya want for nothing?")),
+           "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79");
+    std::string b32;
+    expect("base32(foobar)", base32_encode("foobar"), "MZXW6YTBOI");
+    expect("base32 ida y vuelta", base32_decode("mzxw 6ytb oi======", b32) && b32 == "foobar" ? "si" : "no", "si");
     std::string round;
     const std::string raw = std::string("\x00\x01\xfe\xff", 4) + "lux_script";
     expect("base64url ida y vuelta",
@@ -68,8 +74,18 @@ int self_test() {
     expect("base64url alfabeto url-safe",
            base64url_encode(std::string("\xfb\xff", 2)), "-_8");
 
+    // RFC 7914 §11 test vectors for PBKDF2-HMAC-SHA256.
+    expect("pbkdf2(passwd, salt, 1)", hex(pbkdf2_sha256("passwd", "salt", 1, 64)),
+           "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc"
+           "49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783");
+    expect("pbkdf2(Password, NaCl, 80000)", hex(pbkdf2_sha256("Password", "NaCl", 80000, 64)),
+           "4ddcd8f60b98be21830cee5ef22701f9641a4418d04c0414aeff08876b34ab56"
+           "a1d425a1225833549adb841b51c9b3176a272bdebba1d078478f62b397f33c8d");
+    expect("base64 decode, standard alphabet",
+           base64url_decode("+/8=", round) && round == std::string("\xfb\xff", 2) ? "si" : "no", "si");
+
     std::cout << (failures ? "\nFALLOS: " : "\ntodo correcto (")
-              << (failures ? std::to_string(failures) : std::string("11"))
+              << (failures ? std::to_string(failures) : std::string("14"))
               << (failures ? "" : " comprobaciones)") << "\n";
     return failures ? 1 : 0;
 }

@@ -26,7 +26,8 @@ struct MultipartPart {
     std::string name;            // Content-Disposition: form-data; name="..."
     std::string filename;        // present only for file-input fields
     std::string content_type;    // Content-Type of this part (may be empty)
-    std::string body;            // raw bytes of this part
+    std::string_view body;       // raw bytes of this part, a view into the Request body
+                                 // (valid while the Request lives)
 
     // All part headers, lowercase-keyed.
     std::unordered_map<std::string, std::string> headers;
@@ -72,8 +73,7 @@ parse_multipart(const Request& req) {
 
     // RFC 2046 §5.1.1: delimiter = "--" + boundary
     const std::string delim     = "--" + boundary_val;
-    const std::string final_delim = delim + "--";
-    const std::string& body     = req.body;
+    std::string_view body        = req.body_view();
 
     // ── 2. Find the first delimiter ──────────────────────────────────────────
     size_t pos = body.find(delim);
@@ -100,7 +100,7 @@ parse_multipart(const Request& req) {
         std::string_view part_body  = part_view.substr(blank + 4);
 
         MultipartPart part;
-        part.body = std::string(part_body);
+        part.body = part_body;
 
         // ── Parse part headers ─────────────────────────────────────────────
         std::string hdr_str(hdr_block);
@@ -157,8 +157,18 @@ parse_multipart(const Request& req) {
                 part.filename = extract("filename");
                 // Strip path separators from filename to prevent directory
                 // traversal if callers use part.filename directly as a save path.
+                // Also strip NUL: File.save() (natives.cpp) validates the
+                // extension against this exact std::string (ends_with(".png")
+                // sees the whole thing, embedded NUL included), but then opens
+                // the file through a C string, which truncates AT the NUL --
+                // "evil.sh\0.png" passes an app's `.ends_with(".png")` check
+                // and gets written to disk as "evil.sh". Same class of bug as
+                // every other %00 rejection already in this codebase (query
+                // string, path segments, form fields) -- a NUL bound into
+                // anything that later crosses to a C API can desync the
+                // C++-side check from the C-side effect.
                 for (auto& c : part.filename)
-                    if (c == '/' || c == '\\') c = '_';
+                    if (c == '/' || c == '\\' || c == '\0') c = '_';
             } else if (key == "content-type") {
                 part.content_type = val;
             }

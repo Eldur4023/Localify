@@ -139,14 +139,14 @@ inside the context that defines them, and using one out of place is a compile er
 IDENT ::= ( letter | "_" ) { letter | digit | "_" }
 ```
 
-`letter` includes Unicode: `contraseña`, `título`, `año` are valid identifiers — the lexer
+`letter` includes Unicode: `café`, `naïve`, `Übung` are valid identifiers — the lexer
 does not force you to transliterate names into ASCII to write them in your own language.
 
 ```lux
-class User:
+class Menu:
     string  name
-    string? contraseña
-    int     año_de_alta
+    string? café
+    int     naïve_score
 ```
 
 ---
@@ -427,6 +427,12 @@ app:
     version   "1.0.0"
     port      8080
     templates "./templates"
+    host      "127.0.0.1"           # listen address (default 0.0.0.0)
+    headers:                        # added to every response; a handler's own header wins
+        "Content-Security-Policy" "default-src 'self'"
+        "Strict-Transport-Security" "max-age=31536000"
+    max_body "16MB"                 # request body cap (default 16MB; 512KB, 2GB, bytes or env()).
+                                    # Past 16MB only multipart uploads are accepted: they stream to a temp file
 
     static "/static" -> "./public"
     static "/"       -> "./dist" spa
@@ -447,6 +453,15 @@ app:
     sqlite:
         file "./data.db"
         pool 8
+```
+
+HTTPS is a separate top-level block, also once per project. Without it the port is plain HTTP;
+with it the same port speaks TLS (binary built with `-DLUX_TLS=ON`):
+
+```lux
+tls:
+    cert "fullchain.pem"      # PEM paths; env("VAR") works
+    key  "privkey.pem"
 ```
 
 `env("VAR")` is resolved **at compile time**, not when the process starts: it is the only way
@@ -820,6 +835,34 @@ List<int> xs = [1, 2, 3]
 
 A variable declared without an initializer holds its type's default value (`0` for the
 numeric ones, `""` for `string`, `false` for `bool`, `null` for an optional or class type).
+
+### Declared types are checked
+
+When both sides are statically known, the compiler rejects a mismatch between a declared
+type and the value it receives — in a declaration, in an assignment to a variable, and in
+the `return` of a `fn` or method:
+
+```lux
+int a = "hola"          # 'a' is declared int but is initialized with string
+int k = 1
+k = "x"                 # cannot assign string to 'k', declared int
+fn int count():
+    return "x"          # this fn returns int, not string
+fn void f():
+    return 3            # a void fn cannot return a value (int)
+```
+
+It only reports a DEFINITE mismatch. What it accepts:
+
+- `int` where `float` is declared (`float f = 2`): `int`/`long` are one type and `float`/`double`
+  another (§7), and an integer widens to a float. The reverse, `int g = 2.5`, is an error.
+- A side whose type the compiler cannot tell (the result of an expression it does not follow,
+  a loop variable over a `Json`) and anything involving `Json`, which is dynamic by definition.
+- `List<T>` and `Dict<K,V>` compare the container only: the element type is not followed
+  through calls, so comparing it would invent errors.
+
+A declaration that mismatches still declares the variable, so later uses do not cascade into
+`'x' is not declared`.
 
 ## 22. Assignment
 

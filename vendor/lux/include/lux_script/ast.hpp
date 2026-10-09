@@ -169,6 +169,7 @@ struct RouteDecl {
     std::string              pattern;   // "/users/:id", already with the group prefix
     std::vector<Param>       params;
     std::vector<std::string> origins;   // ws only
+    std::string              every;     // EVERY only: "5m", "03:00" (schedule.hpp)
     std::vector<Guard>       guards;    // accumulated from the enclosing groups
     Block                    body;
     SourceLoc                loc;
@@ -190,10 +191,25 @@ struct StaticMount {
     SourceLoc   loc;
 };
 
+// app: log: -- the logger's file, level and rotation, and the access log.
+struct LogConfig {
+    bool        present = false;
+    std::string file;                    // empty: console only
+    std::string level   = "info";        // debug | info | warn | error | off
+    size_t      max_size = 10u * 1024 * 1024;   // rotate the file at this size
+    int         keep    = 0;             // rotated files kept (0 = all)
+    bool        console = true;
+    bool        access  = false;         // one line per request (same as --verbose)
+};
+
 struct AppDecl {
     std::string              name;
     std::string              version;
     int                      port = 8080;
+    LogConfig                log;
+    std::string              host = "0.0.0.0";
+    std::vector<std::pair<std::string, std::string>> headers;   // sent on every response
+    size_t                   max_body = 16u * 1024 * 1024;   // request body cap, bytes
     std::string              templates_dir = "./templates";
     std::vector<StaticMount> statics;
     bool                     docs = false, health = false, metrics = false;
@@ -213,6 +229,13 @@ struct AppDecl {
     bool                     present = false;
 };
 
+// `tls:` block: when present, the app's port speaks HTTPS.
+struct TlsDecl {
+    bool        present = false;
+    SourceLoc   loc;
+    std::string cert, key;
+};
+
 struct Program {
     // Imported modules.  `sqlite.query(...)` can only be used if there is an
     // `import sqlite`.
@@ -223,6 +246,7 @@ struct Program {
     std::vector<RouteDecl> routes;
     std::vector<ErrorDecl> errors;
     AppDecl                app;
+    TlsDecl                tls;
 };
 
 } // namespace lux_script

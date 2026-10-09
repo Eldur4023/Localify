@@ -1,6 +1,9 @@
 #pragma once
+#include <cstdlib>
+#include <deque>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -14,6 +17,31 @@ struct MultipartPart;
 
 namespace lux_script {
 
+// A runtime error (division by zero, index out of range, a type mismatch
+// the checker could not rule out statically) is answered as a 500 whose
+// body used to always include the raw error message AND the exact
+// file:line:col it happened at (project.cpp's bytecode routes,
+// native_gen.cpp's generated ones) -- useful while developing, but a real
+// deployment leaking its own source layout and internal error text to
+// whoever sent the request that triggered it is an information leak. Both
+// places check this
+// ONE function instead of duplicating the decision, so bytecode and
+// --native can never disagree about which mode a deployment is in --
+// exactly the divergence this codebase's own comments repeatedly call out
+// as the class of bug to design away, not just fix once found.
+//
+// LUX_ENV=production opts in explicitly, the same convention NODE_ENV/
+// RAILS_ENV/etc. use -- checked, not assumed, once per call (cheap: one
+// getenv() and a string compare) so a test harness that sets/unsets it
+// between runs never sees a stale cached answer. Full detail stays in the
+// server's own log either way (lux::log().error(...) already runs before
+// either branch decides what the CLIENT sees); this only ever narrows what
+// leaves the process, never what an operator can see.
+inline bool is_production_mode() {
+    const char* env = std::getenv("LUX_ENV");
+    return env && std::string(env) == "production";
+}
+
 // Context the VM passes to the builtins: it is the layer-2 bridge, where the
 // bytecode reaches the native engine.
 // Store shared across ALL the event loop threads.
@@ -25,14 +53,35 @@ class SharedState {
 public:
     static SharedState& instance();
 
-    long long incr(const std::string& key, long long by);
-    Value     get(const std::string& key) const;
-    void      set(const std::string& key, Value v);
+    // ttl_ms > 0 makes the key expire. incr() sets it only when it creates
+    // the key, so `state.incr("login:" + ip, 1, 60000)` counts in fixed
+    // one-minute windows: a rate limiter in one line.
+    long long incr(const std::string& key, long long by, long long ttl_ms = 0);
+    Value     get(const std::string& key);
+    void      set(const std::string& key, Value v, long long ttl_ms = 0);
     bool      remove(const std::string& key);
 
+    // Sliding window: records a hit now and returns how many hits the key
+    // has had in the last window_ms (this one included).
+    long long hit(const std::string& key, long long window_ms);
+    // Milliseconds until the key expires (a TTL key) or until the oldest
+    // hit leaves its window (a hit key, i.e. the Retry-After once over the
+    // limit); -1 if the key has no expiry, null-like -2 if it is absent.
+    long long ttl(const std::string& key);
+
 private:
-    mutable std::mutex          mutex_;
-    std::map<std::string, Value> data_;
+    struct Entry { Value v; long long expires_ms = 0; };
+    using Map = std::map<std::string, Entry>;
+
+    Map::iterator live(const std::string& key, long long now);   // end() if absent or expired
+    void          sweep(long long now);
+
+    struct Hits { std::deque<long long> times; long long window_ms = 0; };
+
+    std::mutex mutex_;
+    Map        data_;
+    std::map<std::string, Hits> hits_;
+    unsigned   writes_ = 0;
 };
 
 // Session state during a request.
@@ -65,10 +114,16 @@ struct NativeCtx {
     // exists, every query of that module goes through the same connection.
     std::map<std::string, int> pinned_workers;
 
-    // Worker that ran the last exec of each module.  `last_id()` has to go
-    // through that SAME connection: the generated identifier does not exist on
-    // the others.
-    std::map<std::string, int> last_exec_workers;
+    // Id the last exec of each module generated, read on its connection
+    // right after it ran: by the time `last_id()` asks, that connection may
+    // have run someone else's statement (the writer batches them).
+    std::map<std::string, long long> last_insert_ids;
+
+    // Modules whose CURRENT transaction already had a statement fail. See
+    // the comment on `poisoned` in db.hpp's await_db() -- commit() on a
+    // poisoned module rolls back instead of committing, and every other
+    // call refuses outright until rollback()/commit() closes it.
+    std::set<std::string> poisoned_db;
 
     // Multipart parts already parsed.  A File in the language keeps the index
     // of its part here, not the bytes: copying a File is copying an int.
@@ -90,6 +145,8 @@ struct NativeCtx {
 
     // Claims of the Authorization: Bearer JWT, already verified by the driver.
     const Value* jwt_claims = nullptr;
+    // The app's session/jwt configuration (jwt.sign, jwt.verify); set by begin_auth.
+    const struct AuthConfig* auth = nullptr;
     bool         jwt_ok     = false;
 
     // Set by any builtin that writes the response (text, render, redirect...).
@@ -97,6 +154,15 @@ struct NativeCtx {
     // serialized as JSON.
     bool response_written = false;
 };
+
+// Templates compiled to C++ under --native (native_gen.cpp) share these with
+// the interpreter (template.cpp), so both write the same bytes and fail the
+// same way. `tpl` indexes ctx.templates.
+bool  eval_template_expr(NativeCtx& ctx, size_t tpl, uint32_t k, const std::vector<Value>& slots,
+                         Value& out, std::string& error);
+void  write_template_value(const Value& v, bool escape, std::string& out);
+void  escape_html(const std::string& in, std::string& out);
+Value template_loop_value(size_t i, size_t n);
 
 // A builtin returns a Value and, if it fails, writes the reason into `error`.
 using NativeFn = Value (*)(NativeCtx& ctx, std::vector<Value>& args,
@@ -123,6 +189,9 @@ int              native_id(const std::string& name);
 // mapping lives next to the table so adding a member is touching one place.
 int              member_native_id(const std::string& object, const std::string& member);
 
+// The language's '+' (vm.cpp): Op::Add, and compiled templates' '+'.
+bool add_values(const Value& a, const Value& b, Value& out, std::string& err);
+
 // Method on a value: "hi".starts_with(...), list.add(...), file.save(...).
 // Unlike the reserved objects, the receiver is known at runtime, so the
 // dispatch is by type inside the VM.
@@ -137,9 +206,9 @@ struct BuiltinMethod {
     int         max_args;
     // Type of the result, or nullptr if it returns the receiver itself —which
     // is what the chainable ones do: .status(), .add()...—.  Knowing it allows
-    // checking to continue past the dot: s.upper().recortar() also fails at
+    // checking to continue past the dot: s.upper().trim() also fails at
     // compile time.
-    const char* devuelve;
+    const char* return_type;
 };
 
 // The methods that exist for a Lux Script type: "string", "int", "List", ...
@@ -158,7 +227,60 @@ bool             is_db_module(const std::string& name);
 // building the 422 and read by the `on error` handler of the same request;
 // there is no suspension between the two moments, so requests cannot cross.
 std::vector<std::string>& last_validation_messages();
+
+// `lux run files -- command args`: the process is running one command, not a
+// server. os.argv() / os.exit() read and write these.
+struct ScriptMode {
+    bool                     on = false;
+    std::vector<std::string> args;
+    int                      exit_code = 0;
+    // `lux test`: the instance the tests talk to, and why the running test failed.
+    std::string              base_url;
+    std::string              failure;
+};
+inline ScriptMode& script_mode() { static ScriptMode s; return s; }
+
+// The "error" abort() raises to unwind a whole handler, helpers included.
+// The VM turns it into a normal end of the request (the response was already
+// written); it is never an error and a `try` cannot catch it.
+inline constexpr const char* kAbortMessage = "\x01" "abort";
+
+// send_file() for every engine: sends `path` (confined to `root` when it is
+// given), then adds what a download needs -- an ETag with a 304 for
+// If-None-Match, and Content-Disposition when `filename` is non-empty
+// (`inline_` shows it in the browser instead of saving it).
+void send_file_checked(lux::Request& req, lux::Response& res, const std::string& path,
+                       const std::string* root = nullptr, const std::string& filename = {},
+                       bool inline_ = false);
+
+// The request a --native function is running for, on this thread: set by the
+// VM (and by a native route) right before calling one, so that a module call
+// inside it gets the same NativeCtx bytecode would give it.
+NativeCtx*& current_native_ctx();
+
+// A --native route whose parameters its own code does not bind (File, `?`,
+// a Dict class body) binds them with bytecode's prepare_args(): `binds` is
+// what NativeModule::bind handed it (Module::native_binds), `route` its
+// index. False when it already answered (a 422/400). `rules` false: the
+// body class's validate: rules are left to the caller (compiled to C++).
+bool prepare_native_args(const void* binds, size_t route, lux::Request& req, lux::Response& res,
+                         NativeCtx& ctx, std::vector<Value>& out, bool rules = true);
+
+// The real message of the last runtime error (division by zero, index out
+// of range, ...) on this thread -- same idea and same one-request lifetime
+// as last_validation_messages() above, filled right before the route's own
+// 500 body is written (project.cpp's bytecode routes, native_gen.cpp's
+// generated ones) and read by app.on_error() (main.cpp) to fill
+// `error.message` in a user-declared `on error 500`/`on error` handler.
+// Before this existed, `error.message` there was hardcoded to the string
+// "internal error" UNCONDITIONALLY -- not gated by is_production_mode() at
+// all -- so GUIDE.md's own example (`log.error(error.message)`) never
+// logged anything a developer could use to find the actual bug, even
+// outside production. Still gated by is_production_mode() at the one
+// place that reads it (main.cpp), same as the raw 500 body already is:
+// this function always holds the real message, but production mode never
+// looks at it.
+std::string& last_internal_error();
 const NativeDef& native_at(int id);
-int              native_count();
 
 } // namespace lux_script

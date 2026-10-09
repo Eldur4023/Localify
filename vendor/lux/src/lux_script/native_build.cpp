@@ -1,10 +1,12 @@
 #include <lux_script/native_build.hpp>
 #include <lux_script/native_gen.hpp>
+#include <lux_script/template.hpp>
 
 #include <dlfcn.h>
 
 #include <cstdlib>
 #include <fstream>
+#include <set>
 #include <iomanip>
 #include <sstream>
 #include <system_error>
@@ -18,7 +20,7 @@ NativeModule::~NativeModule() {
 NativeModule::NativeModule(NativeModule&& o) noexcept
     : por_indice(std::move(o.por_indice)), error_message(o.error_message),
       rutas_por_indice(std::move(o.rutas_por_indice)),
-      rutas_async_por_indice(std::move(o.rutas_async_por_indice)), handle_(o.handle_) {
+      rutas_async_por_indice(std::move(o.rutas_async_por_indice)), bind(o.bind), handle_(o.handle_) {
     o.handle_ = nullptr;
 }
 
@@ -29,6 +31,7 @@ NativeModule& NativeModule::operator=(NativeModule&& o) noexcept {
         error_message          = o.error_message;
         rutas_por_indice       = std::move(o.rutas_por_indice);
         rutas_async_por_indice = std::move(o.rutas_async_por_indice);
+        bind                   = o.bind;
         handle_                = o.handle_;
         o.handle_              = nullptr;
     }
@@ -65,12 +68,21 @@ const FnDecl* buscar_fn(const Program& prog, const std::string& nombre) {
 // funciones, no solo las que van a terminar compilando: una funcion nativa
 // puede llamar a otra que el mapa (alfabetico, por FunctionSigs) todavia no
 // proceso.
-TablaFirmas construir_firmas(const Program& prog) {
+bool es_value(const Type& t) {
+    return t.kind() == Type::Kind::Json ||
+           ((t.kind() == Type::Kind::List || t.kind() == Type::Kind::Dict) && t.element().kind() == Type::Kind::Json);
+}
+
+TablaFirmas construir_firmas(const Program& prog, const FunctionSigs& sigs,
+                             const FunctionTable* chunks, const TablaClases& clases) {
     TablaFirmas firmas;
     for (const auto& f : prog.functions) {
         FirmaNativa firma;
-        firma.retorno = Type::from_declared(f.return_type);
-        for (const auto& p : f.params) firma.params.push_back(Type::from_declared(p.type));
+        firma.retorno = tipo_nativo(Type::from_declared(f.return_type), &clases);
+        for (const auto& p : f.params) firma.params.push_back(tipo_nativo(Type::from_declared(p.type), &clases));
+        auto it = sigs.find(f.name);
+        if (chunks && it != sigs.end() && it->second.index < chunks->size() && (*chunks)[it->second.index])
+            firma.asincrona = (*chunks)[it->second.index]->has_await;
         firmas[f.name] = std::move(firma);
     }
     return firmas;
@@ -81,18 +93,22 @@ TablaFirmas construir_firmas(const Program& prog) {
 std::unique_ptr<NativeModule> compile_native(const Program& prog, const FunctionSigs& sigs,
                                               const ClassSigs& clases_sig,
                                               const std::filesystem::path& cache_dir,
-                                              std::string& aviso) {
+                                              std::string& aviso,
+                                              NativeReport* informe,
+                                              const FunctionTable* chunks,
+                                              const EnumSigs* enums) {
     aviso.clear();
+    if (informe) informe->rutas.assign(prog.routes.size(), "");
 
     std::vector<std::string> nombre_por_indice(sigs.size());
     for (const auto& [nombre, sig] : sigs)
         if (sig.index < nombre_por_indice.size()) nombre_por_indice[sig.index] = nombre;
 
-    const TablaFirmas firmas = construir_firmas(prog);
 
     TablaClases clases;
     TablaRoles  roles;
     construir_clases(prog, clases_sig, sigs, &prog.imports, clases, roles);
+    TablaFirmas firmas = construir_firmas(prog, sigs, chunks, clases);
 
     // El texto de cada clase representable va ANTES que ningun prototipo/
     // cuerpo: un LPunto usado como parametro/retorno necesita el tipo
@@ -100,7 +116,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // clases que ordenar -- el lenguaje no admite una clase como campo de
     // otra (project.cpp), asi que el orden entre ellas es indiferente.
     std::string clases_texto;
-    for (const auto& [nombre, cn] : clases) clases_texto += generar_clase_runtime(nombre, cn) + "\n";
+    for (const auto& [nombre, cn] : clases)
+        if (!cn.dinamica) clases_texto += generar_clase_runtime(nombre, cn) + "\n";
 
     struct Generada {
         size_t      indice;
@@ -116,30 +133,80 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // metodo (recibiendo la instancia ya construida) y viceversa.
     std::string prototipos;
     std::string cuerpos;
+    struct RutaGenerada {
+        size_t      indice;
+        std::string simbolo;
+    };
+    std::vector<RutaGenerada> rutas_generadas;       // void(Request&, Response&)
+    std::vector<RutaGenerada> rutas_async_generadas; // Task<void>(Request&, Response&)
+    std::string               rutas_cuerpos;
+    std::string               registros;     // record structs, before templates and routes
+    std::set<std::string>     render_keys;   // render() keys, see generate_native_template
+
+    // A check's Peticiones: a return or parameter becomes a Value (Json),
+    // and the whole set is generated again. Each is one type turned into
+    // Json for good, so this ends.
+    auto aplicar = [&](const Peticiones& p, const std::string& fn, const std::string& clase) {
+        bool cambio = false;
+        auto a_json = [&](Type& t) { if (!es_value(t)) { t = Type::json(); cambio = true; } };
+        if (p.retorno_value) {
+            if (clase.empty() && firmas.count(fn)) a_json(firmas[fn].retorno);
+            if (!clase.empty() && clases.count(clase) && clases[clase].metodos.count(fn))
+                a_json(clases[clase].metodos[fn].retorno);
+        }
+        for (const auto& [f, i] : p.params)
+            if (firmas.count(f) && i < firmas[f].params.size()) a_json(firmas[f].params[i]);
+        for (const auto& [c, m, i] : p.metodo_params)
+            if (clases.count(c) && clases[c].metodos.count(m) && i < clases[c].metodos[m].params.size())
+                a_json(clases[c].metodos[m].params[i]);
+        return cambio;
+    };
+
+    // A fixed point: a function or method that does not compile natively
+    // leaves the tables and the whole set is generated again, so a caller
+    // never references one that is missing -- a single dangling reference
+    // is a g++ error that sends the whole module back to bytecode.
+    for (bool changed = true; changed;) {
+    changed = false;
+    generadas.clear();
+    prototipos.clear();
+    cuerpos.clear();
+    rutas_generadas.clear();
+    rutas_async_generadas.clear();
+    rutas_cuerpos.clear();
+    registros.clear();
+    render_keys.clear();
+
+    auto drop_fn = [&](const std::string& n) { changed |= firmas.erase(n) > 0; };
 
     for (const auto& [nombre, sig] : sigs) {
         const FnDecl* fn = buscar_fn(prog, nombre);
         if (!fn) continue; // no deberia pasar: sigs viene de este mismo prog
+        if (!firmas.count(nombre)) continue;   // dropped by an earlier pass, its reason noted then
 
         DiagnosticBag diags_ir; // descartable: si esta funcion ya compilo a
                                 // bytecode, su cuerpo tipa limpio tambien aqui.
         Chunk         descartable;
-        // classes_ = nullptr, igual que build_functions() en project.cpp:
-        // una funcion SUELTA no puede construir instancias ni llamar a un
-        // metodo (el checker real solo resuelve eso dentro de una ruta/
-        // metodo, que si reciben ClassSigs) -- pasarlo aqui haria a este
-        // check_function() mas permisivo que el compilador real, la misma
-        // clase de divergencia que motivo la correccion critica de mas
-        // arriba. Una funcion suelta SI puede recibir/devolver una
-        // instancia ya construida (un parametro/retorno de tipo clase, sin
-        // tocar sus campos ni metodos) -- eso no necesita classes_ en
-        // absoluto, solo el tipo declarado del parametro.
-        Emitter emitter(diags_ir, &sigs, nullptr, &prog.imports);
+        // The same tables bytecode checks a function with
+        // (emit_function_bodies, project.cpp): classes and enums included.
+        Emitter emitter(diags_ir, &sigs, &clases_sig, &prog.imports, nullptr, enums);
         IrBlock body;
-        if (!emitter.check_function(*fn, descartable, diags_ir, &body)) continue;
+        if (!emitter.check_function(*fn, descartable, diags_ir, &body)) {
+            if (informe) informe->funciones.emplace_back(nombre, "not representable yet");
+            drop_fn(nombre);
+            continue;
+        }
 
-        auto generada = generar_funcion_nativa(*fn, body, nombre_por_indice, firmas, clases, roles);
-        if (!generada) continue;
+        std::string motivo;
+        Peticiones  pet;
+        auto generada = generar_funcion_nativa(*fn, body, nombre_por_indice, firmas, clases, roles,
+                                               &motivo, &pet);
+        if (!generada && aplicar(pet, nombre, "")) { changed = true; continue; }
+        if (!generada) {
+            if (informe) informe->funciones.emplace_back(nombre, motivo);
+            drop_fn(nombre);
+            continue;
+        }
 
         prototipos += generada->firma_cpp + ";\n";
         cuerpos += generada->firma_cpp + " " + generada->cuerpo_cpp + "\n\n";
@@ -169,13 +236,16 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
             // classes_ = &clases_sig aqui SI, igual que emit_class_bodies()
             // en project.cpp: un metodo si puede construir instancias y
             // llamar a otros metodos.
-            Emitter emitter(diags_ir, &sigs, &clases_sig, &prog.imports);
+            Emitter emitter(diags_ir, &sigs, &clases_sig, &prog.imports, nullptr, enums);
             IrBlock body;
-            if (!emitter.check_method(c.name, m, descartable, diags_ir, &body)) continue;
+            auto drop_method = [&] { changed |= clases.count(c.name) && clases[c.name].metodos.erase(m.name) > 0; };
+            if (!emitter.check_method(c.name, m, descartable, diags_ir, &body)) { drop_method(); continue; }
 
+            Peticiones pet;
             auto generada = generar_metodo_nativo(c.name, m, body, nombre_por_indice, firmas,
-                                                  clases, roles);
-            if (!generada) continue;
+                                                  clases, roles, &pet);
+            if (!generada && aplicar(pet, m.name, c.name)) { changed = true; continue; }
+            if (!generada) { drop_method(); continue; }
             prototipos += generada->firma_cpp + ";\n";
             cuerpos += generada->firma_cpp + " " + generada->cuerpo_cpp + "\n\n";
         }
@@ -185,13 +255,6 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // aporta prototipo (nadie mas la llama en C++ generado) -- su texto
     // completo (extern "C" incluido) se acumula aparte y va DESPUES de
     // cuerpos, sin que le afecte el orden alfabetico de `sigs`.
-    struct RutaGenerada {
-        size_t      indice;
-        std::string simbolo;
-    };
-    std::vector<RutaGenerada> rutas_generadas;       // void(Request&, Response&)
-    std::vector<RutaGenerada> rutas_async_generadas; // Task<void>(Request&, Response&)
-    std::string               rutas_cuerpos;
     for (size_t i = 0; i < prog.routes.size(); ++i) {
         const RouteDecl& r = prog.routes[i];
         if (r.method == "WS" || r.method == "SSE") continue;
@@ -202,18 +265,32 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
         // una ruta si puede construir instancias y llamar a metodos (aunque
         // esta primera fase de rutas no llegue a generar ninguno de esos
         // casos -- ver el comentario de RutaNativa).
-        Emitter  emitter(diags_ir, &sigs, &clases_sig, &prog.imports);
+        // A template context so render() checks; the templates themselves
+        // are compiled by build_routes (TemplateCtx::by_key).
+        std::vector<Template> plantillas;
+        TemplateCtx           tctx{prog.app.templates_dir, &plantillas};
+        Emitter  emitter(diags_ir, &sigs, &clases_sig, &prog.imports, &tctx, enums);
         IrBlock  body;
-        if (!emitter.check_route(r, descartable, diags_ir, &body)) continue;
+        if (!emitter.check_route(r, descartable, diags_ir, &body)) {
+            if (informe) informe->rutas[i] = "not representable yet";
+            continue;
+        }
 
+        Peticiones pet;
         auto generada = generate_native_route(r, body, static_cast<int>(i), nombre_por_indice,
-                                            firmas, clases, roles);
+                                            firmas, clases, roles,
+                                            informe ? &informe->rutas[i] : nullptr, &pet);
+        if (!generada && aplicar(pet, "", "")) { changed = true; continue; }
         if (!generada) continue;
 
         rutas_cuerpos += generada->cuerpo_cpp + "\n\n";
+        registros += generada->registros_cpp;
+        render_keys.insert(generada->plantillas.begin(), generada->plantillas.end());
         (generada->asincrona ? rutas_async_generadas : rutas_generadas)
             .push_back({i, generada->simbolo});
     }
+
+    }   // fixed point
 
     if (generadas.empty() && rutas_generadas.empty() && rutas_async_generadas.empty())
         return nullptr; // nada que ofrecer nativo: no es un error
@@ -221,10 +298,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     const bool con_rutas = !rutas_generadas.empty() || !rutas_async_generadas.empty();
 
     std::string codigo =
-        "#include <cctype>\n#include <cstdint>\n#include <initializer_list>\n#include <map>\n"
-        "#include <string>\n#include <utility>\n#include <vector>\n\n" +
-        abi_prelude() + "\n" + error_runtime_prelude() + "\n" + list_runtime_prelude() + "\n" +
-        dict_runtime_prelude() + "\n" + string_runtime_prelude() + "\n";
+        "#include <algorithm>\n#include <array>\n#include <cctype>\n#include <charconv>\n#include <cstring>\n#include <cstdint>\n#include <initializer_list>\n#include <map>\n"
+        "#include <string>\n#include <utility>\n#include <vector>\n\n";
     // lux_script::Value hace falta SIEMPRE que algo pueda usar str() --
     // Generador::expr() lo traduce a valor_json(...).to_string(), el mismo
     // puente que usa el valor de retorno de una ruta -- no solo cuando hay
@@ -246,8 +321,23 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // igualmente podria tener esa funcion. La misma clase de descuido que
     // ya corrigio value.hpp mas abajo: no asumir que un caso nuevo hereda
     // las condiciones de guarda de uno anterior sin volver a mirarlas.
+    //
+    // Both moved BEFORE the prelude blocks below (they used to come after):
+    // string_runtime_prelude()'s lux_str_upper/lower now call
+    // lux_script::utf8_upper/lower (value.hpp) directly instead of a second,
+    // ASCII-only reimplementation, so the declaration has to be visible
+    // before that prelude text, not after it -- the same "used before
+    // declared" g++ error a plain function with no route at all (fib(),
+    // count_primes()...) surfaced immediately, since it has no OTHER
+    // dependency that would have pulled value.hpp in first.
     codigo += "#include <lux_script/natives.hpp>\n\n";
     codigo += "#include <lux_script/value.hpp>\nusing lux_script::Value;\n\n";
+    // bind_json_flat/JsonFieldSpec/JsonBound: el binder de cuerpos que
+    // codigo_bind_cuerpo() llama en cada ruta con parametro de clase.
+    codigo += "#include <lux_script/json_bind.hpp>\n\n";
+    codigo +=
+        abi_prelude() + "\n" + error_runtime_prelude() + "\n" + list_runtime_prelude() + "\n" +
+        dict_runtime_prelude() + "\n" + string_runtime_prelude() + "\n";
     // Cabeceras de lux::Request/Response y el binding de parametros SOLO
     // si hay al menos una ruta: eso si es exclusivo de rutas (ninguna
     // funcion suelta ve jamas un Request/Response).
@@ -259,17 +349,46 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // <modulo>.query/exec/last_id(...)` -- mismo criterio que Task/sleep:
     // siempre que haya rutas, no solo las que de verdad usan una base de
     // datos.
-    if (con_rutas)
-        codigo += "#include <lux/request.hpp>\n#include <lux/response.hpp>\n"
-                  "#include <lux/task.hpp>\n#include <lux_script/db.hpp>\n\n" +
+    // Always, not only with routes: a function can call a module too (see
+    // lux_fn_module_call), through the request its caller is serving.
+    codigo += "#include <lux/request.hpp>\n#include <lux/response.hpp>\n"
+                  "#include <lux/task.hpp>\n#include <lux/blocking_pool.hpp>\n"
+                  "#include <lux_script/db.hpp>\n#include <lux_script/builtin_module.hpp>\n"
+                  "#include <lux_script/auth.hpp>\n#include <lux/logger.hpp>\n#include <lux/multipart.hpp>\n\n" +
                   route_runtime_prelude() + "\n";
     codigo += clases_texto + "\n" + prototipos + "\n" + cuerpos;
-    if (con_rutas) codigo += rutas_cuerpos;
+    if (con_rutas) {
+        codigo += registros;
+        // Each template a route renders, compiled here the way
+        // emit_compiled_render does (same file, same names and types, so the
+        // same expressions at the same indices), into C++.
+        for (const auto& fnkey : render_keys) {
+            // "#..." after the key: a variant for record arguments.
+            const std::string key = fnkey.substr(0, fnkey.find('#'));
+            const std::string name = key.substr(0, key.find('|'));
+            std::vector<TypedName> keys;
+            for (size_t i = key.find('|') + 1; i < key.size();) {
+                const size_t colon = key.find(':', i), comma = key.find(',', i);
+                keys.push_back({key.substr(i, colon - i), key.substr(colon + 1, comma - colon - 1)});
+                i = comma + 1;
+            }
+            DiagnosticBag tdiags;
+            Template tpl;
+            auto source = read_whole_file(std::filesystem::path(prog.app.templates_dir) / name);
+            if (source && compile_template(*source, name, prog.app.templates_dir, keys, tdiags, tpl,
+                                                  TemplateEnv{&sigs, &clases_sig, &prog.imports, enums}))
+                codigo += generate_native_template(tpl, fnkey) + "\n";
+            else   // build_routes reports why; this only has to link
+                codigo += "static void " + native_template_fn(fnkey) + "(lux_script::NativeCtx&, auto&&...) {\n"
+                          "    lux_native_fail(\"render(): template not compiled\");\n}\n";
+        }
+        codigo += rutas_cuerpos;
+    }
 
     std::error_code ec;
     std::filesystem::create_directories(cache_dir, ec);
     if (ec) {
-        aviso = "--native: no se pudo crear " + cache_dir.string() + ": " + ec.message();
+        aviso = "--native: could not create " + cache_dir.string() + ": " + ec.message();
         return nullptr;
     }
 
@@ -308,7 +427,7 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // wrappers extern "C" siguen exportados igual, dlsym() no se entera),
     // solo la asuncion de codegen -- no hay ningun escenario de
     // LD_PRELOAD/interposicion real que este .so necesite soportar.
-    cmd << cxx << " -O2 -shared -fPIC -fno-semantic-interposition -std=c++20 ";
+    cmd << cxx << " -O2 -shared -fPIC -fno-semantic-interposition -std=c++23 ";
 #ifdef LUX_IO_URING
     // lux::core::EventLoop (event_loop.hpp) resuelve a IoUringLoop o
     // EpollLoop segun si ESTE macro esta definido en el momento en que se
@@ -323,8 +442,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // symbol" en CUALQUIER ruta con `await` (encontrado por
     // native_route_shadow al construir con -DLUX_IO_URING=ON, no
     // adivinado de antemano) -- el mismo tipo de descuido de "una flag que
-    // un proceso nuevo no hereda sola" que ya motivo LUX_NATIVE_CAIRO_LIBS/
-    // LUX_NATIVE_CURL_LIBS mas abajo.
+    // un proceso nuevo no hereda sola" que ya motivo LUX_NATIVE_EXTRA_LIBS
+    // mas abajo.
     cmd << "-DLUX_IO_URING ";
 #endif
     // LUX_NATIVE_INCLUDE_DIR/LUX_NATIVE_SCRIPT_LIB: horneadas por CMake
@@ -335,20 +454,10 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     cmd << "-I" << std::quoted(std::string(LUX_NATIVE_INCLUDE_DIR)) << " ";
     cmd << std::quoted(src_path.string()) << " -o " << std::quoted(so_path.string());
     cmd << " " << std::quoted(std::string(LUX_NATIVE_SCRIPT_LIB));
-#ifdef LUX_NATIVE_CAIRO_LIBS
-    // liblux_script.a carries pdf.cpp's object file unconditionally
-    // (it is part of the archive regardless of which .lux is being compiled
-    // right now), so cairo's own link flags are needed on EVERY --native
-    // build, not only one that happens to use `pdf` -- see the comment next
-    // to LUX_NATIVE_CAIRO_LIBS in CMakeLists.txt for how this was found.
-    // Not std::quoted: this can be several space-separated flags
-    // ("-lcairo -lpixman-1..."), and quoting it would turn them into one.
-    cmd << " " << LUX_NATIVE_CAIRO_LIBS;
-#endif
-#ifdef LUX_NATIVE_CURL_LIBS
-    // Same reasoning, same fix, for http.cpp/libcurl.
-    cmd << " " << LUX_NATIVE_CURL_LIBS;
-#endif
+// The optional modules' libraries (cairo, curl, libcrypto...): the archive
+    // carries their objects whatever this .lux uses -- see
+    // lux_optional_module() in CMakeLists.txt. Several flags, not quoted.
+    cmd << " " << LUX_NATIVE_EXTRA_LIBS;
     // liblux.a: SOLO si hay rutas -- una funcion suelta nunca usa
     // lux::Task/lux::Response, asi que nunca deja un simbolo de lux
     // sin resolver. Orden importante para un enlazado estatico: DESPUES de
@@ -358,15 +467,39 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // con `await`, ver el comentario de LUX_NATIVE_LIB en CMakeLists.txt).
     if (con_rutas) cmd << " " << std::quoted(std::string(LUX_NATIVE_LIB));
     cmd << " 2> " << std::quoted(err_path.string());
-    if (std::system(cmd.str().c_str()) != 0) {
+
+    // Build cache: g++ takes seconds, and the same program generates the
+    // same .cpp every start. The key covers the source, the exact command
+    // (compiler, flags, paths) and the identity of what the .so links
+    // against or is loaded into -- rebuilding lux changes those mtimes and
+    // forces a recompile. The key is written only after g++ succeeds.
+    const std::filesystem::path key_path = cache_dir / "native.key";
+    std::string clave = codigo + '\0' + cmd.str();
+    for (const char* dep : {LUX_NATIVE_SCRIPT_LIB, LUX_NATIVE_LIB, "/proc/self/exe"}) {
+        std::error_code e1, e2;
+        const auto p = std::filesystem::canonical(dep, e1);
+        clave += '\0' + std::to_string(e1 ? 0 : std::filesystem::file_size(p, e2)) + ':' +
+                 std::to_string(e1 ? 0LL : static_cast<long long>(std::filesystem::last_write_time(p, e2).time_since_epoch().count()));
+    }
+    const std::string clave_hash = std::to_string(std::hash<std::string>{}(clave));
+    std::string clave_previa;
+    {
+        std::ifstream kin(key_path);
+        std::getline(kin, clave_previa);
+    }
+    const bool en_cache = clave_previa == clave_hash && std::filesystem::exists(so_path, ec);
+
+    std::filesystem::remove(key_path, ec); // stale until this compile succeeds
+    if (!en_cache && std::system(cmd.str().c_str()) != 0) {
         std::ifstream errf(err_path);
         std::ostringstream errs;
         errs << errf.rdbuf();
         aviso = "--native: " + std::to_string(generadas.size() + rutas_generadas.size() +
                                               rutas_async_generadas.size()) +
-                " funcion(es)/ruta(s) no se pudieron compilar (g++ fallo): " + errs.str();
+                " function(s)/route(s) could not be compiled (g++ failed): " + errs.str();
         return nullptr;
     }
+    std::ofstream(key_path, std::ios::trunc) << clave_hash << '\n';
 
     void* handle = dlopen(so_path.c_str(), RTLD_NOW);
     if (!handle) {
@@ -377,8 +510,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
         // probando esto contra un dlopen que de verdad fallaba). Una sola
         // llamada, guardada.
         const char* motivo = dlerror();
-        aviso = std::string("--native: no se pudo cargar la biblioteca generada: ") +
-                (motivo ? motivo : "motivo desconocido");
+        aviso = std::string("--native: could not load the generated library: ") +
+                (motivo ? motivo : "unknown reason");
         return nullptr;
     }
 
@@ -390,6 +523,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
 
     out->error_message =
         reinterpret_cast<ErrorMessageFn>(dlsym(handle, "lux_native_error_message"));
+
+    out->bind = reinterpret_cast<NativeModule::BindFn>(dlsym(handle, "lux_native_bind"));
 
     std::string simbolos_sin_resolver;
     for (const auto& g : generadas) {
@@ -408,8 +543,9 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
         out->rutas_async_por_indice[g.indice] = reinterpret_cast<NativeModule::RouteFnAsync>(sym);
     }
     if (!out->error_message) simbolos_sin_resolver += " lux_native_error_message";
+    if (!out->bind) simbolos_sin_resolver += " lux_native_bind";
     if (!simbolos_sin_resolver.empty())
-        aviso = "--native: simbolo(s) no resueltos tras compilar (se sirven con bytecode):" +
+        aviso = "--native: unresolved symbol(s) after compiling (served with bytecode):" +
                 simbolos_sin_resolver;
 
     return out;

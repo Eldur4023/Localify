@@ -11,6 +11,7 @@
 #include "ast.hpp"
 #include "emitter.hpp"
 #include "native_build.hpp"
+#include "auth.hpp"
 #include "template.hpp"
 #include "diagnostic.hpp"
 
@@ -33,6 +34,8 @@ struct Module {
     // Every render() in the source has its own, compiled against the specific
     // keys that call passes it.
     std::vector<Template> templates;
+    std::map<std::string, size_t, std::less<>> template_keys;   // TemplateCtx::by_key
+    std::shared_ptr<void>         native_binds;    // each route's parameter binds, for prepare_native_args
 
     // Signatures of those same functions -- kept only so it can be offered
     // to compile_native() without rebuilding it; the rest of the module does
@@ -71,6 +74,8 @@ struct Module {
         std::string path; // "declarative" | "native" | "native (async)" | "bytecode" | "ws" | "sse"
     };
     std::vector<RouteReport> route_report;
+    NativeReport native_why;   // why --native left a route or function on bytecode
+    AuthConfig   auth;         // session/JWT settings; native routes read them through bind
 
     // mtimes of the compiled files, to detect changes.
     std::vector<std::pair<std::filesystem::path,
@@ -103,6 +108,13 @@ bool resolve_inputs(const std::vector<std::string>& args,
 // compiled are served with bytecode, same as if `native` were false.
 std::shared_ptr<Module> compile(const std::vector<std::filesystem::path>& inputs,
                                 DiagnosticBag& diags, bool native = false);
+
+// Runs the module's `on error` handler for `code` against the response that is
+// being replaced. The handler may `await` (a database read, a module call),
+// like a route. If it fails the original response stays and the failure is
+// logged. A no-op when the module has no handler for the code.
+lux::Task<void> run_error_handler(const Module& mod, int code, lux::Request& req,
+                                  lux::Response& res);
 
 // Formats the diagnostics of a failed attempt using the files that were read.
 std::string format_errors(const DiagnosticBag& diags,

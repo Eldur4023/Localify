@@ -6,6 +6,7 @@
 // sistema, lo ejecuta, y compara su salida contra la misma funcion
 // corriendo en el VM.
 #include <lux_script/diagnostic.hpp>
+#include "parse_program.hpp"
 #include <lux_script/emitter.hpp>
 #include <lux_script/lexer.hpp>
 #include <lux_script/native_gen.hpp>
@@ -26,16 +27,6 @@
 using namespace lux_script;
 
 static int fallos = 0;
-
-static bool parse_program(const std::string& src, SourceFile& file, DiagnosticBag& diags,
-                          Program& out) {
-    file.path = "<prueba>";
-    file.text = src;
-    Lexer  lexer(file, diags);
-    Parser parser(lexer.tokenize(), diags);
-    parser.parse_into(out);
-    return diags.empty();
-}
 
 static long long ejecutar_vm(const Chunk& chunk, long long arg, const FunctionTable* fns) {
     lux::Request  req;
@@ -129,7 +120,11 @@ int main() {
     // fase exige que fib/cuenta_primos SI se puedan generar -- si alguna no
     // se pudiera, seria una regresion del generador, no un resultado
     // aceptable que silenciar.
-    std::string codigo = "#include <cstdint>\n#include <string>\n\n" + error_runtime_prelude() + "\n";
+    // lux_truthy() lives in string_runtime_prelude(), which needs Value;
+    // this standalone build only needs the scalar overloads.
+    std::string codigo = "#include <cstdint>\n#include <string>\n\n" + error_runtime_prelude() + "\n"
+                         "inline bool lux_truthy(bool b) { return b; }\n"
+                         "inline bool lux_truthy(int64_t i) { return i != 0; }\n";
     for (size_t i = 0; i < prog.functions.size(); ++i) {
         auto f = generar_funcion_nativa(prog.functions[i], cuerpos[i], por_indice, firmas,
                                         TablaClases{}, TablaRoles{});
@@ -166,7 +161,7 @@ int main() {
         out << codigo;
     }
 
-    std::string cmd_compila = std::string("g++ -O2 -std=c++20 ") + src_path + " -o " + bin_path +
+    std::string cmd_compila = std::string("g++ -O2 -std=c++23 ") + src_path + " -o " + bin_path +
                               " 2>" + err_path;
     if (std::system(cmd_compila.c_str()) != 0) {
         std::printf("FALLA: el C++ generado no compilo -- ver %s\n", err_path);

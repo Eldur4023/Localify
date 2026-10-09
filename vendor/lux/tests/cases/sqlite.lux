@@ -95,7 +95,7 @@ get endpoint("/length"):
     List<Json> rows = await sqlite.query("select body from articles where title = ?", "long")
     if len(rows) == 0:
         return status(404)
-    return { "recibido": len(rows[0]["body"]), "esperado": 4000 }
+    return { "received": len(rows[0]["body"]), "expected": 4000 }
 
 # ── Types ────────────────────────────────────────────────────────────────────
 
@@ -145,7 +145,7 @@ get endpoint("/unicode"):
 
 get endpoint("/injection", string q = "x"):
     List<Json> rows = await sqlite.query("select id from articles where title = ?", q)
-    return { "encontrados": len(rows) }
+    return { "found": len(rows) }
 
 # ── Escritura ────────────────────────────────────────────────────────────────
 
@@ -183,3 +183,53 @@ get endpoint("/bad_table"):
 
 get endpoint("/too_few_params"):
     return await sqlite.query("select * from articles where id = ? and title = ?", 1)
+
+# Two independent reads back to back: --native runs them at once
+# (lux::when_both). Each result must still land in its own variable.
+get endpoint("/pair/:id", int id):
+    List<Json> one = await sqlite.query("select title from articles where id = ?", id)
+    List<Json> all = await sqlite.query("select count(*) as n from articles")
+    return { "title": one[0]["title"], "count": all[0]["n"] }
+
+# ── Isolation: a worker holding an open transaction serves no one else ──────
+# Without it, an autocommit insert could land on that connection, run inside
+# the other request's transaction and vanish with its rollback.
+get endpoint("/iso_setup"):
+    await sqlite.exec("create table if not exists iso (v integer)")
+    await sqlite.exec("delete from iso")
+    return { "ok": true }
+
+get endpoint("/iso_rollback"):
+    await sqlite.begin()
+    await sleep(400)
+    await sqlite.rollback()
+    return { "ok": true }
+
+get endpoint("/iso_insert"):
+    return { "n": await sqlite.exec("insert into iso values (1)") }
+
+get endpoint("/iso_count"):
+    return await sqlite.query("select count(*) as n from iso")
+
+# A failed query read as rows: the error has to name the real cause.
+get endpoint("/bad_index"):
+    List<Json> rows = await sqlite.query("select * from no_such_table")
+    return rows[0]
+
+# A failed statement raises at its await; try catches it, and the
+# transaction it happened in is aborted until rolled back.
+get endpoint("/caught_in_tx"):
+    await sqlite.begin()
+    string caught = ""
+    try:
+        await sqlite.exec("insert into no_such_table values (1)")
+    catch e:
+        caught = e.message
+    string after = ""
+    try:
+        await sqlite.query("select 1")
+    catch e:
+        after = e.message
+    await sqlite.rollback()
+    List<Json> ok = await sqlite.query("select 1 as one")
+    return { "caught": caught, "after": after, "then": ok[0]["one"] }

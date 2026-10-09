@@ -200,6 +200,17 @@ void Lexer::lex_string(SourceLoc loc) {
         if (c != '\\') { value += c; continue; }
 
         if (eof()) { diags_.error(loc, "unterminated string"); break; }
+        // "\" before a line break is not an escape: the single-line form does
+        // not span lines (grammar §5), and eating the break here would weld
+        // the next line onto this statement behind a misleading "unknown
+        // escape".  Report the real problem and let the break end the line,
+        // exactly like the unterminated case above.
+        if (peek() == '\n' || peek() == '\r') {
+            diags_.error(loc,
+                         "unterminated string: \\ at the end of the line does not "
+                         "continue it -- use triple quotes to span lines");
+            break;
+        }
         char e = advance();
         char d;
         if (escape_char(e, d)) {
@@ -281,6 +292,12 @@ void Lexer::lex_token() {
     if (is_ident_start(static_cast<unsigned char>(c))){ lex_ident(loc);  return; }
 
     advance();
+    // "X=" if the next char is '=', else plain "X".
+    auto if_eq = [&](Tok with_eq, Tok plain) {
+        if (peek() != '=') return plain;
+        advance();
+        return with_eq;
+    };
     switch (c) {
         case '(': ++bracket_depth_; push(Tok::LParen, loc);   return;
         case ')': if (bracket_depth_) --bracket_depth_; push(Tok::RParen, loc);   return;
@@ -299,18 +316,9 @@ void Lexer::lex_token() {
             else if (peek() == '=') { advance(); push(Tok::PlusEq, loc); }
             else                    { push(Tok::Plus, loc); }
             return;
-        case '*':
-            if (peek() == '=') { advance(); push(Tok::StarEq, loc); }
-            else               { push(Tok::Star, loc); }
-            return;
-        case '/':
-            if (peek() == '=') { advance(); push(Tok::SlashEq, loc); }
-            else               { push(Tok::Slash, loc); }
-            return;
-        case '%':
-            if (peek() == '=') { advance(); push(Tok::PercentEq, loc); }
-            else               { push(Tok::Percent, loc); }
-            return;
+        case '*': push(if_eq(Tok::StarEq,    Tok::Star),    loc); return;
+        case '/': push(if_eq(Tok::SlashEq,   Tok::Slash),   loc); return;
+        case '%': push(if_eq(Tok::PercentEq, Tok::Percent), loc); return;
 
         case '-':
             // '->' of the static mount, '--' and '-=' before the bare minus.
@@ -319,27 +327,18 @@ void Lexer::lex_token() {
             else if (peek() == '=') { advance(); push(Tok::MinusEq, loc); }
             else                    { push(Tok::Minus, loc); }
             return;
-        case '=':
-            if (peek() == '=') { advance(); push(Tok::Eq, loc); }
-            else               { push(Tok::Assign, loc); }
-            return;
+        case '=': push(if_eq(Tok::Eq, Tok::Assign), loc); return;
         case '!':
             if (peek() == '=') { advance(); push(Tok::NotEq, loc); return; }
             diags_.error(loc, "stray '!': negation is written 'not'");
             return;
-        case '<':
-            if (peek() == '=') { advance(); push(Tok::LtEq, loc); }
-            else               { push(Tok::Lt, loc); }
-            return;
-        case '>':
-            // '>' '>' never merge: List<Dict<string,int>> has to close with two
-            // independent Gt tokens.
-            if (peek() == '=') { advance(); push(Tok::GtEq, loc); }
-            else               { push(Tok::Gt, loc); }
-            return;
+        case '<': push(if_eq(Tok::LtEq, Tok::Lt), loc); return;
+        // '>' '>' never merge: List<Dict<string,int>> has to close with two
+        // independent Gt tokens.
+        case '>': push(if_eq(Tok::GtEq, Tok::Gt), loc); return;
     }
 
-    diags_.error(loc, std::string("caracter inesperado: '") + c + "'");
+    diags_.error(loc, std::string("unexpected character: '") + c + "'");
 }
 
 std::vector<Token> Lexer::tokenize() {

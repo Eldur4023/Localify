@@ -31,6 +31,14 @@ namespace lux_script {
 // aparecen aqui; quien las llame seguira sirviendolas con bytecode. Eso es
 // el modo mixto que describe el documento, aplicado a funciones sueltas
 // porque esta fase no llega todavia a rutas.
+// Why --native left something on bytecode, for `--native --check`: per
+// route (by index in Program::routes, "" when it compiled or has nothing to
+// say) and per function that did not compile.
+struct NativeReport {
+    std::vector<std::string>                         rutas;
+    std::vector<std::pair<std::string, std::string>> funciones;
+};
+
 class NativeModule {
 public:
     NativeModule() = default;
@@ -67,6 +75,12 @@ public:
     using RouteFnAsync = lux::Task<void> (*)(lux::Request&, lux::Response&);
     std::vector<RouteFnAsync> rutas_async_por_indice;
 
+    // Hands the module's function and template tables to the generated
+    // code, for the NativeCtx its routes build (map(f), render(...)).
+    using BindFn = void (*)(const void* functions, const void* templates, const void* auth,
+                            const void* template_keys, const void* binds);
+    BindFn bind = nullptr;
+
     size_t compiled() const;
     size_t routes_compiled() const;
 
@@ -78,7 +92,8 @@ private:
     friend std::unique_ptr<NativeModule> compile_native(const Program&, const FunctionSigs&,
                                                           const ClassSigs&,
                                                           const std::filesystem::path&,
-                                                          std::string&);
+                                                          std::string&, NativeReport*,
+                                                          const FunctionTable*, const EnumSigs*);
     void* handle_ = nullptr;
 };
 
@@ -86,8 +101,8 @@ private:
 // biblioteca compartida las funciones de `prog` (sueltas, y metodos/
 // constructores de `clases`) que native_gen.cpp sabe representar.
 // `cache_dir` es donde queda el .cpp/.so generados (se crea si hace falta)
-// -- hoy siempre se regenera; el cacheado por hash de fuentes que describe
-// la seccion 11 del documento queda para cuando de verdad haga falta.
+// -- g++ only runs when native.key (hash of the source, the command and the
+// linked libraries) no longer matches; otherwise the existing .so is reused.
 //
 // Esto NUNCA tumba la compilacion del modulo -- a diferencia del resto del
 // compilador, un fallo aqui (falta `g++`, un error de enlazado, dlopen sin
@@ -99,6 +114,9 @@ private:
 std::unique_ptr<NativeModule> compile_native(const Program& prog, const FunctionSigs& sigs,
                                               const ClassSigs& clases,
                                               const std::filesystem::path& cache_dir,
-                                              std::string& aviso);
+                                              std::string& aviso,
+                                              NativeReport* informe = nullptr,
+                                              const FunctionTable* chunks = nullptr,
+                                              const EnumSigs* enums = nullptr);
 
 } // namespace lux_script

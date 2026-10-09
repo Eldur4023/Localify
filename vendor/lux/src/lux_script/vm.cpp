@@ -34,10 +34,11 @@ bool compare(const Value& a, const Value& b, Op op, bool& ok) {
     }
 }
 
-// Un valor de Lux Script solo puede ser Int/Float/Bool al cruzar hacia
-// nativo -- generar_funcion_nativa() ya garantiza que una funcion solo se
-// ofrece por esta via si todos sus parametros y su retorno son uno de esos
-// tres, asi que el tipo real siempre coincide con el que el wrapper espera.
+// A Lux Script value can only be Int/Float/Bool when crossing over to
+// native code -- generar_funcion_nativa() already guarantees that a
+// function is only offered through this path if all of its parameters and
+// its return type are one of those three, so the real type always matches
+// what the wrapper expects.
 NativeValue a_nativevalue(const Value& v) {
     NativeValue n;
     if (v.is_float()) { n.tag = NativeValue::Tag::Float; n.d = v.as_float(); }
@@ -56,29 +57,41 @@ Value de_nativevalue(const NativeValue& n) {
 
 } // namespace
 
-VM::Result VM::start(const Chunk& chunk, std::vector<Value> params, NativeCtx& ctx,
-                     const FunctionTable* functions, const NativeDispatch* native) {
+void VM::begin(const Chunk& chunk, const FunctionTable* functions, const NativeDispatch* native) {
     functions_ = functions;
     native_    = native;
     frames_.clear();
     stack_.clear();
 
-    // Capacidad reservada de una vez: frames_ tiene un tope fijo conocido
-    // (kMaxFrames) que nunca cambia, y stack_/locals_ usan un margen generoso
-    // para el grueso de los handlers reales en vez del 32 arbitrario de antes.
-    // reserve() no reasigna si la capacidad ya alcanza (el caso normal cuando
-    // esta misma VM se reutiliza entre peticiones via el shared_vm thread_local
-    // de project.cpp), asi que esto no cambia el comportamiento observable:
-    // solo evita las reasignaciones repetidas de std::vector::push_back/resize
-    // que salian en el perfil de CPU (Value::emplace_back, ver bench/RESULTS.md).
+    // Capacity reserved once: frames_ has a known fixed cap (kMaxFrames)
+    // that never changes, and stack_/locals_ use a generous margin covering
+    // the bulk of real handlers instead of the arbitrary 32 from before.
+    // reserve() doesn't reallocate if the capacity already suffices (the
+    // normal case when this same VM is reused between requests via
+    // project.cpp's thread_local shared_vm), so this doesn't change
+    // observable behavior: it just avoids the repeated reallocations of
+    // std::vector::push_back/resize that showed up in the CPU profile.
     frames_.reserve(kMaxFrames);
     stack_.reserve(256);
     locals_.reserve(256);
 
     locals_.assign(static_cast<size_t>(chunk.num_locals), Value::null());
+}
+
+VM::Result VM::start(const Chunk& chunk, std::vector<Value>&& params, NativeCtx& ctx,
+                     const FunctionTable* functions, const NativeDispatch* native) {
+    begin(chunk, functions, native);
     for (size_t i = 0; i < params.size() && i < locals_.size(); ++i)
         locals_[i] = std::move(params[i]);
+    frames_.push_back(Frame{&chunk, 0, 0, 0});
+    return execute(ctx);
+}
 
+VM::Result VM::start(const Chunk& chunk, const std::vector<Value>& params, NativeCtx& ctx,
+                     const FunctionTable* functions, const NativeDispatch* native) {
+    begin(chunk, functions, native);
+    for (size_t i = 0; i < params.size() && i < locals_.size(); ++i)
+        locals_[i] = params[i];
     frames_.push_back(Frame{&chunk, 0, 0, 0});
     return execute(ctx);
 }
@@ -111,9 +124,22 @@ Value error_value(const std::string& message) {
 
 // Runs and, if something fails inside a `try`, jumps to its `catch` and goes on.
 // The error is delivered as one more value, on top of the stack.
-VM::Result VM::execute(NativeCtx& ctx) {
-    Result r = run_until_error(ctx);
+VM::Result VM::execute(NativeCtx& ctx) { return unwind(run_until_error(ctx), ctx); }
+
+VM::Result VM::resume_error(std::string message, SourceLoc loc, NativeCtx& ctx) {
+    return unwind(fail(std::move(message), loc), ctx);
+}
+
+VM::Result VM::unwind(Result r, NativeCtx& ctx) {
     while (r.status == Status::Error) {
+        // abort(): the whole handler ends here -- no `try` sees it -- and, the
+        // response being written already, it is an ordinary finish.
+        if (r.error == kAbortMessage) {
+            frames_.clear(); stack_.clear(); locals_.clear();
+            Result done;
+            done.status = Status::Done;
+            return done;
+        }
         // The frame's pc already points at the next instruction, so the one
         // that failed is the previous one.  An error climbs the frames until it
         // finds a try covering it: if the callee does not handle it, the caller may.
@@ -149,7 +175,7 @@ VM::Result VM::execute(NativeCtx& ctx) {
 // 1 + "1" is an error, not "11": operating across different types is exactly
 // what Lux Script does not want to inherit from JavaScript.  To join a number
 // to a string you have to say so: "n = " + str(n).
-static bool add_values(const Value& a, const Value& b, Value& out, std::string& err) {
+bool add_values(const Value& a, const Value& b, Value& out, std::string& err) {
     if (a.is_str() && b.is_str()) {
         out = Value::str(a.as_str() + b.as_str());
         return true;
@@ -228,6 +254,18 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
             case Op::Pop:
                 pop();
                 break;
+
+            case Op::CoerceInt: {
+                Value v = pop();
+                push(v.is_float() ? Value::integer(static_cast<long long>(v.as_float())) : v);
+                break;
+            }
+
+            case Op::CoerceFloat: {
+                Value v = pop();
+                push(v.is_int() ? Value::real(static_cast<double>(v.as_int())) : v);
+                break;
+            }
 
             case Op::Add: generic_add: {
                 Value b = pop(), a = pop();
@@ -327,7 +365,7 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 bool r  = compare(a, b, generic_form_of(in.op), ok);
                 if (!ok)
                     return fail(std::string("cannot compare ") + a.type_name() +
-                                " y " + b.type_name(), in.loc);
+                                " and " + b.type_name(), in.loc);
                 push(Value::boolean(r));
                 break;
             }
@@ -440,7 +478,8 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                     push(l[static_cast<size_t>(i)]);
                 } else if (obj.is_dict()) {
                     if (!idx.is_str())
-                        return fail("a Dict key must be a string", in.loc);
+                        return fail(idx.is_int() ? dict_int_index_error(obj)
+                                                 : "a Dict key must be a string", in.loc);
                     auto& d  = obj.as_dict();
                     auto  it = d.find(idx.as_str());
                     push(it == d.end() ? Value::null() : it->second);
@@ -460,6 +499,19 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                     keys.reserve(v.as_dict().size());
                     for (const auto& [k, _] : v.as_dict()) keys.push_back(Value::str(k));
                     push(Value::list(std::move(keys)));
+                    break;
+                }
+                // A string walks its own codepoints (utf8_chars(),
+                // value.hpp) -- there was no OTHER way to go character by
+                // character over a string at all before this (no index-
+                // based char access either): a slugify, a per-letter
+                // validation, anything of that shape had no way to be
+                // written. Same helper `split(s, "")` uses, so both give
+                // the same characters for the same string.
+                if (v.is_str()) {
+                    Value::List chars;
+                    for (auto& ch : utf8_chars(v.as_str())) chars.push_back(Value::str(std::move(ch)));
+                    push(Value::list(std::move(chars)));
                     break;
                 }
                 return fail(std::string("cannot iterate over ") + v.type_name() +
@@ -482,8 +534,7 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 uint32_t name_k = in.operand >> 8;
                 int      argc   = static_cast<int>(in.operand & 0xFF);
 
-                std::vector<Value> args(static_cast<size_t>(argc));
-                for (int i = argc; i-- > 0;) args[static_cast<size_t>(i)] = pop();
+                std::vector<Value> args = pop_args(argc);
                 Value recv = pop();
 
                 std::string error;
@@ -494,29 +545,14 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 break;
             }
 
-            case Op::CallNative: {
-                int id   = static_cast<int>(in.operand >> 8);
-                int argc = static_cast<int>(in.operand & 0xFF);
-
-                std::vector<Value> args(static_cast<size_t>(argc));
-                for (int i = argc; i-- > 0;) args[static_cast<size_t>(i)] = pop();
+            // Same shape, two id-spaces: kNatives vs BuiltinModuleRegistry.
+            case Op::CallNative: case Op::CallBuiltinModule: {
+                int id = static_cast<int>(in.operand >> 8);
+                std::vector<Value> args = pop_args(static_cast<int>(in.operand & 0xFF));
 
                 std::string error;
-                Value out = native_at(id).fn(ctx, args, error);
-                if (!error.empty()) return fail(std::move(error), in.loc);
-                push(std::move(out));
-                break;
-            }
-
-            case Op::CallBuiltinModule: {
-                int id   = static_cast<int>(in.operand >> 8);
-                int argc = static_cast<int>(in.operand & 0xFF);
-
-                std::vector<Value> args(static_cast<size_t>(argc));
-                for (int i = argc; i-- > 0;) args[static_cast<size_t>(i)] = pop();
-
-                std::string error;
-                Value out = builtin_module_function_at(id).fn(ctx, args, error);
+                Value out = in.op == Op::CallNative ? native_at(id).fn(ctx, args, error)
+                                                    : builtin_module_function_at(id).call(ctx, args, error);
                 if (!error.empty()) return fail(std::move(error), in.loc);
                 push(std::move(out));
                 break;
@@ -525,33 +561,17 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
             // The VM does not know how to wait: it gathers the arguments, stops,
             // and lets the driver do the real co_await on the engine.  On the way
             // back, resume() pushes the result and the frame carries on.
-            case Op::CallAsync: {
-                int id   = static_cast<int>(in.operand >> 8);
-                int argc = static_cast<int>(in.operand & 0xFF);
-
+            //
+            // CallAsyncModule's id lives in BuiltinModuleRegistry's id-space,
+            // not kNatives': await_is_module tells the driver (project.cpp)
+            // so it doesn't confuse it with is_db_await/sleep/__ws_recv.
+            case Op::CallAsync: case Op::CallAsyncModule: {
                 Result r;
-                r.status     = Status::Suspended;
-                r.await_id   = id;
-                r.await_args.resize(static_cast<size_t>(argc));
-                for (int i = argc; i-- > 0;) r.await_args[static_cast<size_t>(i)] = pop();
-                return r;
-            }
-
-            // Misma forma que CallAsync -- el VM tampoco sabe esperar aqui,
-            // solo junta los argumentos y para -- pero `id` vive en el
-            // id-space de BuiltinModuleRegistry, no en el de kNatives, asi
-            // que await_is_module se lo dice al conductor (project.cpp) para
-            // que no lo confunda con is_db_await/sleep/__ws_recv.
-            case Op::CallAsyncModule: {
-                int id   = static_cast<int>(in.operand >> 8);
-                int argc = static_cast<int>(in.operand & 0xFF);
-
-                Result r;
-                r.status         = Status::Suspended;
-                r.await_id       = id;
-                r.await_is_module = true;
-                r.await_args.resize(static_cast<size_t>(argc));
-                for (int i = argc; i-- > 0;) r.await_args[static_cast<size_t>(i)] = pop();
+                r.status          = Status::Suspended;
+                r.await_id        = static_cast<int>(in.operand >> 8);
+                r.await_is_module = in.op == Op::CallAsyncModule;
+                r.await_args      = pop_args(static_cast<int>(in.operand & 0xFF));
+                r.error_loc       = in.loc;   // where a failed await is reported
                 return r;
             }
 
@@ -605,26 +625,29 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                                 std::to_string(kMaxFrames) + " nested calls",
                                 in.loc);
 
-                std::vector<Value> args(static_cast<size_t>(argc));
-                for (int i = argc; i-- > 0;) args[static_cast<size_t>(i)] = pop();
+                std::vector<Value> args = pop_args(argc);
 
-                // Modo mixto de --native (Fase 2): si esta funcion se compilo
-                // a codigo nativo, se llama directamente y no se abre marco
-                // de interprete ninguno -- el resultado acaba en la pila
-                // exactamente igual que tras un Op::Return normal, asi que el
-                // resto del bytecode que la invoco no distingue una cosa de
-                // la otra. Un NativeValue::Tag::Error (division/modulo por
-                // cero, ver native_gen.cpp::lux_native_fail) se convierte
-                // en el mismo fail() que ya usaria el bytecode equivalente.
+                // Mixed mode for --native (Phase 2): if this function was
+                // compiled to native code, it's called directly and no
+                // interpreter frame at all is opened -- the result ends up
+                // on the stack exactly as it would after a normal
+                // Op::Return, so the rest of the bytecode that invoked it
+                // can't tell one from the other. A NativeValue::Tag::Error
+                // (division/modulo by zero, see
+                // native_gen.cpp::lux_native_fail) turns into the same
+                // fail() that the equivalent bytecode would already use.
                 if (native_ && native_->funcs && index < native_->funcs->size() &&
                     (*native_->funcs)[index]) {
                     std::vector<NativeValue> nargs(args.size());
                     for (size_t i = 0; i < args.size(); ++i) nargs[i] = a_nativevalue(args[i]);
+                    NativeCtx* outer = current_native_ctx();
+                    current_native_ctx() = &ctx;
                     NativeValue r = (*native_->funcs)[index](nargs.data(),
                                                              static_cast<int32_t>(nargs.size()));
+                    current_native_ctx() = outer;
                     if (r.tag == NativeValue::Tag::Error) {
                         std::string msg = native_->error_message ? native_->error_message()
-                                                                  : "error nativo";
+                                                                  : "native error";
                         return fail(std::move(msg), in.loc);
                     }
                     push(de_nativevalue(r));
@@ -648,29 +671,18 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 break;
             }
 
-            case Op::Return: {
-                Value  v     = pop();
+            case Op::Return: case Op::ReturnNull: {
+                Value  v     = in.op == Op::Return ? pop() : Value::null();
                 size_t lbase = frame.locals_base, sbase = frame.stack_base;
                 frames_.pop_back();
                 if (frames_.empty()) {
                     Result r;
-                    r.status = Status::Done;
-                    r.value  = std::move(v);
+                    r.value = std::move(v);
                     return r;
                 }
                 stack_.resize(sbase);
                 locals_.resize(lbase);
                 push(std::move(v));
-                break;
-            }
-
-            case Op::ReturnNull: {
-                size_t lbase = frame.locals_base, sbase = frame.stack_base;
-                frames_.pop_back();
-                if (frames_.empty()) return Result{};
-                stack_.resize(sbase);
-                locals_.resize(lbase);
-                push(Value::null());
                 break;
             }
         }
