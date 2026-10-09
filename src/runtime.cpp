@@ -16,7 +16,6 @@
 #include <lux_script/project.hpp>
 #include <lux_script/vm.hpp>
 #include <lux_script/window_config.hpp>
-#include <lux/app.hpp>
 #include <lux/logger.hpp>
 
 #include <arpa/inet.h>
@@ -36,6 +35,8 @@
 
 namespace fs = std::filesystem;
 using namespace luxdesktop;
+
+int lux_main(int argc, char** argv);   // vendor/lux main.cpp, compiled with LUX_EMBEDDED
 
 namespace {
 
@@ -264,54 +265,30 @@ int main(int argc, char** argv) {
         return install_desktop(mod, work_dir);
     }
 
-    lux::App app;
-    app.set_templates(mod->program.app.templates_dir);
-    for (const auto& m : mod->program.app.statics)
-        app.serve_static(m.url_prefix, m.fs_root, m.spa);
-
-    auto dispatch = [mod](lux::Request& req, lux::Response& res) -> lux::Task<void> {
-        auto match = mod->router.match(req.method, req.path);
-        if (!match.found) {
-            res.status(404).json_text(R"({"error":"Not Found"})");
-            co_return;
-        }
-        req.params = std::move(match.params);
-        co_await match.handler(req, res);
-    };
-    app.any("/",  dispatch);
-    app.any("/*", dispatch);
-
-    app.on_error([mod](int code, lux::Request& req, lux::Response& res) {
-        auto it = mod->error_handlers.find(code);
-        if (it == mod->error_handlers.end()) it = mod->error_handlers.find(0);
-        if (it == mod->error_handlers.end()) return;
-        lux_script::NativeCtx ctx{req, res};
-        ctx.error_code    = code;
-        ctx.error_message = res.status_code() >= 500 ? "internal error" : "invalid request";
-        lux_script::VM vm;
-        auto result = vm.start(*it->second, {}, ctx, &mod->functions, nullptr);
-        if (result.status == lux_script::VM::Status::Done &&
-            !ctx.response_written && !result.value.is_null())
-            res.header("Content-Type", "application/json; charset=utf-8")
-               .send(result.value.to_json_text());
-        res.status(code);
-    });
+    // The UI server is Lux itself (vendor/lux main.cpp, built with LUX_EMBEDDED),
+    // run on a thread of this process so `window.*` reaches this very window.
+    // It must only ever be reachable from this machine.
+    const std::string& host = mod->program.app.host;
+    if (host != "127.0.0.1" && host != "localhost" && host != "::1") {
+        std::cerr << "luxdesktop: app.lux must declare `host \"127.0.0.1\"` (found \""
+                  << host << "\"): the UI server is for this machine only.\n";
+        return 1;
+    }
 
     uint16_t port = find_free_port();
+    std::string port_arg = std::to_string(port);
+    static char arg0[] = "lux", arg1[] = "--no-watch", arg2[] = "--port", arg4[] = ".";
+    char* lux_argv[] = {arg0, arg1, arg2, port_arg.data(), arg4, nullptr};
 
-    // Force-closes the window if a signal (CTRL+C from a terminal, a
-    // desktop "quit" action, systemd stop...) starts the shutdown before
-    // the user closes the window by hand -- otherwise the server drains but
-    // the window stays open with nothing behind it.
-    app.on_before_stop([] {
+    // Server stopped by itself (SIGTERM from systemd, CTRL+C...): close the window too.
+    std::thread server_thread([&lux_argv] {
+        lux_main(5, lux_argv);
         std::lock_guard<std::mutex> lk(g_window_mutex);
         if (g_window) {
             g_shutdown_from_signal.store(true);
             g_window->terminate();
         }
     });
-
-    std::thread server_thread([&app, port] { app.run("127.0.0.1", port); });
     if (!wait_for_server(port, std::chrono::milliseconds(5000)))
         lux::log().warn("server did not come up in time, opening the window anyway");
 

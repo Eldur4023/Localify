@@ -100,7 +100,10 @@ function(add_lux_desktop_app name)
         VERBATIM
     )
 
-    add_executable(${name} src/runtime.cpp src/desktop_common.cpp src/desktop_window.cpp src/mpris.cpp src/discord_rpc.cpp ${_generated})
+    # The UI server is Lux's own main(), renamed lux_main() by LUX_EMBEDDED and run on a thread by runtime.cpp
+    set(_lux_main ${CMAKE_CURRENT_SOURCE_DIR}/vendor/lux/src/lux_script/main.cpp)
+    set_source_files_properties(${_lux_main} PROPERTIES COMPILE_DEFINITIONS LUX_EMBEDDED)
+    add_executable(${name} src/runtime.cpp src/desktop_common.cpp src/desktop_window.cpp src/mpris.cpp src/discord_rpc.cpp ${_lux_main} ${_generated})
     target_compile_definitions(${name} PRIVATE LUXDESKTOP_APP_ID="${APP_ID}")
     _lux_desktop_link(${name})
 endfunction()
@@ -110,12 +113,3 @@ endfunction()
 # title/size (via the window: block) -- everything. This line is the only
 # thing in this file that ever names it.
 add_lux_desktop_app(app DIR ${CMAKE_CURRENT_SOURCE_DIR}/app ID localify)
-
-# ── Dev mode (src/dev.cpp) ───────────────────────────────────────────────
-# Reads app/ straight off disk and hot-reloads it through LuxScript's own
-# compiler -- no respack, no rebuilding THIS binary after editing app.lux, a
-# template or a static file. Run ./build/app-dev while you work.
-add_executable(app-dev src/dev.cpp src/desktop_common.cpp src/desktop_window.cpp src/mpris.cpp src/discord_rpc.cpp)
-target_compile_definitions(app-dev PRIVATE
-    LUXDESKTOP_APP_DIR="${CMAKE_CURRENT_SOURCE_DIR}/app")
-_lux_desktop_link(app-dev)

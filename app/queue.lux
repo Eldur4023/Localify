@@ -144,7 +144,7 @@ fn bool guardar_estado(EstadoCola e):
            repeat_mode = ?, shuffle = ?, shuffle_seed = ?, context = ?, context_queue = ?,
            play_order = ?, queue_index = ?, user_queue = ?, history = ?, cue = ?, anchor_ms = ?,
            revision = revision + 1, updated_at = unixepoch() where id = 1 and revision = ?""",
-        e.track_id, e.position_ms, e.volume, e.status, e.repeat_mode,
+        e.track_id == "" ? null : e.track_id, e.position_ms, e.volume, e.status, e.repeat_mode,
         e.shuffle ? 1 : 0, e.shuffle_seed, e.context, str(e.context_queue),
         str(e.play_order), e.queue_index, str(user_queue_json(e)), str(e.history),
         e.cue, e.anchor_ms, e.revision)

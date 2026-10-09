@@ -20,6 +20,7 @@ import json
 
 app:
     name      "Localify"
+    host      "127.0.0.1"
     templates "./templates"
     static    "/static" -> "./public"
 

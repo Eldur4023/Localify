@@ -52,7 +52,7 @@ Todo bajo `$XDG_DATA_HOME/lux-desktop/localify/` (normalmente
 sus recursos en cada arranque (sobrescribiendo solo los de solo lectura) y
 trabaja desde ese directorio — la base de datos en `./data/localify.db`, el
 audio descargado en la carpeta de biblioteca (por defecto `~/Music/Localify`,
-configurable en Ajustes). En dev (`app-dev`) el cwd es `app/` directamente y
+configurable en Ajustes). En dev (`lux .` dentro de `app/`) el cwd es `app/` directamente y
 la base de datos queda en `app/data/` (ignorada por git y excluida de
 respack: los datos de runtime nunca van dentro del binario).
 
@@ -62,7 +62,7 @@ respack: los datos de runtime nunca van dentro del binario).
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ./build/app        # empaquetado: respack incrusta app/ en el binario
-./build/app-dev    # dev: lee app/ del disco, hot-reload al guardar
+(cd app && ../build/vendor/lux/lux .)   # dev: lee app/ del disco, hot-reload al guardar
 ```
 
 ---
@@ -166,7 +166,7 @@ needs (llhttp) is vendored inside `vendor/lux/third_party/`.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ./build/app        # the packaged binary -- respack embeds a snapshot of app/
-./build/app-dev     # dev mode -- reads app/ live, hot-reloads on save
+(cd app && ../build/vendor/lux/lux .)   # dev mode -- reads app/ live, hot-reloads on save
 ```
 
 ## Installing it as a real app
@@ -194,14 +194,10 @@ default, not something the window snaps back to on every run.
 
 ## Dev mode
 
-`./build/app-dev` reads `app/` straight off disk instead of an embedded
-snapshot: no `respack`, no rebuilding this binary after editing a `.lux`
-file, a template or a static asset. A background thread watches `app/` and
-recompiles through the same `lux_script::compile()` the packaged binary
-uses — LuxScript compiles to bytecode in milliseconds, no `g++` involved —
-and the window's page reloads on its own once it succeeds. A syntax error
-is printed and the previous, working version keeps serving; the window
-never goes down over a typo. Devtools are always on in this mode.
+`app-dev` ya no existe (usaba una API de `lux::App` que Lux dev eliminó). Para
+trabajar sin recompilar: `cd app && ../build/vendor/lux/lux . --port 8787`
+sirve la app con recarga en caliente (sin ventana nativa; abre
+`http://127.0.0.1:8787`).
 
 ## What this is not (yet)
 
