@@ -25,6 +25,8 @@ export function mountSocialView(contenedor, ruta) {
 	let estado = null;
 	let pestaña = "users";
 	let destruida = false;
+	/** Resultado de la última descarga de la nube, para enseñarlo arriba. */
+	let avisoNube = "";
 	async function cargar() {
 		try {
 			estado = await social.status();
@@ -37,6 +39,22 @@ export function mountSocialView(contenedor, ruta) {
 				username: "",
 				upload: true
 			};
+		}
+		if (!destruida) void pintar();
+	}
+	function textoNube(r) {
+		return t("social.cloud_result", {
+			had: r.alreadyHad,
+			queued: r.queued,
+			playlists: r.playlists
+		});
+	}
+	/** Descarga de la nube: nunca baja lo que ya hay en este equipo. */
+	async function descargarNube() {
+		try {
+			avisoNube = textoNube(await social.pull());
+		} catch (e) {
+			avisoNube = textoDeError(e);
 		}
 		if (!destruida) void pintar();
 	}
@@ -117,7 +135,10 @@ export function mountSocialView(contenedor, ruta) {
 		const acciones = nodo("div", "ajustes__acciones");
 		const entrar = async () => {
 			await social.login(usuario.input.value.trim(), clave.input.value);
+			// Al entrar con mi usuario se trae lo que tengo guardado en el servidor
+			avisoNube = t("social.pulling");
 			await cargar();
+			await descargarNube();
 		};
 		acciones.append(boton(t("social.login"), "", entrar, aviso), boton(t("social.register"), "boton--sutil", async () => {
 			await social.register(usuario.input.value.trim(), clave.input.value, nombre.input.value.trim());
@@ -186,6 +207,13 @@ export function mountSocialView(contenedor, ruta) {
 			await social.updateMe(nombre.input.value.trim(), bio.input.value);
 			aviso.textContent = t("social.saved");
 		}, aviso));
+		const filaNube = nodo("div", "ajustes__campo");
+		const avisoPull = nodo("p", "ajustes__ayuda", avisoNube);
+		filaNube.append(nodo("label", "ajustes__etiqueta", t("social.cloud")), boton(t("social.cloud_pull"), "boton--sutil", async () => {
+			avisoPull.textContent = t("social.pulling");
+			avisoPull.textContent = textoNube(await social.pull());
+		}, avisoPull), avisoPull, nodo("p", "ajustes__ayuda", t("social.cloud_help")));
+		cuerpo.append(filaNube);
 		const subida = nodo("input", "ajustes__check");
 		subida.type = "checkbox";
 		subida.checked = estado.upload;
@@ -309,6 +337,7 @@ export function mountSocialView(contenedor, ruta) {
 			else if (ruta.params[0] === "playlist" && ruta.params[1]) await pintarPlaylist(panel, ruta.params[1]);
 			else {
 				if (ruta.params[0] === "playlists") pestaña = "playlists";
+				if (avisoNube) panel.append(nodo("p", "ajustes__ayuda", avisoNube));
 				pestañas(panel);
 				if (pestaña === "users") await pintarUsuarios(panel);
 				else if (pestaña === "playlists") await pintarPlaylists(panel);

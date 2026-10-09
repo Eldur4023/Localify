@@ -217,8 +217,8 @@ export default {
 	"social.publish": "Share",
 	"social.update": "Update",
 	"social.sync": "Sync",
-	"social.stop_sharing": "Stop sharing",
-	"social.stop_sharing_confirm": "Stop sharing this playlist? It is removed from the server; yours is untouched.",
+	"social.stop_sharing": "Make private",
+	"social.stop_sharing_confirm": "Stop sharing? The playlist stays in your cloud, but private and without collaborators.",
 	"social.connect_title": "Connect to a server",
 	"social.connect_help": "A Serverify server is optional: Localify works the same without one. With one, songs others already downloaded arrive without going through YouTube, and you can share playlists.",
 	"social.host": "Address (IP or name)",
@@ -278,5 +278,10 @@ export default {
 	"social.contribute_library": "Contribute my library",
 	"social.contribute_library_run": "Upload what is missing",
 	"social.contribute_library_help": "Uploads downloaded songs the server does not have yet. Ones it already has (same title, artist and duration) are not uploaded again.",
-	"social.contribute_progress": "Uploaded: {uploaded} · already there: {existing}"
+	"social.contribute_progress": "Uploaded: {uploaded} · already there: {existing}",
+	"social.pulling": "Downloading from the cloud…",
+	"social.cloud": "My cloud",
+	"social.cloud_pull": "Download from the cloud",
+	"social.cloud_result": "Cloud synced: {had} songs were already here, {queued} are downloading, {playlists} new playlists.",
+	"social.cloud_help": "Brings what you have stored on the server (songs, favourites and playlists). It never downloads what you already have on this computer. Your playlists stay in sync on their own."
 };

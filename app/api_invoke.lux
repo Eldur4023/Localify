@@ -284,7 +284,15 @@ post endpoint("/api/invoke", PeticionInvoke p):
         args = {}
     return await despachar(cmd, args)
 
+# Tras cualquier cambio en una playlist se pide una reconciliación con el servidor en el
+# próximo sondeo (≤ 1 s), sin hacer esperar al clic.
 fn Json despachar(string cmd, Json args):
+    Json r = await despachar_base(cmd, args)
+    if cmd.starts_with("playlist_") and cmd != "playlist_list" and cmd != "playlist_detail" and srv_sesion():
+        state.remove("srv_rec")
+    return r
+
+fn Json despachar_base(string cmd, Json args):
     # ── reproductor ── (todo por reproductor.lux: la misma puerta que usan
     # el menú, la bandeja, MPRIS y la tarjeta del escritorio)
     if cmd == "player_report":
@@ -340,6 +348,7 @@ fn Json despachar(string cmd, Json args):
             await sqlite.exec("insert or ignore into favorites(track_id) values(?)", tid)
         else:
             await sqlite.exec("delete from favorites where track_id = ?", tid)
+        srv_favorito(tid, jint(jget(args, "enabled"), 0) == 1)
         return null
     if cmd == "library_recent":
         List<Json> ids = await sqlite.query("""
@@ -404,6 +413,7 @@ fn Json despachar(string cmd, Json args):
         List<Json> f = await sqlite.query("select rel_path from audio_files where track_id = ?", tid)
         if len(f) > 0:
             os.remove_file(ruta_audio_abs(jstr(f[0]["rel_path"], "")))
+        srv_baja(tid)
         await sqlite.exec("delete from tracks where id = ?", tid)
         tocar_biblioteca()
         return null

@@ -9,6 +9,10 @@
 post endpoint("/api/events/poll"):
     db_init()
     tick_descargas()
+    # Serverify: playlists reflejadas en la nube, como mucho una vez cada 30 s (o ya, si
+    # alguien tocó una playlist: despachar borra la marca)
+    if srv_activo() and state.incr("srv_rec", 1, 30000) == 1:
+        srv_reconciliar()
 
     List<Json> ready = []
     string rq = state.get("remote_query", "")

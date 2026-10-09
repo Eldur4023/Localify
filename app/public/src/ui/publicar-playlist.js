@@ -68,8 +68,8 @@ export async function publicarPlaylist(p) {
 	const cancelar = boton(t("common.cancel"), "boton--sutil", async () => {});
 	acciones.append(cancelar);
 	if (enlace) {
-		acciones.append(boton(t("social.stop_sharing"), "boton--peligro", async () => {
-			if (await confirmar(t("social.stop_sharing_confirm"), t("social.stop_sharing"))) await social.unpublish(p.id);
+		acciones.append(boton(t("social.stop_sharing"), "boton--sutil", async () => {
+			if (await confirmar(t("social.stop_sharing_confirm"), t("social.stop_sharing"), undefined, false)) await social.unpublish(p.id);
 		}), boton(t("social.sync"), "boton--sutil", () => social.sync(p.id)));
 	}
 	acciones.append(boton(enlace ? t("social.update") : t("social.publish"), "", () => social.publish(p.id, vis.value, colab.checked)));

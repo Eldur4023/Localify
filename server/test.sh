@@ -2,7 +2,7 @@
 # E2E del servidor: arranca uno limpio en un directorio temporal y ejercita la API.
 #   server/test.sh [ruta-al-binario-lux]
 cd "$(dirname "$0")"
-LUX=${1:-../vendor/lux/build/lux}; PORT=${PORT:-8792}; B=http://127.0.0.1:$PORT/api
+LUX=${1:-../build/vendor/lux/lux}; PORT=${PORT:-8792}; B=http://127.0.0.1:$PORT/api
 W=$(mktemp -d); cp server.lux "$W/"; trap 'kill $PID 2>/dev/null; rm -rf "$W"' EXIT
 LUXBIN=$(realpath "$LUX"); (cd "$W" && JWT_SECRET=test-secret-0123456789 exec "$LUXBIN" server.lux --port $PORT >"$W/log" 2>&1) & PID=$!
 for i in $(seq 50); do curl -sf $B/info >/dev/null && break; sleep 0.2; done

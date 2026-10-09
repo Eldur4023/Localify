@@ -288,6 +288,8 @@ export const social = {
 	logout: () => invoke("server_logout"),
 	setUpload: (enabled) => invoke("server_set_upload", { enabled }),
 	/** Sube un lote de la biblioteca descargada; repetir con `next` hasta `done`. */
+	/** Descarga de la nube: trae biblioteca, favoritos y playlists que no tengo; nunca baja lo que ya tengo. */
+	pull: () => invoke("server_pull"),
 	syncLibrary: (offset) => invoke("server_sync_library", { offset }),
 	me: () => invoke("social_me"),
 	updateMe: (displayName, bio) => invoke("social_update_me", {

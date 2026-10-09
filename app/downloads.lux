@@ -600,6 +600,7 @@ fn void finalizar(string tid):
 
     consolidar(tid)
     srv_subir(tid, destino_abs, ext_final, titulo, artista, album, duracion_real_ms > 0 ? duracion_real_ms : esperado_ms)
+    srv_alta(tid)
 
     os.remove_file(origen)
     await sqlite.exec("delete from download_jobs where track_id = ?", tid)

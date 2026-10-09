@@ -217,8 +217,8 @@ export default {
 	"social.publish": "Compartir",
 	"social.update": "Actualizar",
 	"social.sync": "Sincronizar",
-	"social.stop_sharing": "Dejar de compartir",
-	"social.stop_sharing_confirm": "¿Dejar de compartir esta playlist? Se borra del servidor; la tuya no se toca.",
+	"social.stop_sharing": "Hacer privada",
+	"social.stop_sharing_confirm": "¿Dejar de compartir? La playlist sigue en tu nube, pero privada y sin colaboradores.",
 	"social.connect_title": "Conectar con un servidor",
 	"social.connect_help": "Un servidor Serverify es opcional: Localify funciona igual sin él. Con uno, las canciones que otros ya descargaron llegan sin pasar por YouTube, y puedes compartir playlists.",
 	"social.host": "Dirección (IP o nombre)",
@@ -278,5 +278,10 @@ export default {
 	"social.contribute_library": "Aportar mi biblioteca",
 	"social.contribute_library_run": "Subir lo que falta",
 	"social.contribute_library_help": "Sube las canciones ya descargadas que el servidor aún no tiene. Las que ya tiene (mismo título, artista y duración) no se vuelven a subir.",
-	"social.contribute_progress": "Subidas: {uploaded} · ya estaban: {existing}"
+	"social.contribute_progress": "Subidas: {uploaded} · ya estaban: {existing}",
+	"social.pulling": "Descargando de la nube…",
+	"social.cloud": "Mi nube",
+	"social.cloud_pull": "Descargar de la nube",
+	"social.cloud_result": "Nube sincronizada: {had} canciones ya estaban aquí, {queued} se están descargando, {playlists} playlists nuevas.",
+	"social.cloud_help": "Trae lo que tienes guardado en el servidor (canciones, favoritos y playlists). Nunca descarga lo que ya tienes en este equipo. Tus playlists se mantienen sincronizadas solas."
 };

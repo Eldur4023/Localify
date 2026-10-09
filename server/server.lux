@@ -54,6 +54,16 @@ on start:
             created_at integer not null default (unixepoch())
         )""")
     await sqlite.exec("create index if not exists idx_tracks_key on tracks(title_norm, artist_norm)")
+    # La biblioteca de cada usuario (su "nube"): qué pistas del servidor son suyas y cuáles
+    # son favoritas. El audio es compartido (tracks); esto solo dice de quién es qué.
+    await sqlite.exec("""
+        create table if not exists user_tracks(
+            user_id integer not null references users(id) on delete cascade,
+            track_id text not null references tracks(id) on delete cascade,
+            favorite integer not null default 0,
+            added_at integer not null default (unixepoch()),
+            primary key(user_id, track_id)
+        )""")
     await sqlite.exec("""
         create table if not exists playlists(
             id integer primary key,
@@ -62,6 +72,14 @@ on start:
             visibility text not null default 'private' check(visibility in ('public','private')),
             collaborative integer not null default 0,
             updated_at integer not null default (unixepoch())
+        )""")
+    # Playlists borradas: para que los demás equipos del usuario (y los miembros) sepan que se
+    # borró a propósito y no la vuelvan a crear al sincronizar.
+    await sqlite.exec("""
+        create table if not exists playlist_tombstones(
+            user_id integer not null references users(id) on delete cascade,
+            playlist_id integer not null,
+            primary key(user_id, playlist_id)
         )""")
     await sqlite.exec("""
         create table if not exists playlist_members(
@@ -358,7 +376,64 @@ group("/api"):
             search_norm.trim(), title_norm.trim(), artist_norm.trim(), ext, audio.size, yo())
         return { "stored": true, "id": id }.status(201)
 
+    # ── mi biblioteca (la nube del usuario) ──
+    # Da de alta pistas en mi biblioteca por identidad: [{id, titleNorm, artistNorm, durationMs, favorite}]
+    # -> { registered, missing: [ids de cliente que el servidor aún no tiene] }
+    put endpoint("/library", Json b):
+        List<Json> items = b["items"] == null ? [] : b["items"]
+        int registradas = 0
+        List<string> faltan = []
+        for int i in range(0, len(items)):
+            if i >= 200:
+                break
+            string cid = s_of(items[i], "id", "")
+            string sid = id_de_referencia(cid, s_of(items[i], "titleNorm", ""), s_of(items[i], "artistNorm", ""), i_of(items[i], "durationMs", 0))
+            if sid == "":
+                faltan.add(cid)
+                continue
+            int fav = items[i]["favorite"] == true ? 1 : 0
+            await sqlite.exec("""
+                insert into user_tracks(user_id, track_id, favorite) values(?, ?, ?)
+                on conflict(user_id, track_id) do update set favorite = max(favorite, excluded.favorite)""", yo(), sid, fav)
+            registradas = registradas + 1
+        return { "registered": registradas, "missing": faltan }
+
+    get endpoint("/library"):
+        List<Json> r = await sqlite.query("""
+            select t.id, t.title, t.artist, t.album, t.duration_ms, t.title_norm, t.artist_norm, u.favorite
+            from user_tracks u join tracks t on t.id = u.track_id
+            where u.user_id = ? order by u.added_at""", yo())
+        List<Json> out = []
+        for int i in range(0, len(r)):
+            out.add({ "id": r[i]["id"], "title": r[i]["title"], "artist": r[i]["artist"], "album": r[i]["album"],
+                      "durationMs": r[i]["duration_ms"], "titleNorm": r[i]["title_norm"], "artistNorm": r[i]["artist_norm"],
+                      "favorite": int(r[i]["favorite"]) == 1 })
+        return out
+
+    # Favorita (o no) por identidad: la pista del cliente puede tener otro id que la del servidor
+    put endpoint("/library/favorite", Json b):
+        string sid = id_de_referencia(s_of(b, "id", ""), s_of(b, "titleNorm", ""), s_of(b, "artistNorm", ""), i_of(b, "durationMs", 0))
+        if sid == "":
+            return status(404)
+        await sqlite.exec("update user_tracks set favorite = ? where user_id = ? and track_id = ?", b["favorite"] == true ? 1 : 0, yo(), sid)
+        return status(204)
+
+    # Quitar de mi biblioteca (el audio compartido se queda: es de todos)
+    post endpoint("/library/remove", Json b):
+        string sid = id_de_referencia(s_of(b, "id", ""), s_of(b, "titleNorm", ""), s_of(b, "artistNorm", ""), i_of(b, "durationMs", 0))
+        if sid != "":
+            await sqlite.exec("delete from user_tracks where user_id = ? and track_id = ?", yo(), sid)
+        return status(204)
+
     # ── playlists ──
+    # ids de playlists mías (o compartidas conmigo) que se borraron
+    get endpoint("/playlist-tombstones"):
+        List<Json> r = await sqlite.query("select playlist_id from playlist_tombstones where user_id = ?", yo())
+        List<int> out = []
+        for int i in range(0, len(r)):
+            out.add(int(r[i]["playlist_id"]))
+        return out
+
     get endpoint("/playlists"):
         List<Json> r = await sqlite.query(sql_resumen() + """
             where p.owner_id = ? or p.id in (select playlist_id from playlist_members where user_id = ?)
@@ -430,6 +505,8 @@ group("/api"):
     delete endpoint("/playlists/:id", int id):
         if acceso(id, yo()) != "owner":
             return status(404)
+        await sqlite.exec("insert or ignore into playlist_tombstones(user_id, playlist_id) select owner_id, id from playlists where id = ?", id)
+        await sqlite.exec("insert or ignore into playlist_tombstones(user_id, playlist_id) select user_id, playlist_id from playlist_members where playlist_id = ?", id)
         await sqlite.exec("delete from playlists where id = ?", id)
         return status(204)
 
