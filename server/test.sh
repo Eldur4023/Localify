@@ -41,6 +41,7 @@ D=$(curl -s -H "Authorization: Bearer $T" $B/playlists/1); ok "detalle" "$D" '"a
 T=$TB; ok "pública legible" "$(curl -s -H "Authorization: Bearer $T" $B/playlists/1)" '"access":"reader"'
 ok "lector no edita" "$(j POST '{"tracks":[{"id":"x","title":"t"}]}' $B/playlists/1/tracks)" 403
 T=$TA; ok "añadir miembro" "$(j POST '{"username":"bob"}' $B/playlists/1/members)" 204
+T=$TB; ok "bob acepta la invitación a Mix" "$(j POST '' $B/playlists/1/accept)" 204; T=$TA
 T=$TB; ok "miembro ve la suya" "$(curl -s -H "Authorization: Bearer $T" $B/playlists)" '"name":"Mix"'
 ok "miembro añade" "$(j POST '{"tracks":[{"id":"bbbbbbbbbbb","title":"De Bob"}]}' $B/playlists/1/tracks)" 204
 ok "miembro no borra" "$(j DELETE '' $B/playlists/1)" 404
@@ -66,10 +67,19 @@ T=$TA; ok "pública: sigue intacta" "$(curl -s -H "Authorization: Bearer $T" $B/
 ok "pública: sin conjunta todavía" "$(curl -s -H "Authorization: Bearer $T" $B/playlists/$PP)" '"collaborative":false'
 # hacerla conjunta = invitar a alguien (sin casillas)
 ok "invitar a bob" "$(j POST '{"username":"bob"}' $B/playlists/$PV/members)" 204
-ok "y ya es conjunta" "$(curl -s -H "Authorization: Bearer $T" $B/playlists/$PV)" '"collaborative":true'
+ok "pendiente: aún no es conjunta" "$(curl -s -H "Authorization: Bearer $T" $B/playlists/$PV)" '"collaborative":false'
 ok "no puede invitarse a sí misma" "$(j POST '{"username":"ana"}' $B/playlists/$PV/members)" 400
 T=$TB
-ok "invitado: la ve" "$(curl -s -H "Authorization: Bearer $T" $B/playlists/$PV)" '"access":"member"'
+ok "invitación: aparece en mis invitaciones" "$(curl -s -H "Authorization: Bearer $T" $B/invitations)" '"name":"Privada"'
+ok "invitación: aún no veo la playlist" "$(curl -s -o /dev/null -w %{http_code} -H "Authorization: Bearer $T" $B/playlists/$PV)" 404
+ok "invitación: no sale en mis playlists" "$(curl -s -H "Authorization: Bearer $T" $B/playlists | grep -c Privada)" 0
+ok "invitación: no puedo añadir sin aceptar" "$(j POST '{"tracks":[{"id":"x","title":"t"}]}' $B/playlists/$PV/tracks)" 403
+ok "acepto" "$(j POST '' $B/playlists/$PV/accept)" 204
+ok "acepto dos veces: ya no hay nada que aceptar" "$(j POST '' $B/playlists/$PV/accept)" 404
+ok "ya no hay invitación" "$(curl -s -H "Authorization: Bearer $T" $B/invitations)" '[]'
+ok "aceptada: ya la veo como invitada" "$(curl -s -H "Authorization: Bearer $T" $B/playlists/$PV)" '"access":"member"'
+T=$TA; ok "y ahora sí es conjunta" "$(curl -s -H "Authorization: Bearer $T" $B/playlists/$PV)" '"collaborative":true'
+T=$TB
 ok "invitado: puede añadir" "$(j POST '{"tracks":[{"id":"inv1","title":"Del invitado"}]}' $B/playlists/$PV/tracks)" 204
 ok "invitado: puede quitar" "$(j DELETE '' $B/playlists/$PV/tracks/inv1)" 204
 ok "invitado: no la renombra" "$(j PUT '{"name":"Mia ahora"}' $B/playlists/$PV)" 204
@@ -79,6 +89,11 @@ ok "invitado: no la hace pública" "$(j PUT '{"visibility":"public"}' $B/playlis
 T=$TA; D=$(curl -s -H "Authorization: Bearer $T" $B/playlists/$PV)
 ok "sigue llamándose igual" "$D" '"name":"Privada"'
 ok "sigue siendo privada" "$D" '"visibility":"private"'
+TC=$(sed 's/.*"token":"\([^"]*\)".*/\1/' <<<"$(j POST '{"username":"carol","password":"secreto123"}' $B/register)")
+ok "carol recibe invitación" "$(j POST '{"username":"carol"}' $B/playlists/$PV/members)" 204
+ok "carol la rechaza" "$(curl -s -o /dev/null -w %{http_code} -X DELETE -H "Authorization: Bearer $TC" $B/playlists/$PV/invitation)" 204
+ok "rechazada: ya no está en sus invitaciones" "$(curl -s -H "Authorization: Bearer $TC" $B/invitations)" '[]'
+ok "rechazada: no la ve" "$(curl -s -o /dev/null -w %{http_code} -H "Authorization: Bearer $TC" $B/playlists/$PV)" 404
 ok "la dueña la expulsa" "$(j DELETE '' $B/playlists/$PV/members/bob)" 204
 T=$TB; ok "expulsado: ya no la ve" "$(curl -s -o /dev/null -w %{http_code} -H "Authorization: Bearer $T" $B/playlists/$PV)" 404
 ok "expulsado: no puede añadir" "$(j POST '{"tracks":[{"id":"x","title":"t"}]}' $B/playlists/$PV/tracks)" 403

@@ -290,5 +290,11 @@ export default {
 	"social.only_you": "Ahora mismo solo la editas tú.",
 	"social.invite": "Invitar",
 	"social.invite_placeholder": "Nombre de usuario",
-	"social.joint_help": "Quien invites puede añadir y quitar canciones. No puede cambiarle el nombre, borrarla ni invitar a más gente. Puedes quitarle el acceso cuando quieras."
+	"social.joint_help": "Quien invites puede añadir y quitar canciones. No puede cambiarle el nombre, borrarla ni invitar a más gente. Puedes quitarle el acceso cuando quieras.",
+	"social.invitations": "Invitaciones",
+	"social.no_invitations": "No tienes invitaciones pendientes.",
+	"social.invited_by": "Te invita",
+	"social.accept": "Aceptar",
+	"social.decline": "Rechazar",
+	"social.pending": "pendiente"
 };

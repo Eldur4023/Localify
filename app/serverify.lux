@@ -644,6 +644,21 @@ fn Json cmd_social(string cmd, Json args):
         return { "total": len(items), "alreadyHad": ya_tenia, "created": creadas, "queued": encoladas,
                  "favorites": favoritas, "playlists": listas }
 
+    # Invitaciones pendientes: lo que me han ofrecido y aún no he aceptado
+    if cmd == "social_invitations":
+        Json? r = srv("GET", "/invitations")
+        return r != null and r["status"] == 200 ? r["body"] : srv_fallo(r)
+    # Acepto: la playlist entra en mi biblioteca y se sincroniza como cualquier otra
+    if cmd == "social_accept":
+        string sid = arg_str(args, "id", "")
+        Json? r = srv("POST", "/playlists/" + sid + "/accept")
+        if r == null or r["status"] != 204:
+            return srv_fallo(r)
+        return importar_playlist(sid)
+    # Rechazo: la invitación desaparece; la playlist no entra en mi biblioteca
+    if cmd == "social_decline":
+        Json? r = srv("DELETE", "/playlists/" + arg_str(args, "id", "") + "/invitation")
+        return r != null and r["status"] < 300 ? null : srv_fallo(r)
     if cmd == "social_me":
         Json? r = srv("GET", "/me")
         return r != null and r["status"] == 200 ? r["body"] : srv_fallo(r)

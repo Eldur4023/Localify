@@ -85,8 +85,17 @@ on start:
         create table if not exists playlist_members(
             playlist_id integer not null references playlists(id) on delete cascade,
             user_id integer not null references users(id) on delete cascade,
+            status text not null default 'accepted' check(status in ('pending','accepted')),
             primary key(playlist_id, user_id)
         )""")
+    # bases creadas antes de las invitaciones: sus miembros ya estaban dentro -> aceptados
+    List<Json> cols = await sqlite.query("pragma table_info(playlist_members)")
+    bool tiene_estado = false
+    for int i in range(0, len(cols)):
+        if str(cols[i]["name"]) == "status":
+            tiene_estado = true
+    if not tiene_estado:
+        await sqlite.exec("alter table playlist_members add column status text not null default 'accepted'")
     await sqlite.exec("""
         create table if not exists playlist_tracks(
             playlist_id integer not null references playlists(id) on delete cascade,
@@ -158,7 +167,7 @@ fn string acceso(int pid, int uid):
         return ""
     if int(p[0]["owner_id"]) == uid:
         return "owner"
-    List<Json> m = await sqlite.query("select 1 from playlist_members where playlist_id = ? and user_id = ?", pid, uid)
+    List<Json> m = await sqlite.query("select 1 from playlist_members where playlist_id = ? and user_id = ? and status = 'accepted'", pid, uid)
     if len(m) > 0:
         return "member"
     return p[0]["visibility"] == "public" ? "reader" : ""
@@ -185,7 +194,7 @@ fn string sql_resumen():
         select p.id, p.name, p.description, p.visibility, p.collaborative, p.updated_at,
                u.username as owner, u.display_name as owner_name,
                (select count(*) from playlist_tracks pt where pt.playlist_id = p.id) as n_tracks,
-               (select count(*) from playlist_members pm where pm.playlist_id = p.id) as n_members
+               (select count(*) from playlist_members pm where pm.playlist_id = p.id and pm.status = 'accepted') as n_members
         from playlists p join users u on u.id = p.owner_id """
 
 # ¿Ya está esta canción en la lista? (mismo id o misma identidad título + artista)
@@ -428,6 +437,31 @@ group("/api"):
         return status(204)
 
     # ── playlists ──
+    # invitaciones pendientes para mí
+    get endpoint("/invitations"):
+        List<Json> r = await sqlite.query("""
+            select p.id, p.name, u.username as owner, u.display_name as owner_name
+            from playlist_members m join playlists p on p.id = m.playlist_id join users u on u.id = p.owner_id
+            where m.user_id = ? and m.status = 'pending' order by p.updated_at desc""", yo())
+        List<Json> out = []
+        for int i in range(0, len(r)):
+            out.add({ "id": r[i]["id"], "name": r[i]["name"], "owner": r[i]["owner"], "ownerName": r[i]["owner_name"] })
+        return out
+
+    # acepto: entro en la playlist (ya cuenta como miembro)
+    post endpoint("/playlists/:id/accept", int id):
+        List<Json> r = await sqlite.query("select 1 from playlist_members where playlist_id = ? and user_id = ? and status = 'pending'", id, yo())
+        if len(r) == 0:
+            return status(404)
+        await sqlite.exec("update playlist_members set status = 'accepted' where playlist_id = ? and user_id = ?", id, yo())
+        await sqlite.exec("update playlists set updated_at = unixepoch() where id = ?", id)
+        return status(204)
+
+    # rechazo: borra la invitación (no es salir de una playlist que ya tenía)
+    delete endpoint("/playlists/:id/invitation", int id):
+        await sqlite.exec("delete from playlist_members where playlist_id = ? and user_id = ? and status = 'pending'", id, yo())
+        return status(204)
+
     # ids de playlists mías (o compartidas conmigo) que se borraron
     get endpoint("/playlist-tombstones"):
         List<Json> r = await sqlite.query("select playlist_id from playlist_tombstones where user_id = ?", yo())
@@ -438,7 +472,7 @@ group("/api"):
 
     get endpoint("/playlists"):
         List<Json> r = await sqlite.query(sql_resumen() + """
-            where p.owner_id = ? or p.id in (select playlist_id from playlist_members where user_id = ?)
+            where p.owner_id = ? or p.id in (select playlist_id from playlist_members where user_id = ? and status = 'accepted')
             order by p.updated_at desc""", yo(), yo())
         List<Json> out = []
         for int i in range(0, len(r)):
@@ -479,10 +513,10 @@ group("/api"):
                          "titleNorm": ts[i]["title_norm"], "artistNorm": ts[i]["artist_norm"],
                          "addedBy": ts[i]["added_by"], "available": sid != "", "serverId": sid })
         dto["tracks"] = tracks
-        List<Json> ms = await sqlite.query("select u.username, u.display_name from playlist_members m join users u on u.id = m.user_id where m.playlist_id = ?", id)
+        List<Json> ms = await sqlite.query("select u.username, u.display_name, m.status from playlist_members m join users u on u.id = m.user_id where m.playlist_id = ?", id)
         List<Json> members = []
         for int i in range(0, len(ms)):
-            members.add({ "username": ms[i]["username"], "displayName": ms[i]["display_name"] })
+            members.add({ "username": ms[i]["username"], "displayName": ms[i]["display_name"], "status": ms[i]["status"] })
         dto["members"] = members
         return dto
 
@@ -542,7 +576,8 @@ group("/api"):
         List<Json> n = await sqlite.query("select count(*) as n from playlist_members where playlist_id = ?", id)
         if int(n[0]["n"]) >= 30:
             return { "error": "too_many" }.status(400)
-        await sqlite.exec("insert or ignore into playlist_members(playlist_id, user_id) values(?, ?)", id, int(u[0]["id"]))
+        # una invitación queda pendiente hasta que la persona la acepta
+        await sqlite.exec("insert or ignore into playlist_members(playlist_id, user_id, status) values(?, ?, 'pending')", id, int(u[0]["id"]))
         await sqlite.exec("update playlists set updated_at = unixepoch() where id = ?", id)
         return status(204)
 

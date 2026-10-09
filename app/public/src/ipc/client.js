@@ -300,6 +300,12 @@ export const social = {
 	user: (username) => invoke("social_user", { username }),
 	playlists: () => invoke("social_playlists"),
 	playlist: (id) => invoke("social_playlist", { id }),
+	/** Invitaciones pendientes para mí (aún no aceptadas). */
+	invitations: () => invoke("social_invitations"),
+	/** Acepto una invitación: la playlist entra en mi biblioteca. */
+	accept: (id) => invoke("social_accept", { id }),
+	/** Rechazo una invitación: no entra. */
+	decline: (id) => invoke("social_decline", { id }),
 	/** Asegura que la playlist vive en el servidor y devuelve su ficha (miembros, visibilidad). */
 	ensure: (playlistId) => invoke("social_ensure", { playlistId }),
 	/** Id de la playlist en el servidor, o `null` si no está publicada. */

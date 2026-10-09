@@ -55,7 +55,8 @@ export async function publicarPlaylist(p) {
 		if (ficha.members.length === 0) cuerpo.append(nodo("p", "vista__empty", t("social.only_you")));
 		for (const m of ficha.members) {
 			const fila = nodo("div", "social__fila social__fila--plana");
-			fila.append(nodo("span", "social__texto", `${m.displayName} (@${m.username})`));
+			const nombreM = `${m.displayName} (@${m.username})`;
+			fila.append(nodo("span", "social__texto", m.status === "pending" ? `${nombreM} · ${t("social.pending")}` : nombreM));
 			const quitar = nodo("button", "boton boton--sutil", t("social.remove"));
 			quitar.type = "button";
 			quitar.addEventListener("click", () => void cambiar(() => social.removeMember(ficha.id, m.username)));

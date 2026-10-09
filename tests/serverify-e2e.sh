@@ -44,6 +44,7 @@ ok "perfil público" "$(inv social_user '{"username":"ana"}')" '"name":"Mi mix"'
 ok "miembro" "$(inv social_add_member '{"id":"1","username":"bob"}'; echo fin)" fin
 ok "miembro inexistente" "$(inv social_add_member '{"id":"1","username":"nadie"}')" USER_NOT_FOUND
 # bob añade pista en servidor; ana sincroniza y la recibe
+curl -s -X POST -H "Authorization: Bearer $TB" $B/playlists/1/accept -o /dev/null
 curl -s -X POST -H "Authorization: Bearer $TB" -H 'content-type: application/json' -d '{"tracks":[{"id":"bbbbbbbbbbb","title":"De Bob","artist":"Bob","durationMs":1000}]}' $B/playlists/1/tracks -o /dev/null
 inv social_sync "{\"playlistId\":\"$PL\"}" >/dev/null
 ok "sync trae pista de bob" "$(inv playlist_detail "{\"playlistId\":\"$PL\"}")" 'De Bob'
@@ -154,7 +155,14 @@ ok "invitar a bob" "$(inv social_add_member "{\"id\":\"$CSID\",\"username\":\"bo
 inv2 server_logout >/dev/null
 BOBLOGIN=$(inv2 server_login '{"username":"bob","password":"secreto123"}'); ok "bob entra en el equipo 2" "$BOBLOGIN" '"username":"bob"'
 inv2 server_pull >/dev/null
-ok "bob recibe la conjunta sin pedirla" "$(sqlite3 $DB2 "select count(*) from playlists where name='Conjunta'")" 1
+ok "bob ve la invitación" "$(inv2 social_invitations)" '"name":"Conjunta"'
+ok "sin aceptar, la conjunta no entra" "$(sqlite3 $DB2 "select count(*) from playlists where name='Conjunta'")" 0
+CJ2=$(inv2 social_invitations | sed 's/.*"id":\([0-9]*\),"name":"Conjunta".*/\1/')
+ok "bob rechaza una prueba: no entra" "$(inv2 social_decline "{\"id\":\"$CJ2\"}" >/dev/null; sqlite3 $DB2 "select count(*) from playlists where name='Conjunta'")" 0
+ok "y la invitación a la conjunta desaparece" "$(inv2 social_invitations | grep -c Conjunta)" 0
+ok "la vuelvo a invitar a bob" "$(inv social_add_member "{\"id\":\"$CSID\",\"username\":\"bob\"}" >/dev/null; inv2 server_pull >/dev/null; inv2 social_invitations)" '"name":"Conjunta"'
+ok "bob acepta" "$(inv2 social_accept "{\"id\":\"$CSID\"}" | head -c 40)" '"localId"'
+ok "al aceptar entra en su biblioteca" "$(sqlite3 $DB2 "select count(*) from playlists where name='Conjunta'")" 1
 ok "con la canción de ana" "$(sqlite3 $DB2 "select count(*) from playlist_items pi join playlists p on p.id=pi.playlist_id where p.name='Conjunta'")" 1
 ok "y no se llevó las playlists de ana por enlaces viejos" "$(curl -s -H "Authorization: Bearer $TB" $B/playlists | grep -c '"name":"Auto 2"')" 0
 BP=$(sqlite3 $DB2 "select id from playlists where name='Conjunta'")

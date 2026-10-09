@@ -156,12 +156,13 @@ export function mountSocialView(contenedor, ruta) {
 		panel.append(s);
 	}
 	// ── Pestañas con sesión ─────────────────────────────────────────────────
-	function pestañas(panel) {
+	function pestañas(panel, pendientes = 0) {
 		const nav = nodo("div", "ajustes__tabs");
 		nav.setAttribute("role", "tablist");
 		for (const [clave, texto] of [
 			["users", t("social.users")],
 			["playlists", t("social.playlists")],
+			["invitations", pendientes > 0 ? `${t("social.invitations")} (${pendientes})` : t("social.invitations")],
 			["me", t("social.me")]
 		]) {
 			const b = nodo("button", `ajustes__tab${clave === pestaña ? " is-activa" : ""}`, texto);
@@ -195,6 +196,29 @@ export function mountSocialView(contenedor, ruta) {
 		for (const p of lista) {
 			cuerpo.append(fila(p.name, `${p.ownerName} · ${t("social.n_tracks", { count: p.nTracks })}`, `social/playlist/${p.id}`, etiquetasDe(p)));
 		}
+		panel.append(s);
+	}
+	/** Invitaciones: aceptar entra en la playlist; rechazar la quita de la lista. */
+	function pintarInvitaciones(panel, lista) {
+		const { s, cuerpo } = seccion(t("social.invitations"));
+		if (lista.length === 0) cuerpo.append(nodo("p", "vista__empty", t("social.no_invitations")));
+		const aviso = nodo("p", "ajustes__ayuda ajustes__ayuda--aviso");
+		for (const p of lista) {
+			const f = nodo("div", "social__fila social__fila--plana");
+			const texto = nodo("div", "social__texto");
+			texto.append(nodo("strong", "", p.name), nodo("span", "social__sub", `${t("social.invited_by")} ${p.ownerName} (@${p.owner})`));
+			f.append(texto);
+			f.append(boton(t("social.accept"), "", async () => {
+				await social.accept(p.id);
+				await pintar();
+			}, aviso));
+			f.append(boton(t("social.decline"), "boton--sutil", async () => {
+				await social.decline(p.id);
+				await pintar();
+			}, aviso));
+			cuerpo.append(f);
+		}
+		cuerpo.append(aviso);
 		panel.append(s);
 	}
 	async function pintarPerfil(panel) {
@@ -338,9 +362,11 @@ export function mountSocialView(contenedor, ruta) {
 			else {
 				if (ruta.params[0] === "playlists") pestaña = "playlists";
 				if (avisoNube) panel.append(nodo("p", "ajustes__ayuda", avisoNube));
-				pestañas(panel);
+				const invitaciones = await social.invitations();
+				pestañas(panel, invitaciones.length);
 				if (pestaña === "users") await pintarUsuarios(panel);
 				else if (pestaña === "playlists") await pintarPlaylists(panel);
+				else if (pestaña === "invitations") pintarInvitaciones(panel, invitaciones);
 				else await pintarPerfil(panel);
 			}
 		} catch (e) {

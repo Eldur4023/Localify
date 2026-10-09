@@ -290,5 +290,11 @@ export default {
 	"social.only_you": "Right now only you edit it.",
 	"social.invite": "Invite",
 	"social.invite_placeholder": "Username",
-	"social.joint_help": "Anyone you invite can add and remove songs. They cannot rename it, delete it or invite more people. You can remove their access any time."
+	"social.joint_help": "Anyone you invite can add and remove songs. They cannot rename it, delete it or invite more people. You can remove their access any time.",
+	"social.invitations": "Invitations",
+	"social.no_invitations": "You have no pending invitations.",
+	"social.invited_by": "Invited by",
+	"social.accept": "Accept",
+	"social.decline": "Decline",
+	"social.pending": "pending"
 };
