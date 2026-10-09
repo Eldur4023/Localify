@@ -260,3 +260,54 @@ export const settings = {
 export const stats = { 
 /** Tiempo total escuchado y las canciones y artistas que más se llevan. */
 get: () => invoke("stats_get") };
+
+/**
+* Servidor común opcional (Serverify). Todo es opcional: sin servidor o sin
+* sesión el backend responde con un error tipado y la app sigue siendo local.
+*/
+export const social = {
+	status: () => invoke("server_status"),
+	connect: (host, port) => invoke("server_connect", {
+		host,
+		port
+	}),
+	disconnect: () => invoke("server_disconnect"),
+	login: (username, password) => invoke("server_login", {
+		username,
+		password
+	}),
+	register: (username, password, displayName) => invoke("server_register", {
+		username,
+		password,
+		displayName
+	}),
+	logout: () => invoke("server_logout"),
+	setUpload: (enabled) => invoke("server_set_upload", { enabled }),
+	me: () => invoke("social_me"),
+	updateMe: (displayName, bio) => invoke("social_update_me", {
+		displayName,
+		bio
+	}),
+	users: () => invoke("social_users"),
+	user: (username) => invoke("social_user", { username }),
+	playlists: () => invoke("social_playlists"),
+	playlist: (id) => invoke("social_playlist", { id }),
+	/** Id de la playlist en el servidor, o `null` si no está publicada. */
+	playlistLink: (playlistId) => invoke("social_playlist_link", { playlistId }),
+	publish: (playlistId, visibility, collaborative) => invoke("social_publish", {
+		playlistId,
+		visibility,
+		collaborative
+	}),
+	unpublish: (playlistId) => invoke("social_unpublish", { playlistId }),
+	sync: (playlistId) => invoke("social_sync", { playlistId }),
+	importPlaylist: (id) => invoke("social_import", { id }),
+	addMember: (id, username) => invoke("social_add_member", {
+		id,
+		username
+	}),
+	removeMember: (id, username) => invoke("social_remove_member", {
+		id,
+		username
+	})
+};

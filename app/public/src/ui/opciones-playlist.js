@@ -15,6 +15,7 @@ import { playlists } from "../ipc/client.js";
 import { t } from "../i18n/index.js";
 import { confirmar, pedirTexto } from "./dialogo.js";
 import { mostrarError } from "./error-overlay.js";
+import { publicarPlaylist } from "./publicar-playlist.js";
 /** Pide el nombre nuevo y lo aplica. */
 export async function renombrar(p, reacciones) {
 	const nuevo = await pedirTexto({
@@ -107,6 +108,12 @@ export function opcionesDePlaylist(p, reacciones = {}) {
 			ejecutar: () => cambiarFoto(p, reacciones)
 		}
 	];
+	menu.push({
+		clave: "share",
+		etiqueta: t("social.share"),
+		icono: "users",
+		ejecutar: () => void publicarPlaylist(p)
+	});
 	// Solo si hay algo que quitar: una opción permanentemente inerte enseña a
 	// desconfiar del menú entero.
 	if (p.hasOwnCover) {

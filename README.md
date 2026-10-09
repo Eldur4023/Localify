@@ -65,6 +65,30 @@ cmake --build build -j$(nproc)
 (cd app && ../build/vendor/lux/lux .)   # dev: lee app/ del disco, hot-reload al guardar
 ```
 
+## Serverify (servidor común opcional)
+
+Localify sigue siendo local y offline. Opcionalmente puede conectarse a un
+servidor propio (pestaña **Social**: dirección, puerto, usuario y contraseña):
+
+- **Búsquedas y descargas** preguntan primero al servidor; si tiene la
+  canción, se descarga de ahí; si no, el flujo de siempre (YouTube Music +
+  yt-dlp). **yt-dlp nunca corre en el servidor**: las descargas las hace el
+  cliente, y lo que baja de YouTube lo aporta al servidor (se puede desactivar
+  en *Social → Mi perfil*).
+- **Usuarios, perfiles y playlists** como referencias (título, artista,
+  duración): pública/privada, colaborativa con otros usuarios, importable a la
+  biblioteca local. La música y las playlists reales siguen en cada equipo.
+
+El servidor es una app Lux más ([server/server.lux](server/server.lux), SQLite):
+
+```bash
+cd server && JWT_SECRET=<secreto largo> ../build/vendor/lux/lux server.lux --port 8787
+server/test.sh     # prueba extremo a extremo de la API
+```
+
+Datos en `server/data/` (BD + audio). Sin TLS: ponlo detrás de un proxy si sale
+de tu red.
+
 ---
 
 # Documentación del esqueleto (Lux Desktop)

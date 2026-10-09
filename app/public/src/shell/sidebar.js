@@ -37,6 +37,11 @@ export function mountSidebar(contenedor, router) {
 			ruta: "library",
 			clave: "nav.library",
 			icono: "library"
+		},
+		{
+			ruta: "social",
+			clave: "nav.social",
+			icono: "users"
 		}
 	];
 	const botones = new Map();

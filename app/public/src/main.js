@@ -32,6 +32,7 @@ import { mountLikedView } from "./views/liked.js";
 import { mountPlaylistView } from "./views/playlist.js";
 import { mountSearchView } from "./views/search.js";
 import { mountSettingsView } from "./views/settings.js";
+import { mountSocialView } from "./views/social.js";
 import { alCambiarIdioma, t } from "./i18n/index.js";
 import { instalarCapturaDeErrores, mostrarError } from "./ui/error-overlay.js";
 /**
@@ -102,6 +103,7 @@ function main() {
 		playlist: (c, r) => mountPlaylistView(c, r),
 		album: (c, r) => mountAlbumView(c, r),
 		artist: (c, r) => mountArtistView(c, r),
+		social: (c, r) => mountSocialView(c, r),
 		settings: (c) => mountSettingsView(c)
 	}, "home");
 	const sidebar = mountSidebar(barraLateral, router);
@@ -128,6 +130,7 @@ function main() {
 			case "playlist": return t("playlist.title");
 			case "search": return t("search.title");
 			case "settings": return t("settings.title");
+			case "social": return t("nav.social");
 			case "album": return t("album.title");
 			case "artist": return t("artist.title");
 			default: return t("library.title");
