@@ -6,16 +6,15 @@
 *
 * ## La posición sale del motor de audio, y solo de ahí
 *
-* Llega como `positionTick`, que el motor emite según avanza el propio audio
-* (y al saltar). Antes la barra se pintaba desde dos sitios --el audio real y
-* la posición guardada en el backend, que iba por detrás-- y daba tirones.
-* Los estados que llegan del backend ya traen la posición del motor
-* (ipc/reproductor.js, conTiempoLocal), así que pintar() tampoco la contradice.
+* Llega como `positionTick`, en cada foto que el backend empuja mientras suena
+* (unas 5 por segundo). Es la posición del motor de audio nativo, lo que se
+* oye; los estados que devuelve el backend traen esa misma, así que pintar()
+* tampoco la contradice.
 *
 * ## Arrastrar la barra no salta hasta soltar
 *
 * Mientras se arrastra, la barra deja de seguir a la reproducción: si no, cada
-* sondeo tiraría del pulgar de vuelta y sería imposible apuntar.
+* foto tiraría del pulgar de vuelta y sería imposible apuntar.
 */
 import { player } from "../ipc/client.js";
 import { alRecibir } from "../ipc/events.js";
@@ -260,8 +259,8 @@ export function mountPlayerBar(contenedor, opciones) {
 	}
 	const dejarEventos = alRecibir((evento) => {
 		switch (evento.type) {
-			// Cada revision nueva, no solo los cambios de estado que el sondeo
-			// llega a ver: una pausa→suena entre dos sondeos no cambia "status".
+			// Cada revision nueva, no solo los cambios de estado que ve una
+			// foto: una pausa→suena entre dos fotos no cambia "status".
 			case "queueChanged":
 			case "trackChanged":
 			case "playStatusChanged":

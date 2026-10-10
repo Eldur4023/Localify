@@ -33,9 +33,15 @@ export function mountHomeView(contenedor) {
 						// enlace al álbum para que el clic central y el teclado funcionen,
 						// pero la acción principal de una canción es sonar, y repartirla
 						// entre un clic y dos obligaría a recordar cuál hace qué.
+						// Y sigue con el resto de la sección, como Spotify: una fila de
+						// recomendaciones se escucha entera, no una canción suelta.
 						card.addEventListener("click", (e) => {
 							e.preventDefault();
-							void player.playTrack(pista.id, { kind: "library" });
+							void player.playTrack(pista.id, {
+								kind: "recommendation",
+								seedTrackId: pista.id,
+								trackIds: seccion.items.items.map((p) => p.id)
+							});
 						});
 						desmontadores.push(arrastrable(card, () => [pista.id]));
 						cuerpo.append(card);

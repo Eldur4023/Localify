@@ -1,4 +1,5 @@
 import { player, search } from "../ipc/client.js";
+import { alRecibirTipo } from "../ipc/events.js";
 import { alCambiarIdioma, t } from "../i18n/index.js";
 import { comienzoDePista } from "../ui/cards.js";
 import { abrirMenu } from "../ui/menu.js";
@@ -44,6 +45,8 @@ export function mountBusquedaRapida(contenedor, router) {
 	contenedor.append(caja);
 	let resultados = [];
 	let activa = -1;
+	/** Búsqueda del catálogo en curso para esta consulta (su `queryId`), o null. */
+	let esperandoRemoto = null;
 	let temporizador = null;
 	/** El respiro entre `blur` y `cerrar()` (ver más abajo), para poder cancelarlo. */
 	let cierreTemporizador = null;
@@ -61,11 +64,12 @@ export function mountBusquedaRapida(contenedor, router) {
 		entrada.removeAttribute("aria-activedescendant");
 		resultados = [];
 		activa = -1;
+		esperandoRemoto = null;
 	}
 	function marcar(indice) {
 		activa = indice;
-		for (const [i, fila] of [...panel.children].entries()) {
-			fila.classList.toggle("is-active", i === indice);
+		for (const fila of panel.children) {
+			fila.classList.toggle("is-active", fila.dataset.indice === String(indice));
 		}
 		if (indice >= 0) entrada.setAttribute("aria-activedescendant", `rapida-${indice}`);
 		else entrada.removeAttribute("aria-activedescendant");
@@ -81,16 +85,46 @@ export function mountBusquedaRapida(contenedor, router) {
 		cerrar();
 		entrada.blur();
 	}
+	/** Una fila de texto (sin carátula ni duración): estado o "ver todos". */
+	function filaDeTexto(texto, indice) {
+		const fila = document.createElement("div");
+		fila.className = "rapida__fila rapida__fila--texto";
+		const textos = document.createElement("div");
+		textos.className = "rapida__textos";
+		const titulo = document.createElement("div");
+		titulo.className = "rapida__artista";
+		titulo.textContent = texto;
+		textos.append(titulo);
+		fila.append(textos);
+		if (indice !== undefined) {
+			fila.id = `rapida-${indice}`;
+			fila.dataset.indice = String(indice);
+			fila.setAttribute("role", "option");
+			fila.addEventListener("mousedown", (e) => {
+				e.preventDefault();
+				if (e.button === 0) irABuscar();
+			});
+			fila.addEventListener("mouseenter", () => marcar(indice));
+		}
+		return fila;
+	}
+	/** Índice de la fila final "ver todos los resultados". */
+	const indiceVerTodos = () => resultados.length;
 	function pintar() {
 		panel.replaceChildren();
-		if (resultados.length === 0) {
+		const q = entrada.value.trim();
+		if (q.length === 0) {
 			cerrar();
 			return;
+		}
+		if (resultados.length === 0) {
+			panel.append(filaDeTexto(esperandoRemoto !== null ? t("search.searching") : t("search.no_results", { query: q })));
 		}
 		for (const [i, pista] of resultados.entries()) {
 			const fila = document.createElement("div");
 			fila.className = "rapida__fila";
 			fila.id = `rapida-${i}`;
+			fila.dataset.indice = String(i);
 			fila.setAttribute("role", "option");
 			fila.setAttribute("aria-selected", "false");
 			const textos = document.createElement("div");
@@ -129,11 +163,13 @@ export function mountBusquedaRapida(contenedor, router) {
 			});
 			panel.append(fila);
 		}
+		panel.append(filaDeTexto(t("search.see_all"), indiceVerTodos()));
 		panel.hidden = false;
 		entrada.setAttribute("aria-expanded", "true");
-		marcar(-1);
+		marcar(activa < 0 ? -1 : Math.min(activa, indiceVerTodos()));
 	}
-	async function consultar() {
+	/** `trasRemoto`: la repetición cuando el catálogo ya contestó; no vuelve a esperarlo. */
+	async function consultar(trasRemoto = false) {
 		const q = entrada.value.trim();
 		if (q.length === 0) {
 			cerrar();
@@ -148,7 +184,7 @@ export function mountBusquedaRapida(contenedor, router) {
 				offset: 0,
 				limit: PEDIDAS,
 				cursor: null
-			});
+			}, { noRemote: trasRemoto });
 			if (mia !== ultima) return;
 			// `tracks` son **grupos de versiones**, no canciones sueltas: cada uno
 			// lleva su `principal` y las variantes colgando. Tratarlos como pistas
@@ -158,6 +194,10 @@ export function mountBusquedaRapida(contenedor, router) {
 			// Para un atajo de cuatro huecos el principal es además lo que se quiere:
 			// cuatro canciones distintas, no cuatro versiones de la misma.
 			resultados = r.tracks.slice(0, CUANTOS).map((g) => g.principal);
+			// Lo que no está en tu biblioteca lo busca el catálogo en segundo
+			// plano; cuando acabe (searchRemoteReady con este queryId) se repite
+			// la consulta y el desplegable se rellena.
+			esperandoRemoto = !trasRemoto && r.remote?.state === "loading" ? r.queryId : null;
 			pintar();
 		} catch {
 			// Una búsqueda fallida no merece un aviso encima de la barra: se cierra
@@ -167,24 +207,37 @@ export function mountBusquedaRapida(contenedor, router) {
 	}
 	const alEscribir = () => {
 		if (temporizador !== null) globalThis.clearTimeout(temporizador);
+		activa = -1;
 		temporizador = globalThis.setTimeout(() => void consultar(), REBOTE);
 	};
+	const dejarRemoto = alRecibirTipo("searchRemoteReady", (evento) => {
+		if (esperandoRemoto !== null && evento.queryId === esperandoRemoto) void consultar(true);
+	});
 	const alTeclear = (e) => {
 		switch (e.key) {
 			case "ArrowDown":
 				e.preventDefault();
-				if (resultados.length > 0) marcar(Math.min(resultados.length - 1, activa + 1));
+				if (!panel.hidden) marcar(Math.min(indiceVerTodos(), activa + 1));
 				break;
 			case "ArrowUp":
 				e.preventDefault();
-				if (resultados.length > 0) marcar(Math.max(-1, activa - 1));
+				if (!panel.hidden) marcar(Math.max(-1, activa - 1));
 				break;
 			case "Enter": {
 				e.preventDefault();
-				// Con una fila elegida, suena. Sin ninguna, Enter lleva a la búsqueda
-				// completa: es lo que hace todo el mundo cuando quiere ver más.
-				if (activa >= 0) reproducir(activa);
-				else irABuscar();
+				// Enter nunca te saca de donde estás: con una fila elegida, suena (o,
+				// la última, abre la búsqueda completa); sin ninguna, despliega las
+				// coincidencias ya --sin esperar al rebote-- y marca la primera, de
+				// modo que un segundo Enter la pone.
+				if (activa >= 0 && activa < resultados.length) reproducir(activa);
+				else if (activa === indiceVerTodos() && !panel.hidden) irABuscar();
+				else {
+					if (temporizador !== null) globalThis.clearTimeout(temporizador);
+					temporizador = null;
+					void consultar().then(() => {
+						if (resultados.length > 0) marcar(0);
+					});
+				}
 				break;
 			}
 			case "Escape":
@@ -217,7 +270,7 @@ export function mountBusquedaRapida(contenedor, router) {
 			globalThis.clearTimeout(cierreTemporizador);
 			cierreTemporizador = null;
 		}
-		if (resultados.length > 0) panel.hidden = false;
+		if (entrada.value.trim().length > 0 && panel.children.length > 0) panel.hidden = false;
 	});
 	entrada.addEventListener("blur", () => {
 		// Un respiro antes de cerrar: sin él, soltar el ratón sobre una fila llega
@@ -235,6 +288,7 @@ export function mountBusquedaRapida(contenedor, router) {
 	const dejarIdioma = alCambiarIdioma(etiquetas);
 	return { destroy() {
 		dejarIdioma();
+		dejarRemoto();
 		if (temporizador !== null) globalThis.clearTimeout(temporizador);
 		if (cierreTemporizador !== null) globalThis.clearTimeout(cierreTemporizador);
 		caja.remove();

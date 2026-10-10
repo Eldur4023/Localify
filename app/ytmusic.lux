@@ -310,7 +310,10 @@ class PistaCatalogo:
 fn PistaCatalogo ytm_cancion(Json elemento):
     PistaCatalogo p = PistaCatalogo()
     p.id = video_id_de(elemento)
-    p.title = columna(elemento, 0).trim()
+    # El primer tramo, no todos juntos: en algunos directos YouTube Music manda
+    # el título dos veces (estilizado y en ASCII) y salía "X - X".
+    List<Tramo> titulo = tramos(elemento, 0)
+    p.title = len(titulo) > 0 ? titulo[0].texto.trim() : ""
     if p.id == "" or p.title == "":
         return p
     Subtitulo s = leer_subtitulo(elemento, 1, 2)
@@ -329,16 +332,30 @@ fn PistaCatalogo ytm_cancion(Json elemento):
 
 # Duración mínima: una pista de catálogo sin duración no se puede validar al
 # emparejar, pero se guarda igual (el fichero descargado dirá la real).
-fn void guardar_pista(PistaCatalogo p):
+#
+# Devuelve el id de la pista que la representa: el suyo, o el de la que ya
+# existía para la misma grabación (duplicados.lux) -- en ese caso no se crea
+# otra fila.
+fn string guardar_pista(PistaCatalogo p):
     if p.id == "" or p.title == "":
-        return
+        return ""
+    List<Json> ya = await sqlite.query("select 1 as ok from tracks where id = ?", p.id)
+    # `tracks` exige duration_ms > 0 y el catálogo devuelve 0 cuando no la sabe:
+    # una sola así hacía fallar toda la tanda. Si no existe ya, no se guarda.
+    if len(ya) == 0 and p.duration_ms <= 0:
+        return ""
+    if len(ya) == 0:
+        string equivalente = pista_equivalente(p)
+        if equivalente != "":
+            return equivalente
     string artistas_display = ""
     for int i in range(0, len(p.artista_nombres)):
         if i > 0:
             artistas_display = artistas_display + ", "
         artistas_display = artistas_display + p.artista_nombres[i]
 
-    # los artistas primero: album_artists y track_artists los referencian (FK)
+    # Los artistas PRIMERO: album_artists y track_artists los referencian, y con
+    # las claves foráneas activas un artista nuevo hacía fallar la tanda entera.
     for int i in range(0, len(p.artista_ids)):
         await sqlite.exec("""
             insert into artists(id, name, name_norm, metadata_at) values(?, ?, ?, unixepoch())
@@ -371,6 +388,7 @@ fn void guardar_pista(PistaCatalogo p):
 
     for int i in range(0, len(p.artista_ids)):
         await sqlite.exec("insert or ignore into track_artists(track_id, artist_id, position) values(?, ?, ?)", p.id, p.artista_ids[i], i)
+    return p.id
 
 # ─── Búsqueda de pistas para el frontend ─────────────────────────────────────
 
@@ -388,15 +406,22 @@ fn List<string> ytm_buscar_pistas(string consulta, int limite):
     # tanda en una única transacción no cambia el número de sentencias, pero
     # convierte esos cientos de fsync en uno solo.
     await sqlite.begin()
-    for int i in range(0, len(elementos)):
-        if len(ids) >= limite:
-            break
-        PistaCatalogo p = ytm_cancion(elementos[i])
-        if p.id == "" or p.title == "":
-            continue
-        guardar_pista(p)
-        ids.add(p.id)
-    await sqlite.commit()
+    try:
+        for int i in range(0, len(elementos)):
+            if len(ids) >= limite:
+                break
+            PistaCatalogo p = ytm_cancion(elementos[i])
+            if p.id == "" or p.title == "":
+                continue
+            string id = guardar_pista(p)
+            if id != "" and not ids.contains(id):
+                ids.add(id)
+        await sqlite.commit()
+    catch e:
+        # Sin esto la transacción quedaba abierta en la conexión del pool.
+        await sqlite.rollback()
+        log.warn("ytmusic: no se pudo guardar la búsqueda «" + consulta + "»: " + e.message)
+        return []
     return ids
 
 # resolve_recording del proveedor YtMusic: busca "{artista} {título}" y exige

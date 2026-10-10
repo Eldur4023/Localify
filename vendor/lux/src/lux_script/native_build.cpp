@@ -354,7 +354,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     codigo += "#include <lux/request.hpp>\n#include <lux/response.hpp>\n"
                   "#include <lux/task.hpp>\n#include <lux/blocking_pool.hpp>\n"
                   "#include <lux_script/db.hpp>\n#include <lux_script/builtin_module.hpp>\n"
-                  "#include <lux_script/auth.hpp>\n#include <lux/logger.hpp>\n#include <lux/multipart.hpp>\n\n" +
+                  "#include <lux_script/auth.hpp>\n#include <lux/logger.hpp>\n#include <lux/multipart.hpp>\n"
+                  "#include <lux_script/luxp_serve.hpp>\n\n" +
                   route_runtime_prelude() + "\n";
     codigo += clases_texto + "\n" + prototipos + "\n" + cuerpos;
     if (con_rutas) {
@@ -479,7 +480,7 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
         std::error_code e1, e2;
         const auto p = std::filesystem::canonical(dep, e1);
         clave += '\0' + std::to_string(e1 ? 0 : std::filesystem::file_size(p, e2)) + ':' +
-                 std::to_string(e1 ? 0LL : static_cast<long long>(std::filesystem::last_write_time(p, e2).time_since_epoch().count()));
+                 std::to_string(e1 ? 0 : std::filesystem::last_write_time(p, e2).time_since_epoch().count());
     }
     const std::string clave_hash = std::to_string(std::hash<std::string>{}(clave));
     std::string clave_previa;

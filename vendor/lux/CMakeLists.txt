@@ -19,15 +19,12 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "Lux requires Linux: it uses epoll, sendfile(2) and SO_REUSEPORT.")
 endif()
 
 option(LUX_IO_URING "io_uring backend instead of epoll (Linux 5.1+)" OFF)
 option(LUX_EXAMPLES "Build the examples in examples/"                 ON)
-# HTTPS in the server itself (tls: cert / key). Off by default: without it the
-# core links no OpenSSL and the binary keeps its size; TLS is then the proxy's job.
-option(LUX_TLS      "HTTPS: Lux terminates TLS (OpenSSL libssl)"          OFF)
 
 # Manual fuzzing harnesses -- see fuzz/chaos.hpp for why libFuzzer is not used
 # (it needs clang; this toolchain is gcc).  Off by default: it is not part of the
@@ -47,9 +44,8 @@ option(LUX_GZIP     "Native module: gzip, and deflate in zip (zlib)"  ON)
 option(LUX_IMAGE    "Native module: image (libjpeg, libpng, libwebp)" ON)
 
 # ── System dependencies ───────────────────────────────────────────────────────
-# Lux links neither OpenSSL, nghttp2 nor zlib: HTTP/2 and compression are the
-# reverse proxy's business, and so is TLS unless built with -DLUX_TLS=ON.  Only
-# threads are needed.
+# Lux links neither OpenSSL, nghttp2 nor zlib: TLS, HTTP/2 and compression are
+# the reverse proxy's business.  Only threads are needed.
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
@@ -96,7 +92,6 @@ set(LUX_SOURCES
     src/core/tcp_server.cpp
     src/http/http_parser.cpp
     src/http/http_connection.cpp
-    src/http/tls.cpp
 )
 
 if(LUX_IO_URING)
@@ -115,14 +110,6 @@ target_link_libraries(lux PUBLIC
     Threads::Threads
     ${LUX_ALLOC}
 )
-
-if(LUX_TLS)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(LUX_SSL REQUIRED libssl libcrypto)
-    target_compile_definitions(lux PUBLIC LUX_TLS)
-    target_include_directories(lux PUBLIC ${LUX_SSL_INCLUDE_DIRS})
-    target_link_libraries(lux PUBLIC ${LUX_SSL_LDFLAGS})
-endif()
 
 if(LUX_IO_URING)
     # io_uring_loop.cpp calls io_uring_setup/io_uring_enter via raw
@@ -171,8 +158,6 @@ set(_lux_module_exclude
     "src/lux_script/modules/base_modules/pdf.cpp"
     "src/lux_script/modules/base_modules/http.cpp"
     "src/lux_script/modules/base_modules/mail.cpp"
-    "src/lux_script/modules/base_modules/imap.cpp"
-    "src/lux_script/modules/base_modules/mailparse.cpp"
     "src/lux_script/modules/base_modules/crypto.cpp"
     "src/lux_script/modules/base_modules/gzip.cpp"
     "src/lux_script/modules/base_modules/image.cpp")
@@ -202,9 +187,24 @@ add_library(lux_script STATIC
     src/lux_script/autotest.cpp
     src/lux_script/project.cpp
     src/lux_script/tiny_regex.cpp
+    src/lux_script/luxp_serve.cpp
+    src/lux_script/luxp_template.cpp
+    # .luxp: Luxium's application format -- translator, codecs, verifier.
+    # Owned here; Luxium vendors src/luxp/ (its tools/sync_from_lux.sh).
+    src/luxp/dom/node.cpp
+    src/luxp/html/tokenizer.cpp
+    src/luxp/html/parser.cpp
+    src/luxp/style/selector.cpp
+    src/luxp/style/stylesheet.cpp
+    src/luxp/page/doc_codec.cpp
+    src/luxp/page/doc_template.cpp
+    src/luxp/page/luxp.cpp
+    src/luxp/script/bytecode_io.cpp
+    src/luxp/script/page_compile.cpp
     ${LUX_MODULE_SOURCES}
 )
-target_include_directories(lux_script PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(lux_script PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/luxp)
 target_link_libraries(lux_script PUBLIC lux ${CMAKE_DL_LIBS})
 
 # Every module registers itself with a namespace-scope object that nothing
@@ -319,7 +319,7 @@ endfunction()
 
 set(_m src/lux_script/modules/base_modules)
 lux_optional_module(LUX_PDF    "pdf"       PACKAGES cairo                  FILES ${_m}/pdf.cpp)
-lux_optional_module(LUX_HTTP   "http/mail" PACKAGES libcurl                FILES ${_m}/http.cpp ${_m}/mail.cpp ${_m}/imap.cpp ${_m}/mailparse.cpp)
+lux_optional_module(LUX_HTTP   "http/mail" PACKAGES libcurl                FILES ${_m}/http.cpp ${_m}/mail.cpp)
 lux_optional_module(LUX_CRYPTO "crypto"    PACKAGES libcrypto              FILES ${_m}/crypto.cpp)
 lux_optional_module(LUX_GZIP   "gzip"      PACKAGES zlib                   FILES ${_m}/gzip.cpp)
 lux_optional_module(LUX_IMAGE  "image"     PACKAGES libjpeg libpng libwebp FILES ${_m}/image.cpp)

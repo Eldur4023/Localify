@@ -183,8 +183,8 @@ fn Json cmd_settings_patch(Json cambios):
         insert into settings(key, value, updated_at) values('settings_json', ?, unixepoch())
         on conflict(key) do update set value = excluded.value, updated_at = unixepoch()
         """, str(actuales))
-    if otra_salida:
-        aplicar_salida()
+    # EQ y crossfade, en el acto; la salida solo si cambió (reabrirla corta el sonido).
+    motor_aplicar_ajustes(otra_salida)
     tocar_ajustes()
     return null
 
@@ -240,40 +240,14 @@ fn Json cmd_stats():
     }
 
 # ─── Salida de audio ─────────────────────────────────────────────────────────
-# WebKitGTK no tiene setSinkId: la salida se elige moviendo el flujo de la
-# app en PipeWire/PulseAudio con pactl. LC_ALL=C porque pactl traduce sus
-# etiquetas ("Nombre:", "Descripción:").
+# Las elige el motor de audio nativo (miniaudio). El id de un dispositivo es el
+# nombre de su sink en PulseAudio/PipeWire (el de `pactl list sinks`): el mismo
+# que guardaban los ajustes antes del motor nativo. La opción "predeterminado"
+# (`id: ""`) la pone la propia interfaz.
 
 fn List<Json> dispositivos_salida():
-    Json r = await os.run("env", ["LC_ALL=C", "pactl", "list", "sinks"])
     List<Json> out = []
-    string nombre = ""
-    List<string> lineas = jstr(r["stdout"], "").split("\n")
-    for int i in range(0, len(lineas)):
-        string l = lineas[i].trim()
-        if l.starts_with("Name: "):
-            nombre = l.slice(6)
-        elif l.starts_with("Description: ") and nombre != "":
-            out.add({ "id": nombre, "name": l.slice(13) })
+    List<Json> d = audio.devices()
+    for int i in range(0, len(d)):
+        out.add({ "id": d[i]["id"], "name": d[i]["name"], "isDefault": d[i]["isDefault"] })
     return out
-
-# Mueve los flujos de Localify a la salida guardada (o a la predeterminada).
-# Devuelve cuántos movió: al arrancar, el flujo de WebKit puede no existir
-# aún, y events.lux lo reintenta hasta que haya uno.
-fn int aplicar_salida():
-    Json audio = jget(ajustes_estructurados(), "audio")
-    string destino = jstr(jget(audio, "outputDeviceId"), "")
-    if destino == "":
-        destino = "@DEFAULT_SINK@"
-    Json r = await os.run("env", ["LC_ALL=C", "pactl", "list", "sink-inputs"])
-    int movidos = 0
-    string flujo = ""
-    List<string> lineas = jstr(r["stdout"], "").split("\n")
-    for int i in range(0, len(lineas)):
-        string l = lineas[i].trim()
-        if l.starts_with("Sink Input #"):
-            flujo = l.slice(12)
-        elif l == "application.name = \"localify\"" and flujo != "":
-            await os.run("pactl", ["move-sink-input", flujo, destino])
-            movidos = movidos + 1
-    return movidos

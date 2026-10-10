@@ -654,7 +654,6 @@ fn Json? ffprobe_info(string ruta):
 # ─── El tick ─────────────────────────────────────────────────────────────────
 
 fn List<Json> tick_descargas():
-    db_init()
 
     # trabajos en marcha sin handle (la app se reinició): reencolar o fallar
     List<Json> zombis = await sqlite.query("select track_id, state, attempts from download_jobs where state in ('matching','downloading')")

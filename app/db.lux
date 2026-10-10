@@ -1,31 +1,16 @@
 # db.lux — Esquema y utilidades de base de datos.
 #
 # Puerto adaptado de las migraciones V1-V8 de Localify (crates/localify-db/
-# migrations). Sin FTS5 en esta primera fase: la búsqueda usa LIKE sobre las
-# columnas *_norm, suficiente para los tamaños de biblioteca de este port.
-# Las migraciones son perezosas (no hay gancho de arranque en LuxScript):
-# db_init() lo llama la primera petición que llegue, con CREATE TABLE IF NOT
-# EXISTS para que las carreras entre las 16 hebras del servidor sean inocuas.
+# migrations). Sin FTS5 todavía: la búsqueda usa LIKE sobre las columnas
+# *_norm. Las migraciones están versionadas (settings.schema_version) y las
+# lanza db_init() desde `on start:` (app.lux).
 
 # Los imports de módulos son a nivel de proyecto y viven en app.lux.
 
-fn void db_init():
-    if state.get("db_ready", "") == "1":
-        return
-    # ./data no forma parte de los recursos embebidos: hay que crearlo antes
-    # de que SQLite pueda abrir el fichero (también en el binario empaquetado)
-    os.make_dir("data")
-    if state.get("db_init_running", "") == "1":
-        # otra hebra está creando el esquema: esperar en vez de consultar
-        # tablas que aún no existen (el servidor corre 16 hebras y la UI
-        # dispara varias peticiones en el primer arranque)
-        for int i in range(0, 200):
-            await sleep(50)
-            if state.get("db_ready", "") == "1":
-                return
-        return
-    state.set("db_init_running", "1")
-
+# Migración 1: el esquema completo de partida (V1-V8 del original, juntas).
+# IF NOT EXISTS en todo: las bases creadas antes de que el esquema tuviera
+# versión (schema_version = '1' fijo) la dan por hecha y no la repiten.
+fn void migracion_1():
     await sqlite.exec("""
         create table if not exists artists(
             id text primary key,
@@ -244,25 +229,50 @@ fn void db_init():
     """)
     await sqlite.exec("insert or ignore into player_state(id) values(1)")
 
-    # Columnas del reproductor (reproductor.lux): `cue` sube cada vez que el
-    # backend quiere que el motor de audio cargue una pista o salte de
-    # posición, y `anchor_ms` es el instante de época en que la posición 0
-    # habría sonado mientras suena. ALTER idempotente: las bases creadas antes
-    # de esto no las tienen.
+    # `cue` sube cada vez que el backend quiere que el motor de audio cargue
+    # una pista o salte de posición (motor.lux). ALTER idempotente: las bases
+    # creadas antes de esto no la tienen. (`anchor_ms`, de cuando el reloj lo
+    # llevaba el navegador, ya no se usa; la columna se queda, inofensiva.)
     if not player_state_tiene("cue"):
         await sqlite.exec("alter table player_state add column cue integer not null default 0")
-    if not player_state_tiene("anchor_ms"):
-        await sqlite.exec("alter table player_state add column anchor_ms integer not null default 0")
+
+# Migración 3: normalizar() cortaba la cola de los textos con caracteres no
+# ASCII (text.lux, largo_bytes), así que los *_norm guardados de esas filas
+# están mal. Se recalculan; las ASCII ya estaban bien.
+fn void migracion_3():
+    List<Json> pistas = await sqlite.query("select id, title, artist_display from tracks where title glob '*[^ -~]*' or artist_display glob '*[^ -~]*'")
+    for int i in range(0, len(pistas)):
+        await sqlite.exec("update tracks set title_norm = ?, artist_norm = ? where id = ?",
+            normalizar(jstr(pistas[i]["title"], "")), normalizar(jstr(pistas[i]["artist_display"], "")), jstr(pistas[i]["id"], ""))
+    List<Json> albumes = await sqlite.query("select id, title from albums where title glob '*[^ -~]*'")
+    for int i in range(0, len(albumes)):
+        await sqlite.exec("update albums set title_norm = ? where id = ?", normalizar(jstr(albumes[i]["title"], "")), jstr(albumes[i]["id"], ""))
+    List<Json> artistas = await sqlite.query("select id, name from artists where name glob '*[^ -~]*'")
+    for int i in range(0, len(artistas)):
+        await sqlite.exec("update artists set name_norm = ? where id = ?", normalizar(jstr(artistas[i]["name"], "")), jstr(artistas[i]["id"], ""))
+
+# Migraciones versionadas. Corre UNA vez, en `on start:` (app.lux): Lux no
+# atiende ninguna petición hasta que acaba, así que ningún handler ve un
+# esquema a medias.
+fn void db_init():
+    os.make_dir("data")   # ./data no va embebido en el binario: hay que crearlo antes de abrir SQLite
+    await sqlite.exec("create table if not exists settings(key text primary key, value text, updated_at integer not null default (unixepoch()))")
+    int v = int(ajuste("schema_version", "0"))
+    if v < 1:
+        migracion_1()
+        ajuste_poner("schema_version", "1")
+    if v < 2:
+        # Migración 2: a partir de aquí se fusionan las pistas duplicadas en
+        # cada arranque (duplicados.lux). Antes de la primera, una copia
+        # completa de la base de datos, por si acaso.
+        await sqlite.exec("vacuum into ?", "data/localify.antes-de-fusionar.db")
+        ajuste_poner("schema_version", "2")
+    if v < 3:
+        migracion_3()
+        ajuste_poner("schema_version", "3")
     # Al abrir la app no se sigue sonando: se restaura EN PAUSA en la última
-    # posición conocida, como el original. db_init() corre una vez por
-    # proceso, así que esto solo ocurre al arrancar.
-    await sqlite.exec("update player_state set status = 'paused', anchor_ms = 0 where id = 1 and status = 'playing'")
-
-    await sqlite.exec("insert or replace into settings(key, value, updated_at) values('schema_version', '1', unixepoch())")
-
-    # el flag va al FINAL: antes de esto, cualquier otra hebra está esperando
-    state.set("db_ready", "1")
-    state.set("db_init_running", "0")
+    # posición conocida, como el original.
+    await sqlite.exec("update player_state set status = 'paused' where id = 1 and status = 'playing'")
 
 # ─── Utilidades ──────────────────────────────────────────────────────────────
 

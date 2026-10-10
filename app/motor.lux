@@ -1,0 +1,189 @@
+# motor.lux — El backend, dueño del reproductor: lo que dice el estado (qué
+# pista, sonando o en pausa, volumen) se aplica al motor de audio nativo
+# (src/audio_engine.cpp, módulo `audio`).
+#
+# Reparto, como en el original (ADR-015):
+#   - El motor solo MEZCLA: carga lo que se le dice, precarga la siguiente
+#     para el gapless/crossfade y avisa de lo que pasa (handoff / ended /
+#     error). No sabe de colas.
+#   - Este fichero decide: qué cargar, cuándo precargar y qué hacer cuando el
+#     motor avisa. La posición que ve la interfaz es la del motor (lo que se
+#     oye); la de SQLite solo sirve para restaurar la sesión.
+#
+# Todo entra por motor_sincronizar(): "el estado es este; que el motor lo
+# esté". Es idempotente y barata cuando ya coincide, así que la llaman tanto
+# cada orden del reproductor (efecto inmediato) como el tick de fondo.
+#
+# `state` guarda dos claves de este lado:
+#   motor_clave   "<cue>:<pista>" que el motor ya aplicó (cada cue se aplica
+#                 una vez: cargar, o saltar si ya tenía la pista)
+#   prever_*      la precarga de la siguiente pista
+
+# ─── Qué hay en disco ────────────────────────────────────────────────────────
+
+# {ruta, durationMs} de una pista; ruta == "" si no está descargada (o el
+# fichero ya no existe).
+fn Json fichero_de_pista(string track_id):
+    List<Json> f = await sqlite.query("""
+        select af.rel_path as rel, t.duration_ms as dur
+        from audio_files af join tracks t on t.id = af.track_id
+        where af.track_id = ?
+        """, track_id)
+    if len(f) == 0:
+        return { "ruta": "", "durationMs": 0 }
+    string ruta = ruta_audio_abs(jstr(f[0]["rel"], ""))
+    if not os.is_file(ruta):
+        return { "ruta": "", "durationMs": 0 }
+    return { "ruta": ruta, "durationMs": jint(f[0]["dur"], 0) }
+
+# ─── Estado → motor ──────────────────────────────────────────────────────────
+
+fn void motor_sincronizar(EstadoCola e):
+    audio.set_volume(e.volume)
+    Json st = audio.status()
+    string en_motor = jstr(st["trackId"], "")
+
+    if e.track_id == "":
+        if en_motor != "":
+            audio.stop()
+        state.set("motor_clave", "")
+        return
+
+    string clave = str(e.cue) + ":" + e.track_id
+    string aplicada = state.get("motor_clave", "")
+    if aplicada != clave or en_motor != e.track_id:
+        Json datos = fichero_de_pista(e.track_id)
+        string ruta = jstr(datos["ruta"], "")
+        if ruta == "":
+            # Sin fichero (todavía): no suena nada. Cuando la descarga lo
+            # traiga, el siguiente tick lo carga donde diga el estado.
+            if en_motor != "":
+                audio.stop()
+            state.set("motor_clave", "")
+            return
+        if en_motor == e.track_id and aplicada != "":
+            # La misma pista con otro cue: un salto (seek, o volver al principio).
+            audio.seek(e.position_ms)
+        else:
+            audio.load(ruta, e.track_id, e.position_ms, jint(datos["durationMs"], 0), e.status == "playing")
+        state.set("motor_clave", clave)
+
+    if e.status == "playing":
+        audio.play()
+    else:
+        audio.pause()
+
+# ─── Motor → estado ──────────────────────────────────────────────────────────
+
+# Lo que el motor avisa. `handoff`: ya está tocando la siguiente (gapless o
+# crossfade); `ended`: se acabó y no había nada precargado; `error`: no pudo
+# decodificar la pista.
+fn void motor_eventos():
+    List<Json> evs = audio.take_events()
+    for int i in range(0, len(evs)):
+        string tipo = jstr(evs[i]["type"], "")
+        string pista = jstr(evs[i]["trackId"], "")
+        EstadoCola antes = leer_estado()
+        log.info("motor de audio: " + tipo + " " + pista)
+        if tipo == "error":
+            log.error("motor de audio: no se pudo reproducir " + pista)
+            reproductor_orden("pause", {})
+            continue
+        # En `handoff`, `trackId` es la que ENTRA; en `ended`, la que acabó.
+        reproductor_orden("ended", {
+            "cue": antes.cue,
+            "__listenedMs": jint(evs[i]["listenedMs"], 0),
+            "__entra": tipo == "handoff" ? pista : ""
+        })
+
+# Precarga la siguiente pista cuando la actual está por acabar, para que el
+# relevo no tenga hueco. Solo dentro de la ventana final (cada pista precargada
+# es un ffmpeg vivo), y se rehace si la cola cambia (revision).
+fn void motor_prever(EstadoCola e):
+    if e.track_id == "" or e.status != "playing":
+        return
+    Json st = audio.status()
+    if jstr(st["trackId"], "") != e.track_id:
+        return
+    int dur = jint(st["durationMs"], 0)
+    int ventana = int(state.get("crossfade_ms", "0")) + 15000
+    if dur > 0 and dur - jint(st["positionMs"], 0) > ventana:
+        if state.get("prever_clave", "") != "":
+            audio.preload("", "", 0)
+            state.set("prever_clave", "")
+            state.set("prever_pendiente", "")
+        return
+
+    string clave = str(e.revision) + ":" + e.track_id
+    string pendiente = state.get("prever_pendiente", "")
+    bool reintento = pendiente != "" and time.now() - int(pendiente) > 5000
+    if state.get("prever_clave", "") == clave and not reintento:
+        return
+    state.set("prever_clave", clave)
+
+    string siguiente = pista_siguiente_natural(e)
+    if siguiente == "":
+        audio.preload("", "", 0)
+        state.set("prever_pendiente", "")
+        return
+    Json datos = fichero_de_pista(siguiente)
+    string ruta = jstr(datos["ruta"], "")
+    if ruta == "":
+        # Aún no está descargada: pedirla y reintentar en unos segundos.
+        asegurar_descarga(siguiente, "prefetch")
+        state.set("prever_pendiente", str(time.now()))
+        return
+    audio.preload(ruta, siguiente, jint(datos["durationMs"], 0))
+    state.set("prever_pendiente", "")
+
+# Cada ~5 s: la posición para restaurar la sesión y lo escuchado para las
+# estadísticas (se van moviendo mientras suena).
+fn void motor_persistir(EstadoCola e):
+    if e.status != "playing" or e.track_id == "":
+        return
+    int t = time.now()
+    if t - int(state.get("persistir_t", "0")) < 5000:
+        return
+    state.set("persistir_t", str(t))
+    Json st = audio.status()
+    if jstr(st["trackId"], "") != e.track_id:
+        return
+    await sqlite.exec("update player_state set position_ms = ? where id = 1 and cue = ?", jint(st["positionMs"], 0), e.cue)
+    # Otra vez el cue: una orden que cambió de pista mientras tanto ya cerró
+    # esta escucha, y esto la reabriría duplicada.
+    if leer_estado().cue == e.cue:
+        escucha_progreso(e.track_id, jint(st["listenedMs"], 0), e.context)
+
+# ─── Ajustes de audio ────────────────────────────────────────────────────────
+
+# EQ, crossfade y volumen del estado guardado. La salida (reabrir el
+# dispositivo) solo cuando se pide: cortaría el sonido.
+fn void motor_aplicar_ajustes(bool con_salida):
+    Json cfg = jget(ajustes_estructurados(), "audio")
+    if cfg != null:
+        Json eq = jget(jget(cfg, "eqProfile"), "gainsDb")
+        if eq != null:
+            audio.set_eq(eq)
+        int xf = jint(jget(cfg, "crossfadeMs"), 0)
+        audio.set_crossfade(xf)
+        state.set("crossfade_ms", str(xf))
+        if con_salida:
+            audio.set_device(jstr(jget(cfg, "outputDeviceId"), ""))
+    audio.set_volume(leer_estado().volume)
+
+# ─── El tick de fondo ────────────────────────────────────────────────────────
+
+fn void motor_tick():
+    motor_eventos()
+    EstadoCola e = leer_estado()
+    motor_sincronizar(e)
+    motor_prever(e)
+    motor_persistir(e)
+    # MPRIS y Discord también se publican tras cada orden (reproductor.lux);
+    # aquí, además, una vez por segundo: lo que Discord no aceptó en su
+    # momento por su límite de frecuencia sale en una de estas llamadas.
+    int t = time.now()
+    if t - int(state.get("integraciones_t", "0")) >= 1000:
+        state.set("integraciones_t", str(t))
+        publicar_integraciones()
+    publicar_snapshot()

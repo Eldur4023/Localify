@@ -33,6 +33,18 @@ fn string orden_dto(string sort):
 
 # ─── Biblioteca ──────────────────────────────────────────────────────────────
 
+# Qué es "tu biblioteca": lo descargado, lo que te gusta, lo que está en una
+# playlist o lo que has escuchado. La tabla `tracks` guarda además todo lo que
+# el catálogo devolvió en búsquedas y recomendaciones (hace falta para poder
+# reproducirlo), pero eso no es tuyo: listarlo en Canciones llenaba la
+# biblioteca de versiones en directo y repetidas que nunca elegiste.
+fn string en_biblioteca_sql(string alias):
+    string sql = """(exists (select 1 from audio_files x where x.track_id = T.id)
+        or exists (select 1 from favorites x where x.track_id = T.id)
+        or exists (select 1 from playlist_items x where x.track_id = T.id)
+        or exists (select 1 from play_history x where x.track_id = T.id))"""
+    return sql.replace("T.id", alias + ".id")
+
 fn Json cmd_library_tracks(Json args):
     Json filtro = jget(args, "filter")
     string sort = arg_str(args, "sort", "addedDesc")
@@ -55,6 +67,10 @@ fn Json cmd_library_tracks(Json args):
         if texto != "":
             condiciones.add(" t.title_norm like ? escape '\\'")
             parametros.add("%" + like_escapar(normalizar(texto)) + "%")
+    # La vista de un álbum o de un artista enseña lo que haya de él; la lista
+    # general, solo la biblioteca.
+    if (filtro == null or jstr(jget(filtro, "albumId"), "") == "") and (filtro == null or jstr(jget(filtro, "artistId"), "") == ""):
+        condiciones.add(" " + en_biblioteca_sql("t"))
     string where = ""
     for int i in range(0, len(condiciones)):
         if i == 0:
@@ -77,7 +93,7 @@ fn Json cmd_library_tracks(Json args):
         filas = await sqlite.query(consulta, parametros2[0], parametros2[1], parametros2[2], parametros2[3])
     else:
         filas = await sqlite.query(consulta, parametros2[0], parametros2[1], parametros2[2], parametros2[3], parametros2[4])
-    List<Json> total = await sqlite.query("select count(*) as n from tracks")
+    List<Json> total = await sqlite.query("select count(*) as n from tracks t where " + en_biblioteca_sql("t"))
     return { "items": track_rows_de(filas), "total": jint(total[0]["n"], 0), "nextCursor": null }
 
 fn Json cmd_library_albums(Json args):
@@ -90,12 +106,13 @@ fn Json cmd_library_albums(Json args):
                coalesce((select ar.name from album_artists aa join artists ar on ar.id = aa.artist_id
                          where aa.album_id = a.id order by aa.position limit 1), '') as artist_display
         from albums a
+        where exists (select 1 from tracks t where t.album_id = a.id and """ + en_biblioteca_sql("t") + """)
         order by a.created_at desc limit ? offset ?
         """, limite, offset)
     List<Json> out = []
     for int i in range(0, len(filas)):
         out.add(album_row_dto(filas[i]))
-    List<Json> total = await sqlite.query("select count(*) as n from albums")
+    List<Json> total = await sqlite.query("select count(*) as n from albums a where exists (select 1 from tracks t where t.album_id = a.id and " + en_biblioteca_sql("t") + ")")
     return { "items": out, "total": jint(total[0]["n"], 0), "nextCursor": null }
 
 fn Json cmd_library_artists(Json args):
@@ -107,19 +124,20 @@ fn Json cmd_library_artists(Json args):
                coalesce((select count(*) from track_artists ta join tracks t on t.id = ta.track_id
                          join audio_files af on af.track_id = t.id where ta.artist_id = ar.id), 0) as n_disponibles
         from artists ar
+        where exists (select 1 from track_artists ta join tracks t on t.id = ta.track_id where ta.artist_id = ar.id and """ + en_biblioteca_sql("t") + """)
         order by n_tracks desc, ar.name asc limit ? offset ?
         """, limite, offset)
     List<Json> out = []
     for int i in range(0, len(filas)):
         out.add(artist_row_dto(filas[i]))
-    List<Json> total = await sqlite.query("select count(*) as n from artists")
+    List<Json> total = await sqlite.query("select count(*) as n from artists ar where exists (select 1 from track_artists ta join tracks t on t.id = ta.track_id where ta.artist_id = ar.id and " + en_biblioteca_sql("t") + ")")
     return { "items": out, "total": jint(total[0]["n"], 0), "nextCursor": null }
 
 fn Json cmd_library_stats():
-    List<Json> pistas = await sqlite.query("select count(*) as n, coalesce(sum(duration_ms), 0) as ms from tracks")
+    List<Json> pistas = await sqlite.query("select count(*) as n, coalesce(sum(duration_ms), 0) as ms from tracks t where " + en_biblioteca_sql("t"))
     List<Json> locales = await sqlite.query("select count(*) as n, coalesce(sum(size_bytes), 0) as bytes from audio_files")
-    List<Json> albumes = await sqlite.query("select count(*) as n from albums")
-    List<Json> artistas = await sqlite.query("select count(*) as n from artists")
+    List<Json> albumes = await sqlite.query("select count(*) as n from albums a where exists (select 1 from tracks t where t.album_id = a.id and " + en_biblioteca_sql("t") + ")")
+    List<Json> artistas = await sqlite.query("select count(*) as n from artists ar where exists (select 1 from track_artists ta join tracks t on t.id = ta.track_id where ta.artist_id = ar.id and " + en_biblioteca_sql("t") + ")")
     List<Json> fallidas = await sqlite.query("select count(*) as n from download_jobs where state = 'failed'")
     return {
         "trackCount": jint(pistas[0]["n"], 0),
@@ -206,7 +224,7 @@ fn Json cmd_artist_detail(string id):
         return error_api("NOT_FOUND", "error.not_found").status(404)
     List<Json> pistas = await sqlite.query(sql_pista_dto() + """
         join track_artists ta on ta.track_id = t.id and ta.artist_id = ?
-        order by coalesce(hp.cnt, 0) desc, t.title_norm asc
+        order by play_count desc, t.title_norm asc
         """, id)
     List<Json> top = track_rows_de(pistas)
     List<Json> albumes = await sqlite.query("""
@@ -429,7 +447,7 @@ fn Json cmd_search_query(Json args):
           and (t.title_norm like ? escape '\\' or t.artist_norm like ? escape '\\' or al.title_norm like ? escape '\\')
           and (t.title_norm like ? escape '\\' or t.artist_norm like ? escape '\\' or al.title_norm like ? escape '\\')
         order by case when t.title_norm like ? escape '\\' then 0 else 1 end,
-                 coalesce(hp.cnt, 0) desc, t.title_norm
+                 play_count desc, t.title_norm
         limit 60
         """,
         patrones[0], patrones[0], patrones[0],
@@ -495,7 +513,9 @@ fn Json cmd_search_query(Json args):
     # lo remoto: la primera consulta lanza el trabajo; el bombeo de eventos lo
     # ejecuta y avisa con searchRemoteReady (los resultados ya están en la BD)
     Json remote = { "state": "notAttempted" }
-    if len(rows) > 0 or len(albums_out) > 0:
+    # `noRemote`: la repetición de una consulta cuando el catálogo ya contestó
+    # (sin esto, si el catálogo no encontró nada, se volvería a preguntar en bucle).
+    if len(rows) > 0 or len(albums_out) > 0 or jget(args, "noRemote") == true:
         remote = { "state": "notAttempted" }
     else:
         remote = { "state": "loading" }
@@ -511,63 +531,7 @@ fn Json cmd_search_query(Json args):
         "remote": remote
     }
 
-# ─── Inicio y recomendaciones ────────────────────────────────────────────────
-
-fn Json seccion_pistas(string clave, List<Json> rows):
-    return { "key": clave, "params": [], "items": { "kind": "tracks", "items": rows } }
-
-fn Json cmd_home():
-    List<Json> secciones = []
-    List<Json> sonadas = await sqlite.query("""
-        select h.track_id as id, max(h.played_at) as ultima from play_history h
-        group by h.track_id order by ultima desc limit 12
-        """)
-    if len(sonadas) > 0:
-        List<Json> recientes = []
-        for int i in range(0, len(sonadas)):
-            Json? p = track_row_por_id(jstr(sonadas[i]["id"], ""))
-            if p != null:
-                recientes.add(p)
-        if len(recientes) >= 4:
-            secciones.add(seccion_pistas("home.recent", recientes))
-    List<Json> top = await sqlite.query(sql_pista_dto() + " order by coalesce(hp.cnt, 0) desc, t.added_at desc limit 12")
-    List<Json> top_rows = track_rows_de(top)
-    if len(top_rows) >= 4:
-        secciones.add(seccion_pistas("home.top_tracks", top_rows))
-    List<Json> albumes = await sqlite.query("""
-        select a.id, a.title, a.release_date, a.album_type, '' as artist_display,
-               coalesce((select count(*) from tracks t where t.album_id = a.id), 0) as n_tracks,
-               coalesce((select count(*) from tracks t join audio_files af on af.track_id = t.id where t.album_id = a.id), 0) as n_disponibles
-        from albums a
-        where a.id in (select distinct album_id from tracks t join play_history h on h.track_id = t.id)
-        order by a.created_at desc limit 12
-        """)
-    if len(albumes) >= 4:
-        List<Json> albums_out = []
-        for int i in range(0, len(albumes)):
-            albums_out.add(album_row_dto(albumes[i]))
-        secciones.add({ "key": "home.top_albums", "params": [], "items": { "kind": "albums", "items": albums_out } })
-    List<Json> artistas = await sqlite.query("""
-        select ar.id, ar.name,
-               coalesce((select count(*) from track_artists ta where ta.artist_id = ar.id), 0) as n_tracks,
-               0 as n_disponibles
-        from artists ar
-        where ar.id in (select distinct artist_id from track_artists ta join play_history h on h.track_id = ta.track_id)
-        order by n_tracks desc limit 12
-        """)
-    if len(artistas) >= 4:
-        List<Json> artists_out = []
-        for int i in range(0, len(artistas)):
-            artists_out.add(artist_row_dto(artistas[i]))
-        secciones.add({ "key": "home.top_artists", "params": [], "items": { "kind": "artists", "items": artists_out } })
-    List<Json> listas = await cmd_playlist_list()
-    if len(listas) >= 4:
-        secciones.add({ "key": "home.playlists", "params": [], "items": { "kind": "playlists", "items": listas } })
-    List<Json> favoritas = await sqlite.query(sql_pista_dto() + " where f.track_id is not null order by f.added_at desc limit 12")
-    List<Json> fav_rows = track_rows_de(favoritas)
-    if len(fav_rows) >= 4:
-        secciones.add(seccion_pistas("home.favorites", fav_rows))
-    return secciones
+# Inicio y recomendaciones: recomendaciones.lux.
 
 # ─── Playlists ───────────────────────────────────────────────────────────────
 

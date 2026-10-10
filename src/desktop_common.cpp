@@ -6,6 +6,10 @@
 #include "mpris.hpp"
 #include "discord_rpc.hpp"
 
+#include <lux/logger.hpp>
+#include <lux_script/audio_control.hpp>
+#include <lux_script/db.hpp>
+#include <lux_script/schedule.hpp>
 #include <lux_script/window_config.hpp>
 #include <lux_script/window_control.hpp>
 
@@ -63,10 +67,6 @@ void install_window_control_hooks() {
     };
     ctl.discord_update = [](const lux_script::Value& state) {
         luxdesktop::discord_update(state);
-    };
-    ctl.eval_js = [](const std::string& js) {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->eval_js(js);
     };
 }
 
@@ -146,22 +146,226 @@ void save_geometry(const std::string& id, int width, int height) {
     if (out) out << width << " " << height << "\n";
 }
 
+// Waits until the server ANSWERS, not merely accepts: while `on start:` blocks
+// run (migrations, applying the saved audio settings) Lux replies 503 to every
+// request, and opening the window then would show an error page.
 bool wait_for_server(uint16_t port, std::chrono::milliseconds timeout) {
     auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
         int fd = ::socket(AF_INET, SOCK_STREAM, 0);
         if (fd >= 0) {
+            timeval tv{1, 0};
+            ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+            ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
             sockaddr_in addr{};
             addr.sin_family      = AF_INET;
             addr.sin_port        = htons(port);
             addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-            bool ok = ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+            bool ready = false;
+            if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+                static const char req[] = "GET /api/ready HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n";
+                char buf[16] = {};
+                if (::send(fd, req, sizeof(req) - 1, 0) > 0 && ::recv(fd, buf, sizeof(buf) - 1, 0) > 0)
+                    ready = std::strncmp(buf + 9, "503", 3) != 0;   // "HTTP/1.1 503 ..."
+            }
             ::close(fd);
-            if (ok) return true;
+            if (ready) return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     return false;
 }
+
+// `on start:` blocks still running: requests wait (503) until it is zero.
+static std::atomic<int> g_starting{0};
+
+// One `every` block: armed on the main loop, never run twice at once.
+// (Same as ScheduledTask in vendor/lux/src/lux_script/main.cpp, which is
+// private to the `lux` executable.)
+struct ScheduledTask : std::enable_shared_from_this<ScheduledTask> {
+    std::string           path, label;
+    lux_script::EverySpec spec;
+    lux::DispatchFn       dispatch;
+    bool                  once = false;      // `on start:`
+    bool                  running = false;   // touched only on the loop's thread
+
+    static long long now() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+
+    // In steps of at most an hour: schedule_timer takes an int of ms.
+    void arm(lux::core::EventLoop& loop, long long due) {
+        const int wait = static_cast<int>(std::clamp(due - now(), 0LL, 3'600'000LL));
+        loop.schedule_timer(wait, [self = shared_from_this(), &loop, due] {
+            if (now() < due) { self->arm(loop, due); return; }
+            self->run(loop);
+            self->arm(loop, self->spec.after(due, now()));
+        });
+    }
+
+    void run(lux::core::EventLoop& loop) {
+        if (running) {
+            lux::log().warn("every \"", label, "\": the previous run has not finished, skipping this one");
+            return;
+        }
+        running = true;
+        auto req = std::make_shared<lux::Request>();
+        auto res = std::make_shared<lux::Response>();
+        req->method    = "EVERY";
+        req->path      = path;
+        req->remote_ip = "127.0.0.1";
+        req->loop      = &loop;
+        auto task = [](std::shared_ptr<ScheduledTask> self, std::shared_ptr<lux::Request> req,
+                       std::shared_ptr<lux::Response> res) -> lux::Task<void> {
+            try {
+                co_await self->dispatch(*req, *res);
+                if (res->status_code() >= 400)
+                    lux::log().error("every \"", self->label, "\" failed: ", res->body());
+            } catch (const std::exception& e) {
+                lux::log().error("every \"", self->label, "\" failed: ", e.what());
+            }
+            self->running = false;
+            if (self->once) g_starting.fetch_sub(1);
+        }(shared_from_this(), req, res);
+        auto h = task.detach();
+        h.promise().loop = &loop;
+        h.resume();
+    }
+};
+
+void serve_module(lux::App& app,
+                  std::function<std::shared_ptr<lux_script::Module>()> current,
+                  std::function<void()> before_stop) {
+    auto first = current();
+    for (const auto& m : first->program.app.statics)
+        app.serve_static(m.url_prefix, m.fs_root, m.spa);
+
+    // The database pools have their own threads that resume handlers by
+    // posting to the event loops: stop them while the loops are still alive.
+    app.on_before_stop([before_stop] {
+        lux_script::DbRegistry::instance().shutdown();
+        if (before_stop) before_stop();
+    });
+
+    // Not a coroutine: it returns the route's own Task, and the request holds
+    // the module alive for as long as that runs (a reload may publish another).
+    lux::DispatchFn dispatch = [current](lux::Request& req, lux::Response& res) -> lux::Task<void> {
+        static constexpr auto done = []() -> lux::Task<void> { co_return; };
+        auto mod = current();
+        if (g_starting.load() > 0 && req.method != "EVERY") {
+            res.status(503).header("Retry-After", "1").json_text(R"({"error":"starting"})");
+            return done();
+        }
+        if (!mod) { res.status(503).json_text(R"({"error":"no module loaded"})"); return done(); }
+        auto match = mod->router.match(req.method, req.path);
+        if (!match.found) {
+            res.status(404).json_text(R"({"error":"Not Found"})");
+            return done();
+        }
+        req.params = std::move(match.params);
+        req._hold  = mod;
+        return (*match.handler)(req, res);
+    };
+    app.any("/",  dispatch);
+    app.any("/*", dispatch);
+
+    // router_ only holds the two catch-alls above: ask the module's REAL
+    // router whether a route lives here, so a static mount and a live route
+    // never disagree about which one wins.
+    app.set_route_probe([current](const std::string& method, const std::string& path) {
+        auto mod = current();
+        return mod && mod->router.match(method, path).found;
+    });
+
+    app.on_async_error([current](int code, lux::Request& req, lux::Response& res) -> lux::Task<void> {
+        auto mod = current();   // a copy: it stays alive across the handler's awaits
+        if (!mod) co_return;
+        co_await lux_script::run_error_handler(*mod, code, req, res);
+    });
+
+    // `every` / `on start:`: one timer each on the main loop, dispatched like
+    // a request to the live module. A new task or schedule needs a restart.
+    std::vector<std::shared_ptr<ScheduledTask>> tasks;
+    for (const auto& r : first->program.routes) {
+        if (r.method != "EVERY" || r.every.rfind("cmd:", 0) == 0 || r.every.rfind("test:", 0) == 0) continue;
+        auto t = std::make_shared<ScheduledTask>();
+        t->path     = r.pattern;
+        t->label    = r.every;
+        t->dispatch = dispatch;
+        if (r.every == "start") { t->once = true; g_starting.fetch_add(1); }
+        else lux_script::parse_every_spec(r.every, t->spec);
+        tasks.push_back(std::move(t));
+    }
+    if (!tasks.empty())
+        app.on_start([tasks](lux::core::EventLoop& loop) {
+            for (const auto& t : tasks) {
+                if (t->once) t->run(loop);
+                else t->arm(loop, t->spec.next(ScheduledTask::now()));
+            }
+        });
+}
+
+
+AudioEngine& audio_engine() {
+    static AudioEngine engine;
+    return engine;
+}
+
+void install_audio_hooks() {
+    using lux_script::Value;
+    auto& ctl = lux_script::audio_control();
+    auto& e = audio_engine();
+    e.start_device();   // a failure leaves the engine silent but usable: the backend sees it in status()
+
+    ctl.load = [&e](const std::string& path, const std::string& id, int start_ms, int dur_ms, bool play) {
+        return e.load(path, id, start_ms, dur_ms, play);
+    };
+    ctl.preload       = [&e](const std::string& path, const std::string& id, int dur_ms) { e.preload(path, id, dur_ms); };
+    ctl.play          = [&e] { e.play(); };
+    ctl.pause         = [&e] { e.pause(); };
+    ctl.stop          = [&e] { e.stop(); };
+    ctl.seek          = [&e](int ms) { e.seek(ms); };
+    ctl.set_volume    = [&e](double v) { e.set_volume(v); };
+    ctl.set_eq        = [&e](const std::vector<double>& g) { e.set_eq(g.data()); };
+    ctl.set_crossfade = [&e](int ms) { e.set_crossfade(ms); };
+    ctl.status = [&e]() {
+        const AudioStatus st = e.status();
+        Value::Dict d;
+        d["trackId"]    = Value::str(st.track_id);
+        d["positionMs"] = Value::integer(st.position_ms);
+        d["durationMs"] = Value::integer(st.duration_ms);
+        d["bufferedMs"] = Value::integer(st.buffered_ms);
+        d["listenedMs"] = Value::integer(st.listened_ms);
+        d["playing"]    = Value::boolean(st.playing);
+        d["underruns"]  = Value::integer(st.underruns);
+        return Value::dict(std::move(d));
+    };
+    ctl.take_events = [&e]() {
+        Value::List out;
+        for (const auto& ev : e.take_events()) {
+            Value::Dict d;
+            d["type"] = Value::str(ev.type == AudioEvent::Handoff ? "handoff" : ev.type == AudioEvent::Ended ? "ended" : "error");
+            d["trackId"] = Value::str(ev.track_id);
+            d["listenedMs"] = Value::integer(ev.listened_ms);
+            out.push_back(Value::dict(std::move(d)));
+        }
+        return Value::list(std::move(out));
+    };
+    ctl.devices = [&e]() {
+        Value::List out;
+        for (const auto& dev : e.list_devices()) {
+            Value::Dict d;
+            d["id"]        = Value::str(dev.id);
+            d["name"]      = Value::str(dev.name);
+            d["isDefault"] = Value::boolean(dev.is_default);
+            out.push_back(Value::dict(std::move(d)));
+        }
+        return Value::list(std::move(out));
+    };
+    ctl.set_device = [&e](const std::string& id) { return e.start_device(id); };
+}
+
+void shutdown_audio() { audio_engine().stop_device(); }
 
 } // namespace luxdesktop

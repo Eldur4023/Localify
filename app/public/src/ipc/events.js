@@ -7,10 +7,10 @@ let iniciado = false;
 * Arranca la escucha. Es idempotente: llamarla dos veces no duplica los
 * manejadores del puente.
 *
-* En este port no hay puente de eventos de Tauri: el transporte sondea el
-* estado del backend (`/api/events/poll`) y sintetiza los MISMOS eventos con
-* los MISMOS nombres que emitía el bus de Rust, de modo que ninguna vista
-* cambia. Ver `ipc/transport.js`.
+* En este port no hay puente de eventos de Tauri: el backend empuja una foto
+* de su estado por SSE (`/api/events/stream`) y el transporte sintetiza los
+* MISMOS eventos con los MISMOS nombres que emitía el bus de Rust, de modo que
+* ninguna vista cambia. Ver `ipc/transport.js`.
 */
 export async function iniciar() {
 	if (iniciado) return;

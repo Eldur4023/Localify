@@ -230,22 +230,6 @@ whatever directory that launcher happened to start in (which, for a database fil
 silently creating and using an empty one — no error, since a missing sqlite file is normally
 just a fresh database). An absolute path, or one built from `env(...)`, is never touched.
 
-**HTTPS.** A top-level `tls:` block, next to `app:`, makes the app's port speak HTTPS; without it the port is plain HTTP.
-
-```
-tls:
-    cert "fullchain.pem"
-    key  "privkey.pem"
-```
-
-With `cert` and `key` (PEM files; `env(...)` works) the port speaks TLS 1.2/1.3 itself,
-so no reverse proxy is needed for it. It is a build option, `cmake -DLUX_TLS=ON` (needs `libssl-dev`);
-a binary without it refuses to start with a `tls:` block instead of serving plain HTTP. Measured on 8
-cores against nginx in front: Lux alone ~125k req/s on a small route, nginx + keep-alive to Lux ~60k,
-nginx with its default `proxy_pass` ~21k. Not included: HTTP/2, a plain-HTTP-to-HTTPS redirect on
-another port (that is one `return 301` in whatever listens on 80) and certificate reload (restart
-after a renewal). A static file is encrypted in user space (pread + OpenSSL) unless the kernel's `tls` module is loaded (`sudo modprobe tls`) and the CPU has fast AES-GCM: then Lux hands the encryption to the kernel (kTLS) and the file goes out through `sendfile`, about 20% more requests per second on a 30 KB file in a local test. Without the module nothing breaks, it just stays in user space.
-
 `spa` on a static mount makes routes that are not found fall back to `index.html`. A directory
 request (`/docs` or `/docs/`) serves that directory's own `index.html` if it has one, same as
 any other static file server — not the mount's root page. `index.html` itself is always sent
@@ -433,7 +417,7 @@ alongside `"true"`/`"false"`/`"1"`/`"0"`, since `"on"` is the literal value an H
 `<input type="checkbox">` sends when checked and given no explicit `value=`.
 
 More of the request: `request.query` (the raw query string, without the `?`), `request.host`,
-`request.scheme` (`"https"` when Lux serves TLS itself, or when a proxy on the same machine sends `X-Forwarded-Proto: https`) and
+`request.scheme` (`"https"` only when a proxy on the same machine sends `X-Forwarded-Proto: https`) and
 `request.headers` (a `Dict`, lowercase keys). A field that repeats (several checkboxes with one
 `name`) gives its last value with `form("x")` / `query("x")`; `form_list("x")` and `query_list("x")`
 return every value, in order, as a `List<string>` (empty if absent).
@@ -648,6 +632,53 @@ Range Not Satisfiable`; one whose END is past the end is clamped to the last rea
 — that is a normal request, not an error. A `Range` header with several ranges
 (`bytes=0-99,200-299`) or one this cannot parse at all is not an error either: the file is
 served in full, exactly as if the header had never arrived.
+
+### Pages for Luxium (`.luxp`)
+
+[Luxium](../Luxium) is the browser that runs LuxScript instead of JavaScript. It does not
+read your HTML: it reads `.luxp`, pages already compiled into its own structures (DOM tree,
+parsed stylesheets, verified LuxScript bytecode). Lux produces them:
+
+```lux
+get endpoint("/hello", string who = "Ana"):
+    return render("hello.html", who=who)    # nothing to change
+```
+
+The same route answers `application/x-luxp` when the request says
+`Accept: application/x-luxp` (Luxium does), and `text/html` to every other browser —
+`Vary: Accept` on both. `{{ }}` keeps working anywhere, inside the page's
+`<script type="text/luxscript">` too. Its `<link rel="stylesheet">`, `@import` and `url()`
+resolve through your `static` mounts, the way a browser would request them.
+
+How much a request costs depends on the template:
+
+- **A template whose `{{ }}` and `{% %}` sit where the page's structure does not depend on
+  them** (text, quoted attributes, loops and conditions that open and close under the same
+  element) is compiled to `.luxp` **once, at startup**, into a document with holes. A request
+  only fills the holes: no HTML parsing, no CSS parsing, no compiling, no compression.
+- **Any other template** (`|safe`, a value in an unquoted attribute or inside a `<script>`,
+  a tag split by an `{% if %}`, a loop that creates its own `<tbody>`) has its filled HTML
+  translated per request. Its script and stylesheet are compiled once and cached.
+- `render()` with constant data is rendered and translated at startup.
+- A page with JavaScript is always answered HTML (Luxium hands it to Chromium).
+- The LuxScript of a template's `<script type="text/luxscript">` is compiled by
+  `lux --check`, against the browser's API: an error is reported at the `render()` that uses
+  the template, with the template's line. A script that interpolates `{{ }}` can only compile
+  once rendered: if it fails, that request is answered HTML and the log says why.
+
+Diagnostics: `LUX_LUXP_VERBOSE=1` logs why a template has no plan; `LUX_LUXP_CHECK=1`
+computes every plan answer the long way too and logs any difference; `LUX_LUXP_PLAN=0` turns
+plans off.
+
+A static site, without a server:
+
+```
+lux pack site/index.html app.luxp    # every local page it links to, their CSS and images
+```
+
+It fails on any LuxScript error, a missing stylesheet or image, a page that needs JavaScript,
+or a file outside the working directory. The format and its guarantees: Luxium's
+`docs/LUXP.md`.
 
 ### There is no `Response` type
 

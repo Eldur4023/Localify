@@ -1,4 +1,5 @@
 #include <lux_script/template.hpp>
+#include <lux_script/luxp_serve.hpp>
 
 #include <lux_script/emitter.hpp>
 #include <lux_script/lexer.hpp>
@@ -546,7 +547,9 @@ bool compile_template(const std::string& source, const std::string& file,
                         const std::vector<TypedName>& data,
                         DiagnosticBag& diags, Template& out, const TemplateEnv& env) {
     Compiler c(dir, diags, out, env);
-    return c.compile(source, file, data);
+    if (!c.compile(source, file, data)) return false;
+    luxp_attach_plan(out);   // a .luxp plan, if the template allows one (luxp_template.cpp)
+    return true;
 }
 
 // ─── Rendering ───────────────────────────────────────────────────────────────
@@ -616,7 +619,7 @@ bool render_template(const Template& p, std::vector<Value> values,
     // slots, without starting the VM for each. Anything else, and anything
     // that would fail (a field of a non-Dict), goes through the VM, so the
     // result and the error are the VM's own.
-    static const Value kNull{};
+    static const Value kNull;
     auto direct = [&](const Chunk& c) -> const Value* {
         const auto& code = c.code;
         if (code.size() < 2 || code.front().op != Op::LoadLocal || code.back().op != Op::Return ||

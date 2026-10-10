@@ -153,12 +153,14 @@ export const library = {
 export const search = {
 	/**
 	* Busca. Devuelve lo local de inmediato; lo remoto llega por el evento
-	* `searchRemoteReady` con el mismo `queryId`.
+	* `searchRemoteReady` con el mismo `queryId`. `noRemote` repite una consulta
+	* sin volver a preguntar al catálogo (ya contestó).
 	*/
-	query: (q, scope = "all", req = page()) => invoke("search_query", {
+	query: (q, scope = "all", req = page(), { noRemote = false } = {}) => invoke("search_query", {
 		q,
 		scope,
-		page: req
+		page: req,
+		noRemote
 	})
 };
 export const playlists = {

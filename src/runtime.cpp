@@ -280,6 +280,12 @@ int main(int argc, char** argv) {
     static char arg0[] = "lux", arg1[] = "--no-watch", arg2[] = "--port", arg4[] = ".";
     char* lux_argv[] = {arg0, arg1, arg2, port_arg.data(), arg4, nullptr};
 
+    // Before the server starts: `on start:` blocks and the first `every` ticks already call audio.*.
+    install_audio_hooks();
+
+    // Before the server starts: `on start:` blocks and the first `every` ticks already call audio.*.
+    install_audio_hooks();
+
     // Server stopped by itself (SIGTERM from systemd, CTRL+C...): close the window too.
     std::thread server_thread([&lux_argv] {
         lux_main(5, lux_argv);
@@ -324,6 +330,7 @@ int main(int argc, char** argv) {
     window.run("http://127.0.0.1:" + std::to_string(port) + "/");
     luxdesktop::mpris_shutdown();
     luxdesktop::discord_shutdown();
+    luxdesktop::shutdown_audio();
     save_geometry(app_id, window.last_width(), window.last_height());
     std::error_code ec;
     fs::remove("./port", ec);

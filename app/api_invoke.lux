@@ -16,7 +16,7 @@ fn string sql_pista_dto():
     select t.id, t.title, t.album_id, al.title as album_title, t.duration_ms,
            t.track_number, t.disc_number, t.explicit, t.artist_display, t.added_at,
            case when f.track_id is null then 0 else 1 end as favorite,
-           coalesce(hp.cnt, 0) as play_count,
+           (select count(*) from play_history h where h.track_id = t.id) as play_count,
            (select ta.artist_id from track_artists ta where ta.track_id = t.id order by ta.position limit 1) as artist_id,
            case
                when af.track_id is not null then 'local'
@@ -36,7 +36,6 @@ fn string sql_pista_dto():
     left join audio_files af on af.track_id = t.id
     left join favorites f on f.track_id = t.id
     left join download_jobs dj on dj.track_id = t.id
-    left join (select track_id, count(*) as cnt from play_history group by track_id) hp on hp.track_id = t.id
     """ + " "
 
 # availability: AvailabilityDto con tag "kind" (common.rs).
@@ -275,7 +274,6 @@ class PeticionInvoke:
     string? args
 
 post endpoint("/api/invoke", PeticionInvoke p):
-    db_init()
     string cmd = p.cmd == null ? "" : p.cmd
     # los args llegan como string JSON: los campos de clase no admiten Json,
     # y así el transporte puede mandar cualquier forma de argumentos
@@ -295,11 +293,6 @@ fn Json despachar(string cmd, Json args):
 fn Json despachar_base(string cmd, Json args):
     # ── reproductor ── (todo por reproductor.lux: la misma puerta que usan
     # el menú, la bandeja, MPRIS y la tarjeta del escritorio)
-    if cmd == "player_report":
-        reproductor_informe(args)
-        return null
-    if cmd == "player_peek_next":
-        return reproductor_siguiente()
     if cmd == "player_get_state":
         return estado_dto()
     if cmd.starts_with("player_"):
@@ -523,6 +516,10 @@ fn Json despachar_base(string cmd, Json args):
     if cmd == "settings_eq_profiles":
         return perfiles_eq()
     if cmd == "settings_preview_eq":
+        # La vista previa mientras se mueven los deslizadores: no se guarda.
+        Json ganancias = jget(jget(args, "profile"), "gainsDb")
+        if ganancias != null:
+            audio.set_eq(ganancias)
         return null
     if cmd == "settings_open_external":
         return null

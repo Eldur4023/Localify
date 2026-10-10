@@ -4,7 +4,6 @@
 #include "../include/lux/request.hpp"
 #include "../include/lux/response.hpp"
 #include "../include/lux/task.hpp"
-#include "../include/lux/tls.hpp"
 #include "../include/lux/blocking_pool.hpp"
 #include "../include/lux/percent_encoding.hpp"
 
@@ -101,12 +100,6 @@ static const App::StaticMount* mount_for(const std::vector<App::StaticMount>& mo
 // hang the loop), 403 (escapes root), 404, or -1: no openat2 here (Linux <
 // 5.6, or a seccomp profile that predates it).
 static int open_beneath(int root_fd, const std::string& rel, struct stat& st, int& fd) {
-#ifdef __ANDROID__
-    // Android's app seccomp filter kills the process (SIGSYS) on openat2 instead of answering ENOSYS:
-    // take the portable path straight away.
-    (void)root_fd; (void)rel; (void)st; fd = -1;
-    return -1;
-#endif
     open_how how{};
     how.flags   = O_RDONLY | O_NONBLOCK | O_CLOEXEC;
     how.resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS;
@@ -236,23 +229,14 @@ static void serve_from_mount(const App::StaticMount& m, const Request& req, Resp
             struct stat st{};
             int fd = -1;
             std::string file = rel.substr(1);
-            int r;
-            if (file.empty() || file.back() == '/') {
-                // A directory by definition (the mount root, "docs/"): straight to
-                // its index.html, one openat2 + fstat + close less per request.
-                std::string index = file + "index.html";
-                r = open_beneath(root_fd, index, st, fd);
-                if (r == 0) file = std::move(index);   // regular file or not: checked below
-            } else {
-                r = open_beneath(root_fd, file, st, fd);
-                if (r == 0 && S_ISDIR(st.st_mode)) {
-                    struct stat ist{};
-                    int ifd = -1;
-                    std::string index = file.empty() ? "index.html" : file + "/index.html";
-                    if (open_beneath(root_fd, index, ist, ifd) == 0) {
-                        if (S_ISREG(ist.st_mode)) { ::close(fd); fd = ifd; file = std::move(index); st = ist; }
-                        else ::close(ifd);
-                    }
+            int r = open_beneath(root_fd, file, st, fd);
+            if (r == 0 && S_ISDIR(st.st_mode)) {
+                struct stat ist{};
+                int ifd = -1;
+                std::string index = file.empty() ? "index.html" : file + "/index.html";
+                if (open_beneath(root_fd, index, ist, ifd) == 0) {
+                    if (S_ISREG(ist.st_mode)) { ::close(fd); fd = ifd; file = std::move(index); st = ist; }
+                    else ::close(ifd);
                 }
             }
             if (r > 0 || (r == 0 && !S_ISREG(st.st_mode))) {
@@ -612,6 +596,7 @@ void App::run(const std::string& host, uint16_t port) {
     }
 
     g_initiate_drain = [this, &main_loop, shared_conn_count, &all_loops, &all_servers, &all_mutex]() {
+        shutting_down().store(true, std::memory_order_release);   // lets SSE streams end (see cancel.hpp)
         {
             // Each server stops accepting ON ITS OWN loop.  Doing it from here
             // —which is the main loop's thread— touched the handler map of the
@@ -707,7 +692,7 @@ void App::run(const std::string& host, uint16_t port) {
         all_servers.push_back(&main_server);
     }
 
-    const char* scheme = tls::enabled() ? "https" : "http";
+    const char* scheme = "http";
     log().info("Lux running on ", scheme, "://", host, ':', port,
                " (threads=", num_threads, ", press CTRL+C to quit)");
 

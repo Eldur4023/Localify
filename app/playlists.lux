@@ -68,10 +68,12 @@ fn Json importar_lista_ytm(string id_lista):
         if p.id == "" or p.title == "":
             continue
         p.track_number = 0
-        guardar_pista(p)
+        string tid = guardar_pista(p)
+        if tid == "":
+            continue
         pos = pos + 1.0
         await sqlite.exec("insert into playlist_items(id, playlist_id, track_id, position, added_at) values(?, ?, ?, ?, unixepoch())",
-            nuevo_id(), pid, p.id, pos)
+            nuevo_id(), pid, tid, pos)
         n = n + 1
     return { "id": pid, "imported": n }
 

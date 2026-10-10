@@ -1,4 +1,5 @@
 // The Lux binary: it reads .lux files and serves.
+#include <lux_script/luxp_serve.hpp>
 #include "../http/http_parser.hpp"
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -16,7 +17,6 @@
 #include <lux/app.hpp>
 #include <lux/middleware.hpp>
 #include <lux/logger.hpp>
-#include <lux/tls.hpp>
 #include <lux/openapi.hpp>
 
 #include <atomic>
@@ -93,6 +93,13 @@ void usage() {
         "\n"
         "  Runs the `command \"name\":` block (after the `on start:` blocks)\n"
         "  once, as a script: os.argv(), os.input(), os.exit(code)\n"
+        "\n"
+        "       lux pack <page.html> <out.luxp>\n"
+        "\n"
+        "  Compiles a static HTML+CSS+LuxScript site (the page, every local\n"
+        "  page it links to, their stylesheets and images) into one .luxp for\n"
+        "  Luxium.  render() answers .luxp by itself to a client that sends\n"
+        "  Accept: application/x-luxp\n"
         "\n"
         "       lux test <files|directory> [-- name-filter]\n"
         "\n"
@@ -339,9 +346,10 @@ static void run_tests(const lux_script::Module& m, lux::DispatchFn dispatch, std
     std::_Exit(g_test_rc.load());
 }
 
-// Desktop apps (Drive Sync, Calendar, Mail): their shell links this file with LUX_EMBEDDED and
-// calls lux_main() on a thread, so it serves the app exactly as `lux` does
-// (every:, on start:, limits...) instead of keeping a second copy of this wiring.
+// Desktop apps (Localify, Drive Sync, Calendar, Mail): their shell links this
+// file with LUX_EMBEDDED and calls lux_main() on a thread, so it serves the
+// app exactly as `lux` does (every:, on start:, limits...) instead of keeping
+// a second copy of this wiring.
 #ifdef LUX_EMBEDDED
 int lux_main(int argc, char** argv) {
 #else
@@ -353,12 +361,24 @@ int main(int argc, char** argv) {
     // shootdown). Up to 1 MB is served, and reused, from the heap.
     // ponytail: each arena may keep up to 8 MB of freed memory; lower
     // M_TRIM_THRESHOLD if resident size matters more than those faults.
-#ifndef __ANDROID__   // glibc tuning knobs; bionic's allocator has neither
     mallopt(M_MMAP_THRESHOLD, 1 << 20);
     mallopt(M_TRIM_THRESHOLD, 8 << 20);
-#endif
     if (argc >= 2 && std::string(argv[1]) == "restore")
         return lux_script::restore_main({argv + 2, argv + argc});
+
+    // lux pack page.html out.luxp: a static HTML+CSS+LuxScript site compiled
+    // into one .luxp (Luxium's format; luxp_serve.hpp).
+    if (argc >= 2 && std::string(argv[1]) == "pack") {
+        if (argc != 4) {
+            std::fprintf(stderr, "usage: lux pack <page.html> <out.luxp>\n");
+            return 2;
+        }
+        std::string report;
+        const bool ok = lux_script::pack_site(argv[2], argv[3], &report);
+        std::fputs(report.c_str(), ok ? stdout : stderr);
+        if (!ok) std::fputs("\n", stderr);
+        return ok ? 0 : 1;
+    }
 
     std::vector<std::string> args;
     const bool run_mode  = argc >= 2 && std::string(argv[1]) == "run";
@@ -471,7 +491,6 @@ int main(int argc, char** argv) {
     publish_module(mod);
 
     const lux_script::AppDecl& cfg = mod->program.app;
-    const lux_script::TlsDecl& tls = mod->program.tls;
     lux::App app;
     // One line per request, with its flush, costs close to 25% of the
     // throughput and multiplies median latency by 2.6: it is opt-in.
@@ -634,13 +653,6 @@ int main(int argc, char** argv) {
         }).detach();
     }
 
-    if (!test_mode && tls.present) {
-        std::string tls_err = "tls: needs both cert and key for HTTPS";
-        if (tls.cert.empty() || tls.key.empty() || !lux::tls::init(tls.cert, tls.key, tls_err)) {
-            std::cerr << "https: " << tls_err << "\n";
-            return 1;
-        }
-    }
     lux::http::g_max_body_size = cfg.max_body;
     lux::global_headers() = cfg.headers;
     app.run(test_mode ? std::string("127.0.0.1") : cfg.host, port_override ? static_cast<uint16_t>(port_override)

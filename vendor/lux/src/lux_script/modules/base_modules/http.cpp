@@ -13,7 +13,6 @@
 #include "netaddr.hpp"
 
 #include <curl/curl.h>
-#include <lux_script/curl_init.hpp>
 
 #include <algorithm>
 #include <cstring>
@@ -37,12 +36,9 @@ constexpr size_t kMaxResponseHeaderBytes = 64 * 1024;
 // safe to call once, early, before any other thread touches curl -- exactly
 // what a call from BuiltinModuleRegistry's constructor gives (single-
 // threaded startup, before the event loop threads exist).
-// The share handle gives every pool thread's handle one DNS cache and one TLS
-// session cache. It does NOT share the connection cache: CURL_LOCK_DATA_CONNECT
-// segfaults inside curl_multi_perform() under concurrent calls with libcurl 8.5
-// (Ubuntu 24.04), e.g. a handful of simultaneous http.get() from one page. Each
-// thread's handle keeps its own connections between calls (curl_easy_reset()
-// does not drop them), so keep-alive still works per thread.
+// The share handle is what makes connections outlive a call: every pool
+// thread's handle draws on one connection cache (plus DNS and TLS
+// sessions), so a call reuses a connection another thread opened.
 struct CurlGlobal {
     CURLSH*    share = nullptr;
     std::mutex locks[CURL_LOCK_DATA_LAST];
@@ -57,7 +53,7 @@ struct CurlGlobal {
             static_cast<CurlGlobal*>(g)->locks[d].unlock();
         });
         curl_share_setopt(share, CURLSHOPT_USERDATA, this);
-        for (auto d : {CURL_LOCK_DATA_DNS, CURL_LOCK_DATA_SSL_SESSION})
+        for (auto d : {CURL_LOCK_DATA_CONNECT, CURL_LOCK_DATA_DNS, CURL_LOCK_DATA_SSL_SESSION})
             curl_share_setopt(share, CURLSHOPT_SHARE, d);
     }
     ~CurlGlobal() { curl_share_cleanup(share); curl_global_cleanup(); }
@@ -172,7 +168,7 @@ Value do_request(const std::string& method, const std::string& url, const Value*
     // One handle per pool thread, reset between calls; connections live in
     // the shared cache (CurlGlobal).
     thread_local struct Handle {
-        CURL* h = lux_curl_init();
+        CURL* h = curl_easy_init();
         ~Handle() { if (h) curl_easy_cleanup(h); }
     } handle;
     CURL* curl = handle.h;

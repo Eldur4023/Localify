@@ -4,19 +4,16 @@
  * Sustituye a `window.__TAURI__` con:
  *
  * 1. `invocar(cmd, args)`: HTTP loopback contra `/api/invoke`, el despachador
- *    que habla el dialecto de comandos de Localify. Las órdenes del
- *    reproductor van por el controlador (reproductor.js), que es quien sabe
- *    del motor de audio; los diálogos nativos, por la ventana GTK.
+ *    que habla el dialecto de comandos de Localify. Todo, también el
+ *    reproductor: el backend es su único dueño y mueve el motor de audio
+ *    nativo; esto solo manda órdenes. Los diálogos nativos, por la ventana GTK.
  *
- * 2. El bombeo de eventos: sondea `/api/events/poll` y sintetiza los eventos
- *    del bus de Localify con sus nombres exactos, comparando el snapshot
- *    anterior y el nuevo. El backend puede además pedir un sondeo inmediato
- *    (`window.__localifyDespertar`, vía window.eval_js) cuando una orden le
- *    llega de fuera de la ventana -- teclas multimedia, bandeja, la tarjeta
- *    del escritorio --: el sondeo normal va a 1 s, y WebKitGTK lo frena a
- *    varios segundos con la ventana minimizada.
+ * 2. Los eventos: el backend EMPUJA una foto de su estado por SSE
+ *    (`/api/events/stream`) cada vez que cambia, y aquí se sintetizan, por
+ *    diferencias entre fotos, los eventos del bus de Localify con sus nombres
+ *    exactos. No hay sondeo: un temporizador de página lo frena WebKitGTK a
+ *    varios segundos con la ventana minimizada, y el servidor no depende de él.
  */
-import * as reproductor from "./reproductor.js";
 
 // ── Bombeo de eventos ───────────────────────────────────────────────────────
 
@@ -28,10 +25,6 @@ function emitir(type, extra = {}) {
 	if (!alEvento) return;
 	alEvento({ type, ...extra });
 }
-
-reproductor.conectar((evento) => {
-	if (alEvento) alEvento(evento);
-});
 
 /** Diferencia dos snapshots y emite los eventos del bus original que correspondan. */
 function diferir(antes, ahora) {
@@ -94,34 +87,14 @@ function diferir(antes, ahora) {
 }
 
 const moduleState = new Map();
-let pollEnMarcha = false;
-let pollOtraVez = false;
 
-async function tick() {
-	if (pollEnMarcha) {
-		// Un despertar durante un sondeo en curso no se pierde: se repite al
-		// acabar, porque la respuesta en curso puede ser anterior a la orden.
-		pollOtraVez = true;
-		return;
+function aplicarFoto(snap) {
+	// La posición es la del motor nativo, que viaja en cada foto mientras suena.
+	if (snap.estado?.track && snap.estado.status === "playing") {
+		emitir("positionTick", { positionMs: snap.estado.positionMs, durationMs: snap.estado.durationMs });
 	}
-	pollEnMarcha = true;
-	try {
-		const r = await fetch("/api/events/poll", { method: "POST" });
-		const snap = await r.json();
-		if (snap.estado) reproductor.aplicar(snap.estado, true);
-		diferir(moduleState.get("prev") ?? null, snap);
-		moduleState.set("prev", snap);
-		if (snap.resync) {
-			if (alResync) alResync();
-		}
-	} catch {
-		// sin servidor (reinicio de la app): el siguiente tick reintenta
-	}
-	pollEnMarcha = false;
-	if (pollOtraVez) {
-		pollOtraVez = false;
-		void tick();
-	}
+	diferir(moduleState.get("prev") ?? null, snap);
+	moduleState.set("prev", snap);
 }
 
 export function arrancarEventos(alEventoCb, alResyncCb) {
@@ -129,22 +102,23 @@ export function arrancarEventos(alEventoCb, alResyncCb) {
 	alResync = alResyncCb;
 	if (bombear) return;
 	bombear = true;
-	window.__localifyDespertar = () => void tick();
-	setInterval(tick, 1000);
-	tick();
-	void cargarAjustesAudio();
-}
-
-/** Arranque: EQ y crossfade guardados. El volumen llega con el estado. */
-async function cargarAjustesAudio() {
-	try {
-		const r = await fetch("/api/invoke", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ cmd: "settings_get", args: "{}" }),
-		});
-		reproductor.aplicarAjustesAudio((await r.json())?.audio);
-	} catch {}
+	const fuente = new EventSource("/api/events/stream");
+	let cayo = false;
+	fuente.addEventListener("snapshot", (m) => {
+		try {
+			aplicarFoto(JSON.parse(m.data));
+		} catch (e) {
+			reportar("eventos", e && e.stack ? e.stack : String(e));
+		}
+		// Tras una caída (reinicio del servidor) se pudo perder cualquier cosa:
+		// quien escuche recarga su estado en vez de fiarse de los eventos.
+		if (cayo) {
+			cayo = false;
+			if (alResync) alResync();
+		}
+	});
+	// EventSource reconecta solo; al volver, el servidor manda la foto actual.
+	fuente.onerror = () => { cayo = true; };
 }
 
 // ── Invocación ──────────────────────────────────────────────────────────────
@@ -159,9 +133,6 @@ async function dialogoAbrir() {
 
 /** Invoca un comando. */
 export async function invocar(cmd, args) {
-	if (cmd.startsWith("player_") || cmd === "queue_jump_to") {
-		return await reproductor.orden(cmd, args ?? {});
-	}
 	if (cmd === "library_pick_import_files" || cmd === "settings_pick_cookies") {
 		const ruta = await dialogoAbrir();
 		return ruta ? [ruta] : [];
@@ -181,13 +152,6 @@ export async function invocar(cmd, args) {
 	const j = await r.json().catch(() => null);
 	if (!r.ok) {
 		throw j ?? { code: "INTERNAL", messageKey: "error.internal", params: [], actionable: false, retryable: false };
-	}
-	// ajustes de audio que el motor aplica en el acto
-	if (cmd === "settings_patch" && args?.patch?.audio) {
-		reproductor.aplicarAjustesAudio(args.patch.audio);
-	}
-	if (cmd === "settings_preview_eq") {
-		reproductor.previsualizarEq(args?.profile?.gainsDb);
 	}
 	return j;
 }
