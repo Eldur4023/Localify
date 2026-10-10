@@ -16,6 +16,12 @@ endif()
 # not because anything about them is incompatible.
 set(LUX_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LUX_FUZZ     OFF CACHE BOOL "" FORCE)
+# Modulos de Lux que Localify no usa (sqlite, http y los base_modules si):
+# apagados para no enlazar OpenSSL/zlib/libjpeg/cairo/libpq/mysql en un
+# binario que no los llama.
+foreach(_m PDF POSTGRES MYSQL CRYPTO GZIP IMAGE)
+    set(LUX_${_m} OFF CACHE BOOL "" FORCE)
+endforeach()
 add_subdirectory(vendor/lux)
 
 # Lux's own CMakeLists.txt already finds this, but the resulting imported
@@ -100,7 +106,7 @@ function(add_lux_desktop_app name)
         VERBATIM
     )
 
-    add_executable(${name} src/runtime.cpp src/desktop_common.cpp src/desktop_window.cpp src/mpris.cpp src/discord_rpc.cpp ${_generated})
+    add_executable(${name} src/runtime.cpp src/audio_engine.cpp src/desktop_common.cpp src/desktop_window.cpp src/mpris.cpp src/discord_rpc.cpp ${_generated})
     target_compile_definitions(${name} PRIVATE LUXDESKTOP_APP_ID="${APP_ID}")
     _lux_desktop_link(${name})
 endfunction()
@@ -115,7 +121,19 @@ add_lux_desktop_app(app DIR ${CMAKE_CURRENT_SOURCE_DIR}/app ID localify)
 # Reads app/ straight off disk and hot-reloads it through LuxScript's own
 # compiler -- no respack, no rebuilding THIS binary after editing app.lux, a
 # template or a static file. Run ./build/app-dev while you work.
-add_executable(app-dev src/dev.cpp src/desktop_common.cpp src/desktop_window.cpp src/mpris.cpp src/discord_rpc.cpp)
+add_executable(app-dev src/dev.cpp src/audio_engine.cpp src/desktop_common.cpp src/desktop_window.cpp src/mpris.cpp src/discord_rpc.cpp)
 target_compile_definitions(app-dev PRIVATE
     LUXDESKTOP_APP_DIR="${CMAKE_CURRENT_SOURCE_DIR}/app")
 _lux_desktop_link(app-dev)
+
+# ── Motor de audio: tests sin dispositivo (render() a mano) ───────────────
+add_executable(audio_engine_test tests/audio_engine_test.cpp src/audio_engine.cpp)
+target_include_directories(audio_engine_test PRIVATE include third_party)
+target_link_libraries(audio_engine_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+enable_testing()
+add_test(NAME audio_engine COMMAND audio_engine_test)
+
+# ── Sin ventana: servidor + motor de audio, para tests de extremo a extremo ──
+add_executable(app-headless src/headless.cpp src/audio_engine.cpp src/desktop_common.cpp src/desktop_window.cpp src/mpris.cpp src/discord_rpc.cpp)
+_lux_desktop_link(app-headless)
+add_test(NAME e2e_audio COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e_audio.py $<TARGET_FILE:app-headless>)

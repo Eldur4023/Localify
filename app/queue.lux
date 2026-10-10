@@ -64,11 +64,9 @@ class EstadoCola:
     List<Entrada> user_queue
     List<string> history
     int revision
-    # Ver reproductor.lux: cada cue es una orden "carga/colócate aquí" que el
-    # motor de audio aplica una sola vez; anchor_ms es el instante de época en
-    # que la posición 0 habría sonado (0 = no está sonando o aún no se sabe).
+    # Ver motor.lux: cada cue es una orden "carga/colócate aquí" que el motor
+    # de audio aplica una sola vez.
     int cue
-    int anchor_ms
 
 fn List<string> parsear_ids(string json_texto):
     List<string> out = []
@@ -107,8 +105,8 @@ fn List<int> parsear_orden(string json_texto):
     return out
 
 fn EstadoCola leer_estado():
-    List<Json> filas = await sqlite.query("select track_id, position_ms, volume, status, repeat_mode, shuffle, shuffle_seed, context, context_queue, play_order, queue_index, user_queue, history, revision, cue, anchor_ms from player_state where id = 1")
-    EstadoCola e = EstadoCola("", 0, 1.0, "stopped", "off", false, 0, "null", [], [], 0, [], [], 0, 0, 0)
+    List<Json> filas = await sqlite.query("select track_id, position_ms, volume, status, repeat_mode, shuffle, shuffle_seed, context, context_queue, play_order, queue_index, user_queue, history, revision, cue from player_state where id = 1")
+    EstadoCola e = EstadoCola("", 0, 1.0, "stopped", "off", false, 0, "null", [], [], 0, [], [], 0, 0)
     if len(filas) == 0:
         return e
     Json f = filas[0]
@@ -127,7 +125,6 @@ fn EstadoCola leer_estado():
     e.history = parsear_ids(jstr(f["history"], ""))
     e.revision = jint(f["revision"], 0)
     e.cue = jint(f["cue"], 0)
-    e.anchor_ms = jint(f["anchor_ms"], 0)
     return e
 
 fn List<Json> user_queue_json(EstadoCola e):
@@ -140,32 +137,30 @@ fn List<Json> user_queue_json(EstadoCola e):
 # Persistencia con cerrojo optimista sobre revision. Devuelve true si ganó.
 fn bool guardar_estado(EstadoCola e):
     int tocado = await sqlite.exec(
-        """update player_state set track_id = ?, position_ms = ?, volume = ?, status = ?,
+        """update player_state set track_id = nullif(?, ''), position_ms = ?, volume = ?, status = ?,
            repeat_mode = ?, shuffle = ?, shuffle_seed = ?, context = ?, context_queue = ?,
-           play_order = ?, queue_index = ?, user_queue = ?, history = ?, cue = ?, anchor_ms = ?,
+           play_order = ?, queue_index = ?, user_queue = ?, history = ?, cue = ?,
            revision = revision + 1, updated_at = unixepoch() where id = 1 and revision = ?""",
         e.track_id, e.position_ms, e.volume, e.status, e.repeat_mode,
         e.shuffle ? 1 : 0, e.shuffle_seed, e.context, str(e.context_queue),
         str(e.play_order), e.queue_index, str(user_queue_json(e)), str(e.history),
-        e.cue, e.anchor_ms, e.revision)
+        e.cue, e.revision)
     return tocado == 1
 
 # La ÚNICA forma en que el backend mueve el motor de audio: estrena un cue.
-# El motor aplica cada cue una vez (carga la pista si no es la que tiene, o
-# salta a `ms` si lo es), y todo lo que el cliente informa lleva el cue en el
-# que estaba: un informe de un cue viejo (la canción anterior) se descarta en
-# vez de aplicarse a la nueva.
+# motor_sincronizar() (motor.lux) aplica cada cue una vez: carga la pista si
+# no es la que tiene el motor, o salta a `ms` si lo es.
 fn void cuear(EstadoCola e, int ms):
     e.cue = e.cue + 1
     e.position_ms = ms
-    e.anchor_ms = 0
 
-# Posición real ahora mismo: mientras suena, lo que marca el ancla; si no,
-# la última guardada.
+# Posición real ahora mismo: la del motor de audio si es el que tiene la
+# pista (es lo que se oye); si no, la última guardada.
 fn int posicion_viva(EstadoCola e):
-    if e.status == "playing" and e.anchor_ms > 0:
-        int p = time.now() - e.anchor_ms
-        return p < 0 ? 0 : p
+    if e.track_id != "":
+        Json st = audio.status()
+        if jstr(st["trackId"], "") == e.track_id:
+            return jint(st["positionMs"], 0)
     return e.position_ms
 
 # Mutación con reintento: recarga, aplica el cambio y compite por la escritura.
@@ -199,7 +194,6 @@ fn bool mutar_estado(string accion, string arg1, string arg2, int argn, double a
             if e.track_id != "":
                 if e.status == "playing":
                     e.position_ms = argn >= 0 ? argn : posicion_viva(e)
-                    e.anchor_ms = 0
                     e.status = "paused"
                 else:
                     e.status = "playing"
@@ -207,7 +201,6 @@ fn bool mutar_estado(string accion, string arg1, string arg2, int argn, double a
         elif accion == "pause":
             if e.status == "playing":
                 e.position_ms = argn >= 0 ? argn : posicion_viva(e)
-            e.anchor_ms = 0
             e.status = "paused"
             ok = true
         elif accion == "resume":

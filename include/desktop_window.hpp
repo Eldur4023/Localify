@@ -44,10 +44,6 @@ public:
     // window the same way it would a browser tab, no manual F5.
     void reload();
 
-    // Thread-safe: runs `js` inside the page (window.eval_js()). Runs even
-    // while the window is minimized/hidden -- unlike the page's own timers.
-    void eval_js(const std::string& js);
-
     // The rest back the `window` LuxScript module (vendor/lux/src/lux_script/
     // modules/window.cpp) via WindowControl -- see runtime.cpp/dev.cpp for
     // how the hooks get wired up. All thread-safe: a route handler calling

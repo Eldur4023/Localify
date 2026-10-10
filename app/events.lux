@@ -1,36 +1,72 @@
-# events.lux — Snapshot de eventos para el bombeo del frontend.
+# events.lux — Lo que el backend empuja a la interfaz, y sus tareas de fondo.
 #
-# En Localify existía un bus `broadcast<DomainEvent>` puenteado a la WebView.
-# Aquí no hay canal push desde el backend, así que el transporte del frontend
-# sondea este endpoint cada segundo y SINTETIZA los mismos eventos (mismos
-# nombres, mismos payloads) por diferenciación. La búsqueda remota pendiente
-# se ejecuta aquí: es el único "segundo plano" que el modelo de Lux permite.
+# Como en el original (bus de eventos → puente a la WebView), el backend
+# EMPUJA: una tarea de fondo (motor_tick, cada 200 ms) fotografía el estado, y
+# /api/events/stream (SSE) se lo manda a cada ventana abierta cuando cambia.
+# La interfaz sigue sintetizando por diferencias los mismos eventos con los
+# mismos nombres (ipc/transport.js), de modo que ninguna vista cambia.
+#
+# Ya no hay sondeo desde la página: WebKitGTK frena los temporizadores de una
+# ventana minimizada o en la bandeja a varios segundos, y con el audio, las
+# descargas y las integraciones colgando de ese sondeo, todo iba a su ritmo.
+# Estas tareas viven en el servidor y no dependen de que la ventana esté a la
+# vista.
 
-post endpoint("/api/events/poll"):
+# ─── Arranque ────────────────────────────────────────────────────────────────
+
+# Lux no atiende ninguna petición hasta que acaba.
+on start:
     db_init()
+    int fusionadas = fusionar_duplicados()
+    if fusionadas > 0:
+        log.info("duplicados: " + str(fusionadas) + " pista(s) fusionada(s)")
+    # La salida solo se reabre si hay una elegida: la predeterminada ya está.
+    string salida = jstr(jget(jget(ajustes_estructurados(), "audio"), "outputDeviceId"), "")
+    motor_aplicar_ajustes(salida != "")
+
+# ─── Tareas de fondo ─────────────────────────────────────────────────────────
+
+# El reproductor: avisos del motor, sincronizar, precargar, persistir, y la
+# foto del estado para la interfaz.
+every "200ms":
+    motor_tick()
+
+# Las descargas avanzan por ticks (downloads.lux).
+every "1s":
     tick_descargas()
 
-    List<Json> ready = []
-    string rq = state.get("remote_query", "")
-    if rq != "":
-        state.remove("remote_query")
-        Json? trabajo = parse_json(rq)
-        if trabajo != null:
-            string q = jstr(trabajo["q"], "")
-            if q != "":
-                ytm_buscar_pistas(q, 15)
-            ready.add({ "queryId": jint(trabajo["queryId"], 0) })
+# "Puede que te guste": trae una tanda nueva del catálogo cuando caduca
+# (cada seis horas; recomendaciones.lux).
+every "1m":
+    recomendaciones_tick()
 
-    # La salida elegida en Ajustes, en cuanto exista el flujo de WebKit (se
-    # crea con la página). Sin salida elegida no se toca: manda PipeWire.
-    if state.get("salida_aplicada", "") == "":
-        if jstr(jget(jget(ajustes_estructurados(), "audio"), "outputDeviceId"), "") == "" or aplicar_salida() > 0:
-            state.set("salida_aplicada", "1")
+# La búsqueda remota pendiente (la escribe /api/invoke, la corre esto).
+every "300ms":
+    busquedas_remotas()
+
+fn void busquedas_remotas():
+    string rq = state.get("remote_query", "")
+    if rq == "":
+        return
+    state.remove("remote_query")
+    Json? trabajo = parse_json(rq)
+    if trabajo != null:
+        string q = jstr(trabajo["q"], "")
+        if q != "":
+            ytm_buscar_pistas(q, 15)
+        state.set("remote_ready", str(jint(trabajo["queryId"], 0)))
+
+# ─── La foto del estado ──────────────────────────────────────────────────────
+
+fn Json construir_snapshot():
+    # Una búsqueda remota que acaba de terminar se anuncia en UNA foto.
+    List<Json> ready = []
+    string rr = state.get("remote_ready", "")
+    if rr != "":
+        state.set("remote_ready", "")
+        ready.add({ "queryId": int(rr) })
 
     EstadoCola e = leer_estado()
-    List<Json> marcas = await sqlite.query("""
-        select coalesce(max(cast(value as integer)), 0) as nunca from settings where key like 'stamp_%'
-        """)
     List<Json> sellos = await sqlite.query("select key, value from settings where key in ('stamp_library','stamp_playlists','stamp_settings','playlists_change_kind')")
     string s_lib = ""
     string s_pl = ""
@@ -47,12 +83,6 @@ post endpoint("/api/events/poll"):
         elif k == "playlists_change_kind":
             s_pl_kind = jstr(sellos[i]["value"], "")
 
-    Json estado = estado_dto()
-    # MPRIS y Discord también se publican tras cada orden (reproductor.lux);
-    # aquí, además, en cada sondeo: lo que Discord no aceptó en su momento
-    # por su límite de frecuencia sale en una de estas llamadas.
-    publicar_integraciones()
-
     return {
         "revision": e.revision,
         "trackId": e.track_id,
@@ -68,11 +98,38 @@ post endpoint("/api/events/poll"):
         "statsStamp": state.get("stamp_stats", ""),
         "downloads": descargas_activas(),
         "remoteReady": ready,
-        "estado": estado
+        "estado": estado_dto()
     }
+
+# Guarda la foto si cambió; los flujos SSE miran `snap_seq`, que es memoria.
+fn void publicar_snapshot():
+    string txt = str(construir_snapshot())
+    if txt != state.get("snap_txt", ""):
+        state.set("snap_txt", txt)
+        state.incr("snap_seq")
+
+# Una ventana abierta: al conectar recibe la foto actual (también al
+# reconectar), y luego cada cambio.
+sse endpoint("/api/events/stream"):
+    int visto = 0
+    int latidos = 0
+    while sse.open:
+        int seq = state.get("snap_seq", 0)
+        if seq != visto:
+            visto = seq
+            sse.send("snapshot", state.get("snap_txt", "{}"))
+        await sleep(50)
+        latidos = latidos + 1
+        if latidos % 300 == 0:
+            sse.ping("keepalive")
 
 # Diálogo nativo de fichero: lo resuelve la propia ventana GTK. Solo se llama
 # desde la UI (es decir, con ventana viva).
 post endpoint("/api/native/open-file"):
     string ruta = await window.open_file()
     return { "path": ruta }
+
+# El shell de escritorio espera a que esto no sea un 503 antes de abrir la
+# ventana (desktop_common.cpp, wait_for_server).
+get endpoint("/api/ready"):
+    return { "ok": true }

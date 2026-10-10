@@ -1,18 +1,18 @@
 cmake_minimum_required(VERSION 3.20)
 project(lux CXX C)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 
-# --native (Fase 4, rutas): el .so que genera compilar_nativo() para una ruta
-# enlaza liblux_script.a de verdad (necesita Value::write_json, no inline en
-# el header) desde una biblioteca COMPARTIDA. Un
-# .a compilado sin -fPIC no se puede meter dentro de un .so -- de ahi esto
-# global, no solo en el target de lux_script: mas simple que marcar cada
-# dependencia transitiva (lux, lux_llhttp) una por una, y el coste (PIC en
-# el binario `lux` mismo, que no lo necesitaba) es insignificante frente a
-# tener que recompilar bajo demanda.
+# --native (phase 4, routes): the .so that compile_native() generates for a
+# route really does link liblux_script.a (it needs Value::write_json, not
+# inlined in the header) from a SHARED library. A .a compiled without
+# -fPIC cannot be pulled into a .so -- hence this being global, not just on
+# the lux_script target: simpler than flagging every transitive dependency
+# (lux, lux_llhttp) one by one, and the cost (PIC in the `lux` binary
+# itself, which did not need it) is negligible next to having to
+# recompile on demand.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 if(NOT CMAKE_BUILD_TYPE)
@@ -39,6 +39,9 @@ option(LUX_POSTGRES "Modulo postgres (libpq)"                         ON)
 option(LUX_MYSQL    "Modulo mysql (libmysqlclient)"                   ON)
 option(LUX_PDF      "Native module: pdf (cairo)"                      ON)
 option(LUX_HTTP     "Native module: http (libcurl)"                   ON)
+option(LUX_CRYPTO   "Native module: crypto (OpenSSL libcrypto)"       ON)
+option(LUX_GZIP     "Native module: gzip, and deflate in zip (zlib)"  ON)
+option(LUX_IMAGE    "Native module: image (libjpeg, libpng, libwebp)" ON)
 
 # ── System dependencies ───────────────────────────────────────────────────────
 # Lux links neither OpenSSL, nghttp2 nor zlib: TLS, HTTP/2 and compression are
@@ -153,7 +156,11 @@ set(LUX_MODULE_EXCLUDE "" CACHE STRING
 set(_lux_module_exclude
     ${LUX_MODULE_EXCLUDE}
     "src/lux_script/modules/base_modules/pdf.cpp"
-    "src/lux_script/modules/base_modules/http.cpp")
+    "src/lux_script/modules/base_modules/http.cpp"
+    "src/lux_script/modules/base_modules/mail.cpp"
+    "src/lux_script/modules/base_modules/crypto.cpp"
+    "src/lux_script/modules/base_modules/gzip.cpp"
+    "src/lux_script/modules/base_modules/image.cpp")
 foreach(_excluded ${_lux_module_exclude})
     list(REMOVE_ITEM LUX_MODULE_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/${_excluded})
 endforeach()
@@ -179,9 +186,25 @@ add_library(lux_script STATIC
     src/lux_script/vm.cpp
     src/lux_script/autotest.cpp
     src/lux_script/project.cpp
+    src/lux_script/tiny_regex.cpp
+    src/lux_script/luxp_serve.cpp
+    src/lux_script/luxp_template.cpp
+    # .luxp: Luxium's application format -- translator, codecs, verifier.
+    # Owned here; Luxium vendors src/luxp/ (its tools/sync_from_lux.sh).
+    src/luxp/dom/node.cpp
+    src/luxp/html/tokenizer.cpp
+    src/luxp/html/parser.cpp
+    src/luxp/style/selector.cpp
+    src/luxp/style/stylesheet.cpp
+    src/luxp/page/doc_codec.cpp
+    src/luxp/page/doc_template.cpp
+    src/luxp/page/luxp.cpp
+    src/luxp/script/bytecode_io.cpp
+    src/luxp/script/page_compile.cpp
     ${LUX_MODULE_SOURCES}
 )
-target_include_directories(lux_script PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(lux_script PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/luxp)
 target_link_libraries(lux_script PUBLIC lux ${CMAKE_DL_LIBS})
 
 # Every module registers itself with a namespace-scope object that nothing
@@ -223,7 +246,7 @@ if(LUX_SQLITE)
     find_path(SQLITE3_INC sqlite3.h)
     find_library(SQLITE3_LIB sqlite3)
     if(SQLITE3_INC AND SQLITE3_LIB)
-        target_sources(lux_script PRIVATE src/lux_script/db_sqlite.cpp)
+        target_sources(lux_script PRIVATE src/lux_script/db_sqlite.cpp src/lux_script/sqlite_replica.cpp)
         target_compile_definitions(lux_script PRIVATE LUX_SQLITE)
         target_include_directories(lux_script PRIVATE ${SQLITE3_INC})
         target_link_libraries(lux_script PRIVATE ${SQLITE3_LIB})
@@ -264,77 +287,60 @@ endif()
 # `pdf` (NATIVE-MODULES.md): built on cairo's PDF surface -- a well-established,
 # already-liberally-licensed 2D graphics library with native PDF output, so
 # there was no need to hunt for a PDF-specific dependency.
-if(LUX_PDF)
+# lux_optional_module(<option> <label> PACKAGES <pkg-config names> FILES <.cpp>)
+#
+# A module whose library may be missing: compiled in only when every
+# package is found, skipped (with a line saying what to install) otherwise.
+# Its link flags also go to every --native .so, which links the whole
+# liblux_script.a: an object in it that references a library needs that
+# library there too, whatever the .lux being compiled uses.
+set(LUX_NATIVE_EXTRA_LIBS "")
+function(lux_optional_module option label)
+    cmake_parse_arguments(M "" "" "PACKAGES;FILES" ${ARGN})
+    if(NOT ${option})
+        return()
+    endif()
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
-        pkg_check_modules(CAIRO QUIET cairo)
+        pkg_check_modules(_${option} QUIET ${M_PACKAGES})
     endif()
-    if(CAIRO_FOUND)
-        target_sources(lux_script PRIVATE src/lux_script/modules/base_modules/pdf.cpp)
-        target_compile_definitions(lux_script PRIVATE LUX_PDF)
-        target_include_directories(lux_script PRIVATE ${CAIRO_INCLUDE_DIRS})
-        target_link_libraries(lux_script PRIVATE ${CAIRO_LIBRARIES})
-        # native_build.cpp compiles each --native .so with a fresh g++
-        # invocation that links the WHOLE liblux_script.a (see
-        # LUX_NATIVE_SCRIPT_LIB below) -- since pdf.cpp's object
-        # file is in that archive and references cairo, that g++ invocation
-        # needs cairo's link flags too, or loading ANY generated .so (not
-        # just a route using `pdf`) fails with "undefined symbol:
-        # cairo_pdf_surface_create_for_stream". Found by the native_route_
-        # shadow suite immediately after enabling LUX_PDF, not guessed.
-        list(JOIN CAIRO_LDFLAGS " " CAIRO_LDFLAGS_STR)
-        target_compile_definitions(lux_script PRIVATE
-            LUX_NATIVE_CAIRO_LIBS="${CAIRO_LDFLAGS_STR}")
-        message(STATUS "pdf module: enabled")
-    else()
-        message(STATUS "pdf module: SKIPPED (libcairo2-dev missing)")
+    if(NOT _${option}_FOUND)
+        message(STATUS "${label} module: SKIPPED (needs ${M_PACKAGES} development files)")
+        return()
     endif()
-endif()
+    target_sources(lux_script PRIVATE ${M_FILES})
+    target_compile_definitions(lux_script PRIVATE ${option})
+    target_include_directories(lux_script PRIVATE ${_${option}_INCLUDE_DIRS})
+    target_link_libraries(lux_script PRIVATE ${_${option}_LIBRARIES})
+    list(JOIN _${option}_LDFLAGS " " flags)
+    set(LUX_NATIVE_EXTRA_LIBS "${LUX_NATIVE_EXTRA_LIBS} ${flags}" PARENT_SCOPE)
+    message(STATUS "${label} module: enabled")
+endfunction()
 
-# `http` (NATIVE-MODULES.md): outbound HTTP(S) client on libcurl -- an
-# explicit, narrow exception to "Lux never links TLS" (see that comment
-# at the top of this file): that principle is about not being an INBOUND
-# TLS terminator, which does not and cannot extend to outbound calls (there
-# is no reverse proxy between Lux and a third-party HTTPS API). libcurl
-# brings a mature TLS backend rather than Lux hand-rolling one.
-if(LUX_HTTP)
-    find_package(PkgConfig QUIET)
-    if(PkgConfig_FOUND)
-        pkg_check_modules(LUX_CURL QUIET libcurl)
-    endif()
-    if(LUX_CURL_FOUND)
-        target_sources(lux_script PRIVATE src/lux_script/modules/base_modules/http.cpp)
-        target_compile_definitions(lux_script PRIVATE LUX_HTTP)
-        target_include_directories(lux_script PRIVATE ${LUX_CURL_INCLUDE_DIRS})
-        target_link_libraries(lux_script PRIVATE ${LUX_CURL_LIBRARIES})
-        # Same reason as LUX_NATIVE_CAIRO_LIBS just above: every --native
-        # .so links the whole liblux_script.a, so http.cpp's curl
-        # references need curl's link flags on EVERY --native build, not
-        # only one that happens to use `http`.
-        list(JOIN LUX_CURL_LDFLAGS " " LUX_CURL_LDFLAGS_STR)
-        target_compile_definitions(lux_script PRIVATE
-            LUX_NATIVE_CURL_LIBS="${LUX_CURL_LDFLAGS_STR}")
-        message(STATUS "http module: enabled")
-    else()
-        message(STATUS "http module: SKIPPED (libcurl4-openssl-dev missing)")
-    endif()
-endif()
+set(_m src/lux_script/modules/base_modules)
+lux_optional_module(LUX_PDF    "pdf"       PACKAGES cairo                  FILES ${_m}/pdf.cpp)
+lux_optional_module(LUX_HTTP   "http/mail" PACKAGES libcurl                FILES ${_m}/http.cpp ${_m}/mail.cpp)
+lux_optional_module(LUX_CRYPTO "crypto"    PACKAGES libcrypto              FILES ${_m}/crypto.cpp)
+lux_optional_module(LUX_GZIP   "gzip"      PACKAGES zlib                   FILES ${_m}/gzip.cpp)
+lux_optional_module(LUX_IMAGE  "image"     PACKAGES libjpeg libpng libwebp FILES ${_m}/image.cpp)
+target_compile_definitions(lux_script PRIVATE LUX_NATIVE_EXTRA_LIBS="${LUX_NATIVE_EXTRA_LIBS}")
 target_compile_options(lux_script PRIVATE -Wall -Wextra)
 
 # The Lux binary.
 add_executable(lux-bin src/lux_script/main.cpp)
 set_target_properties(lux-bin PROPERTIES OUTPUT_NAME lux)
 lux_link_script(lux-bin)
-# --native (Fase 5, `await`): sin esto, el .so que dlopen() carga en tiempo
-# de ejecucion NO comparte los `inline thread_local` de task.hpp
-# (lux::detail::current_loop/current_token, que HttpConnection::dispatch()
-# deja puestos antes de cada peticion) con este ejecutable -- cada uno se
-# lleva su propia copia privada, siempre a null en la del .so. Sin loop,
-# SleepAwaitable::await_suspend() resume el acto, sin esperar nada: `await
-# sleep(200)` en una ruta nativa respondia en ~3ms en vez de ~200ms,
-# encontrado probando la primera ruta con `await` de verdad contra HTTP, no
-# adivinado de antemano. -rdynamic exporta los simbolos de este binario al
-# tabla dinamica para que el .so resuelva contra ELLOS, no cree los suyos.
+# --native (phase 5, `await`): without this, the .so that dlopen() loads at
+# runtime does NOT share task.hpp's `inline thread_local`s
+# (lux::detail::current_loop/current_token, which HttpConnection::dispatch()
+# sets before every request) with this executable -- each one carries its
+# own private copy, always null in the .so's. With no loop,
+# SleepAwaitable::await_suspend() resumes immediately, without waiting for
+# anything: `await sleep(200)` in a native route answered in ~3ms instead of
+# ~200ms, found by testing the first route with a real `await` against
+# HTTP, not guessed ahead of time. -rdynamic exports this binary's symbols
+# into the dynamic table so the .so resolves against THOSE, instead of
+# creating its own.
 target_link_options(lux-bin PRIVATE -rdynamic)
 
 # Frontend development tools.
@@ -350,52 +356,45 @@ lux_link_script(crypto_check)
 # not an instrumented version of it.
 enable_testing()
 
+# In-process test linked against lux_script: tests/<name>.cpp -> test_<name>.
+function(lux_script_test name)
+    add_executable(test_${name} tests/${name}.cpp)
+    lux_link_script(test_${name})
+    add_test(NAME ${name} COMMAND test_${name})
+endfunction()
+
 # Templates are tested separately and in process: compiling and rendering do not
 # go through the socket, so the regression script cannot reach them.
-add_executable(test_templates tests/templates.cpp)
-lux_link_script(test_templates)
-add_test(NAME templates COMMAND test_templates)
+lux_script_test(templates)
 
 # --native phase 1: compares Emitter::check_expr/
 # check_call against the real compilation, expression by expression. It lives
 # here, not in tests/run_tests.sh, because it calls the library directly
 # instead of the binary: it is a test of an internal piece not wired up yet.
-add_executable(test_check_expr_shadow tests/check_expr_shadow.cpp)
-lux_link_script(test_check_expr_shadow)
-add_test(NAME check_expr_shadow COMMAND test_check_expr_shadow)
+lux_script_test(check_expr_shadow)
 
-add_executable(test_check_stmt_shadow tests/check_stmt_shadow.cpp)
-lux_link_script(test_check_stmt_shadow)
-add_test(NAME check_stmt_shadow COMMAND test_check_stmt_shadow)
+lux_script_test(check_stmt_shadow)
 
 # The other half of phase 1: not just that check_expr/check_stmt reproduce
 # the same diagnostics (above), but that the emitter consuming the IR
 # produces bytecode that BEHAVES the same when actually run on the VM.
-add_executable(test_emit_ir_shadow tests/emit_ir_shadow.cpp)
-lux_link_script(test_emit_ir_shadow)
-add_test(NAME emit_ir_shadow COMMAND test_emit_ir_shadow)
+lux_script_test(emit_ir_shadow)
 
 # --native phase 2: generates real C++ from the IR, compiles it with the
 # system compiler (invokes `g++` as a subprocess) and compares its execution
 # against the VM -- the phase's acceptance criterion.
-add_executable(test_native_gen_shadow tests/native_gen_shadow.cpp)
-lux_link_script(test_native_gen_shadow)
-add_test(NAME native_gen_shadow COMMAND test_native_gen_shadow)
+lux_script_test(native_gen_shadow)
 
 # The other half: compile_native() for real (invokes g++, dlopen, dlsym) and
 # dispatch inside the VM (VM::start with the native table wired up) give the
 # same result as bytecode -- see the comment in tests/native_build_shadow.cpp.
-add_executable(test_native_build_shadow tests/native_build_shadow.cpp)
-lux_link_script(test_native_build_shadow)
-add_test(NAME native_build_shadow COMMAND test_native_build_shadow)
+lux_script_test(native_build_shadow)
 
 # User classes: generates the C++ for a class and its methods directly
 # (without going through compile_native(), which today has nothing to offer
 # a class-only program -- see the comment in tests/native_class_shadow.cpp)
 # and compares its execution against the VM.
-add_executable(test_native_class_shadow tests/native_class_shadow.cpp)
-lux_link_script(test_native_class_shadow)
-add_test(NAME native_class_shadow COMMAND test_native_class_shadow)
+lux_script_test(native_class_shadow)
 
 # Phase 4: one HTTP route compiled to native, end to end, through the real
 # compile() (parsing, build_routes, compile_native) -- not a Program built by
@@ -403,8 +402,7 @@ add_test(NAME native_class_shadow COMMAND test_native_class_shadow)
 # find <lux/response.hpp> and link liblux_script.a: same macros
 # native_build.cpp already uses (see the comment on LUX_NATIVE_INCLUDE_DIR
 # on the lux_script target), so there is no need to repeat them here.
-add_executable(test_native_route_shadow tests/native_route_shadow.cpp)
-lux_link_script(test_native_route_shadow)
+lux_script_test(native_route_shadow)
 # Same reason as lux-bin above, and the same kind of symptom found the same
 # way (by testing for real, not guessed beforehand): state.incr()/state.get()
 # (phase 5.9) resolve against SharedState::instance(), a function-local
@@ -414,7 +412,6 @@ lux_link_script(test_native_route_shadow)
 # incremented DIFFERENT counters -- this test caught it (sequence 1,2,1,1,2
 # instead of 1,2,3,3,3) before this comment was written.
 target_link_options(test_native_route_shadow PRIVATE -rdynamic)
-add_test(NAME native_route_shadow COMMAND test_native_route_shadow)
 
 # The postgres placeholder translator is a pure function: it is tested without a
 # server by including the driver's .cpp, to test THE code and not a copy.
@@ -437,6 +434,14 @@ add_test(NAME regression
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_tests.sh $<TARGET_FILE:lux-bin>
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(regression PROPERTIES TIMEOUT 300)
+# The same suite with every server under --native: the two backends must
+# answer alike, and a bug only native code has (an await on the skipped side
+# of `or`) went unseen while only bytecode ran here.
+add_test(NAME regression_native
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_tests.sh $<TARGET_FILE:lux-bin>
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(regression_native PROPERTIES TIMEOUT 600
+                     ENVIRONMENT "LUX_TEST_FLAGS=--native;LUX_TEST_PORT=9790")
 
 # The mysql module needs a server, so its suite skips itself —code 77— when
 # there is none, instead of turning a machine where it does not apply red.
@@ -452,6 +457,11 @@ add_test(NAME sqlite
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_sqlite.sh $<TARGET_FILE:lux-bin>
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(sqlite PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+# The single writer and `replicate` (directories; s3/sftp need real targets).
+add_test(NAME sqlite_replica
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_sqlite_replica.sh $<TARGET_FILE:lux-bin>
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(sqlite_replica PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
 
 # Same for postgres.
 add_test(NAME postgres
@@ -472,6 +482,13 @@ add_test(NAME http
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_http.sh $<TARGET_FILE:lux-bin>
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(http PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+
+# gzip/crypto/image (zlib, libcrypto, libjpeg/libpng/libwebp): skipped when
+# the binary lacks any of them.
+add_test(NAME extras
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_extras.sh $<TARGET_FILE:lux-bin>
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(extras PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
 
 # ── Fuzzing ───────────────────────────────────────────────────────────────────
 # No sanitizer flags here on purpose: for ASan/UBSan to be worth anything they

@@ -1,0 +1,152 @@
+# duplicados.lux — Una canción, una fila.
+#
+# La misma grabación llegaba a la tabla `tracks` dos veces por dos caminos:
+#   - importada de Spotify o MusicBrainz (id propio de esa fuente) y, después,
+#     encontrada en una búsqueda de YouTube Music (id = el del vídeo);
+#   - dos subidas de YouTube con el mismo título, artista y duración.
+# Cada copia acumulaba sus propios "me gusta", escuchas y descargas, así que en
+# Estadísticas o en Me gusta salía la misma canción dos veces.
+#
+# Aquí: no crear copias nuevas (pista_equivalente, desde guardar_pista) y
+# fusionar las que ya existen (fusionar_duplicados, al arrancar). Los criterios
+# son estrictos a propósito -- fusionar dos canciones distintas es peor que
+# dejar dos copias de una --:
+#   1. vídeo enlazado: el id de una pista ES el vídeo que otra ya descargó (o
+#      su emparejamiento de confianza alta), y comparten el primer artista;
+#   2. mismo título y artista normalizados, y duración a ±2 s.
+# Un directo, una versión o un remix NO son la misma grabación: tienen otro
+# título y otra duración, y se quedan como están.
+
+# ─── No crear copias ─────────────────────────────────────────────────────────
+
+# La pista que ya representa a `p` (otro id), o "".
+fn string pista_equivalente(PistaCatalogo p):
+    List<Json> por_video = await sqlite.query("""
+        select track_id as id from audio_files where youtube_id = ? and track_id != ?
+        union
+        select track_id from youtube_matches
+        where video_id = ? and track_id != ? and rejected = 0 and confidence = 'high'
+        limit 1
+        """, p.id, p.id, p.id, p.id)
+    if len(por_video) > 0:
+        return jstr(por_video[0]["id"], "")
+    if p.duration_ms <= 0:
+        return ""
+    string artistas = ""
+    for int i in range(0, len(p.artista_nombres)):
+        artistas = artistas + (i > 0 ? ", " : "") + p.artista_nombres[i]
+    List<Json> por_titulo = await sqlite.query("""
+        select id from tracks
+        where title_norm = ? and artist_norm = ? and abs(duration_ms - ?) <= 2000 and id != ?
+        order by (select count(*) from play_history h where h.track_id = tracks.id) desc
+        limit 1
+        """, normalizar(p.title), normalizar(artistas), p.duration_ms, p.id)
+    if len(por_titulo) > 0:
+        return jstr(por_titulo[0]["id"], "")
+    return ""
+
+# ─── Fusionar las que ya existen ─────────────────────────────────────────────
+
+# Lo que vale una copia: la que tiene el fichero, el "me gusta", está en una
+# playlist o más se ha escuchado es la que se queda. A igualdad, la que NO es
+# un id de vídeo (la de Spotify/MusicBrainz trae mejores metadatos).
+fn int valor_de_pista(string id):
+    List<Json> f = await sqlite.query("""
+        select (select count(*) from audio_files a where a.track_id = ?) * 1000000
+             + (select count(*) from favorites f where f.track_id = ?) * 100000
+             + (select count(*) from playlist_items p where p.track_id = ?) * 10000
+             + (select count(*) from play_history h where h.track_id = ?) * 10
+             + (case when length(?) = 11 then 0 else 1 end) as v
+        """, id, id, id, id, id)
+    return jint(f[0]["v"], 0)
+
+# Todo lo que apuntaba a `quita` pasa a `queda`, y `quita` desaparece.
+fn void fusionar_pista(string queda, string quita):
+    await sqlite.begin()
+    await sqlite.exec("update play_history set track_id = ? where track_id = ?", queda, quita)
+    await sqlite.exec("insert or ignore into favorites(track_id, added_at) select ?, added_at from favorites where track_id = ?", queda, quita)
+    await sqlite.exec("delete from favorites where track_id = ?", quita)
+    # En una playlist que ya tiene `queda`, la copia sobra; en las demás la sustituye.
+    await sqlite.exec("""
+        delete from playlist_items where track_id = ?
+          and playlist_id in (select playlist_id from playlist_items where track_id = ?)
+        """, quita, queda)
+    await sqlite.exec("update playlist_items set track_id = ? where track_id = ?", queda, quita)
+    # El fichero: si `queda` no tiene, se queda con el de `quita`.
+    await sqlite.exec("update audio_files set track_id = ? where track_id = ? and not exists (select 1 from audio_files where track_id = ?)", queda, quita, queda)
+    await sqlite.exec("update or ignore youtube_matches set track_id = ? where track_id = ?", queda, quita)
+    await sqlite.exec("update or ignore lyrics set track_id = ? where track_id = ?", queda, quita)
+    await sqlite.exec("update player_state set track_id = ? where track_id = ?", queda, quita)
+    # La cola guarda ids dentro de JSON: se cambian como texto entre comillas.
+    await sqlite.exec("""
+        update player_state set
+            context_queue = replace(context_queue, ?, ?),
+            user_queue = replace(user_queue, ?, ?),
+            history = replace(history, ?, ?)
+        """, "\"" + quita + "\"", "\"" + queda + "\"", "\"" + quita + "\"", "\"" + queda + "\"",
+        "\"" + quita + "\"", "\"" + queda + "\"")
+    # El resto (track_artists, download_jobs, lo que no se pudo mover) cae con
+    # la fila por ON DELETE CASCADE.
+    await sqlite.exec("delete from tracks where id = ?", quita)
+    await sqlite.commit()
+    log.info("duplicados: " + quita + " fusionada en " + queda)
+
+# Las parejas (a, b) que son la misma grabación, sin repetir.
+fn List<Json> parejas_duplicadas():
+    List<Json> por_video = await sqlite.query("""
+        with enlaces(track_id, vid) as (
+            select track_id, youtube_id from audio_files where youtube_id is not null
+            union
+            select track_id, video_id from youtube_matches where rejected = 0 and confidence = 'high'
+        )
+        select distinct e.track_id as a, v.id as b
+        from enlaces e
+        join tracks v on v.id = e.vid and v.id != e.track_id
+        join track_artists ta on ta.track_id = e.track_id and ta.position = 0
+        join artists aa on aa.id = ta.artist_id
+        join track_artists tb on tb.track_id = v.id and tb.position = 0
+        join artists ab on ab.id = tb.artist_id
+        where aa.name_norm = ab.name_norm
+        """)
+    List<Json> por_titulo = await sqlite.query("""
+        select a.id as a, b.id as b
+        from tracks a join tracks b
+          on a.title_norm = b.title_norm and a.artist_norm = b.artist_norm and a.id < b.id
+        where a.title_norm != '' and abs(a.duration_ms - b.duration_ms) <= 2000
+        """)
+    return por_video + por_titulo
+
+# Fusiona todas las parejas; devuelve cuántas filas desaparecieron. Barato con
+# bibliotecas reales (unos cientos de pistas), así que corre en cada arranque.
+fn int fusionar_duplicados():
+    reparar_titulos_repetidos()
+    int fusionadas = 0
+    List<Json> parejas = parejas_duplicadas()
+    for int i in range(0, len(parejas)):
+        string a = jstr(parejas[i]["a"], "")
+        string b = jstr(parejas[i]["b"], "")
+        # Una pareja anterior pudo llevarse ya una de las dos.
+        List<Json> vivas = await sqlite.query("select count(*) as n from tracks where id in (?, ?)", a, b)
+        if jint(vivas[0]["n"], 0) < 2:
+            continue
+        if valor_de_pista(a) >= valor_de_pista(b):
+            fusionar_pista(a, b)
+        else:
+            fusionar_pista(b, a)
+        fusionadas = fusionadas + 1
+    return fusionadas
+
+# YouTube Music manda a veces el título dos veces ("X - X", una estilizada y
+# otra en ASCII); guardar_pista ya solo toma la primera. Esto arregla las que
+# entraron antes.
+fn void reparar_titulos_repetidos():
+    List<Json> f = await sqlite.query("select id, title from tracks where title like '% - %'")
+    for int i in range(0, len(f)):
+        string titulo = jstr(f[i]["title"], "")
+        int corte = titulo.index_of(" - ")
+        string izq = titulo.slice(0, corte).trim()
+        string der = titulo.slice(corte + 3).trim()
+        # Casi iguales, no idénticas: una lleva comillas tipográficas y "×", la
+        # otra su versión ASCII.
+        if izq != "" and similitud(normalizar(izq), normalizar(der)) >= 0.92:
+            await sqlite.exec("update tracks set title = ?, title_norm = ? where id = ?", izq, normalizar(izq), jstr(f[i]["id"], ""))

@@ -7,6 +7,11 @@
 # -- run_pdf.sh -- to skip gracefully on a binary built without cairo), so
 # it belongs in the always-runs regression suite too.
 import hash
+import zip
+import net
+import text
+import encoding
+import json
 import csv
 import os
 import math
@@ -24,6 +29,186 @@ get endpoint("/hmac/:key/:msg", string key, string msg):
 get endpoint("/random/:n", int n):
     return { "hex": hash.random_hex(n) }
 
+get endpoint("/hash/password"):
+    string h = await hash.password("hunter2")
+    bool good = await hash.verify("hunter2", h)
+    bool bad = await hash.verify("hunter3", h)
+    bool django = await hash.verify("pw", "pbkdf2_sha256$1000$salt123$MWa8jc85h8c6c8Jm+w5qVekbz0jT4egNnQ5GJ8LeL5w=")
+    bool garbage = await hash.verify("pw", "not a hash")
+    return { "format": h.starts_with("pbkdf2_sha256$600000$"), "good": good, "bad": bad, "django": django, "garbage": garbage }
+
+get endpoint("/hash/sign"):
+    string t = hash.sign({ "user": 7 }, "k1")
+    return { "back": hash.unsign(t, "k1"), "tampered": hash.unsign(t + "x", "k1"), "wrong_key": hash.unsign(t, "k2"), "fresh": hash.unsign(t, "k1", 60), "expired": hash.unsign(t, "k1", -1) }
+
+get endpoint("/hash/ids"):
+    string u4 = hash.uuid()
+    string u7 = hash.uuid(7)
+    return { "len": len(u4), "v4": u4.slice(14, 15), "v7": u7.slice(14, 15), "token_len": len(hash.token()), "same": hash.equal("abc", "abc"), "differ": hash.equal("abc", "abd") }
+
+get endpoint("/hash/bad_arg"):
+    return { "h": hash.sha256(5) }
+
+get endpoint("/math/more"):
+    List<Json> xs = [4, 9, 2]
+    List<Json> shuffled = math.shuffle(xs)
+    return { "round2": math.round(3.14159, 2), "clamp": math.clamp(15, 0, 10), "sign": math.sign(-3), "min_list": math.min(xs), "max3": math.max(1, 7, 3), "log2": math.log(8, 2), "choice_in": xs.contains(math.choice(xs)), "shuffled_len": len(shuffled), "sample_len": len(math.sample(xs, 2)), "untouched": xs }
+
+get endpoint("/math/domain"):
+    return { "r": math.sqrt(-1) }
+
+get endpoint("/json/pretty"):
+    return text(json.stringify({ "a": [1, 2], "b": {}, "c": { "d": null } }, 2))
+
+get endpoint("/encoding/basic"):
+    return { "b64": encoding.base64_encode("hi?>"), "b64url": encoding.base64_encode("hi?>", true), "back": encoding.base64_decode("aGk/Pg=="), "hex": encoding.hex_decode(encoding.hex_encode("ok")), "url": encoding.url_decode(encoding.url_encode("a b/ñ")), "query": encoding.query_encode({ "q": "a b", "tag": ["x", "y"], "skip": null }), "parsed": encoding.query_decode("?a=1&b=x+y"), "html": encoding.html_escape("<a href='x'>") }
+
+get endpoint("/encoding/url"):
+    return { "full": encoding.url_parse("https://u@a.com:8080/p/x?q=1#top"), "relative": encoding.url_parse("/next?x=1"), "sneaky": encoding.url_parse(" /\\evil.com/x") }
+
+get endpoint("/encoding/bad_hex"):
+    return { "r": encoding.hex_decode("zz") }
+
+get endpoint("/text/basic"):
+    return { "slug": text.slug("¡Café con Leche! 2024 — Łódź"), "slug2": text.slug("Straße Æsir Œuvre"), "trunc": text.truncate("Hello world", 8), "short": text.truncate("Hi", 8), "num": text.format_number(1234567.891, 2), "num_es": text.format_number(-1234567.891, 2, ".", ","), "half_up": text.format_number(2.675, 2), "carry": text.format_number(999.995, 2), "exact": text.format_number("1234.565", 2), "int": text.format_number(1234567), "neg_zero": text.format_number(-0.001, 2), "pad": text.pad_left("7", 4, "0"), "padr": text.pad_right("ñ", 3, "."), "dist": text.distance("kitten", "sitting") }
+
+get endpoint("/state/ttl"):
+    state.remove("hits")
+    int a = state.incr("hits", 1, 200)
+    int b = state.incr("hits", 1, 200)
+    state.set("token", "abc", 200)
+    Json before = state.get("token")
+    await sleep(260)
+    int c = state.incr("hits", 1, 200)
+    return { "a": a, "b": b, "after_window": c, "before": before, "expired": state.get("token"), "default": state.get("token", "none") }
+
+get endpoint("/state/plain"):
+    state.set("k", { "x": 1 })
+    int n = state.incr("n")
+    state.decr("n", 3)
+    return { "k": state.get("k"), "n": state.get("n"), "removed": state.remove("k"), "gone": state.get("k") }
+
+get endpoint("/time/calendar"):
+    int ts = time.parse_iso("2024-01-31T15:30:00Z")
+    return { "parts": time.parts(ts), "feb": time.format_iso(time.add_months(ts, 1)), "feb_2023": time.format_iso(time.add_months(time.parse_iso("2023-01-31T00:00:00Z"), 1)), "back": time.format_iso(time.add_months(ts, -13)), "day": time.format_iso(time.start_of(ts, "day")), "week": time.format_iso(time.start_of(ts, "week")), "month": time.format_iso(time.start_of(ts, "month")), "year": time.format_iso(time.start_of(ts, "year")), "day_cet": time.format_iso(time.start_of(time.parse_iso("2024-01-31T23:30:00Z"), "day", 60)) }
+
+get endpoint("/time/ago"):
+    int now = time.parse_iso("2024-06-01T12:00:00Z")
+    return { "just": time.ago(now - 5000, now), "min": time.ago(now - 180000, now), "hour": time.ago(now - 3600000, now), "future": time.ago(now + 7200000, now), "es": time.ago(now - 3 * 86400000, now, "es"), "es_month": time.ago(now - 65 * 86400000, now, "es"), "es_future": time.ago(now + 60000, now, "es"), "ms": time.parse_iso("2024-06-01T12:00:00.5+02:00") }
+
+get endpoint("/regex/escape"):
+    string raw = "a.b-c/d(e)[f]{2}*+?^$|\\"
+    string p = regex.escape(raw)
+    return { "self": regex.test("^" + p + "$", raw), "other": regex.test("^" + p + "$", "aXb-c/d(e)[f]{2}*+?^$|\\"), "cached": regex.test("^" + p + "$", raw) }
+
+ws endpoint("/room/:id", string id) origins("http://localhost"):
+    rooms.join("room-" + id)
+    ws.send("joined")
+    while ws.open:
+        string msg = await ws.recv()
+        if msg == null:
+            break
+        if msg == "count":
+            ws.send(str(rooms.count("room-" + id)))
+        else:
+            rooms.broadcast_others("room-" + id, { "from": msg })
+    rooms.leave_all()
+
+# An sse stream in a room: a broadcast arrives as a `data:` event
+# (sse_rooms_check.py).
+sse endpoint("/news/:id", string id):
+    rooms.join("news-" + id)
+    sse.send("joined")
+    while sse.open:
+        await sleep(20)
+
+get endpoint("/news/:id/publish", string id):
+    return { "reached": rooms.broadcast("news-" + id, { "headline": "hello " + id }), "count": rooms.count("news-" + id) }
+
+get endpoint("/os/run_options"):
+    Json piped = await os.run("cat", [], { "input": "fed through stdin" })
+    Json where = await os.run("pwd", [], { "cwd": "/tmp" })
+    Json env = await os.run("sh", ["-c", "echo $LUX_T"], { "env": { "LUX_T": "set" } })
+    string slow = ""
+    try:
+        await os.run("sleep", ["5"], { "timeout_ms": 100 })
+    catch e:
+        slow = e.message
+    return { "stdin": piped["stdout"], "cwd": where["stdout"], "env": env["stdout"], "timeout": slow }
+
+get endpoint("/os/files_more"):
+    string dir = os.path_join(os.temp_dir(), "lux-files-more")
+    os.remove_dir(dir, true)
+    os.make_dir(os.path_join(dir, "sub"))
+    await os.write_file(os.path_join(dir, "a.txt"), "one")
+    await os.append_file(os.path_join(dir, "a.txt"), "+two")
+    await os.write_file(os.path_join(dir, "b.JPG"), "")
+    await os.write_file(os.path_join(dir, "sub", "c.txt"), "")
+    string tmp = os.temp_file(".pdf")
+    Json r = { "appended": await os.read_file(os.path_join(dir, "a.txt")), "glob": os.glob(os.path_join(dir, "*.txt")), "tree": os.list_dir(dir, true).sort(), "mime": os.mime("b.JPG"), "mime_unknown": os.mime("x.nope"), "ext": os.path_ext("a/b.tar.gz"), "tmp_ok": os.is_file(tmp) and tmp.ends_with(".pdf") }
+    os.remove_file(tmp)
+    os.remove_dir(dir, true)
+    return r
+
+get endpoint("/proc/stdin"):
+    int h = proc.start("cat", [], { "stdin": "pipe" })
+    int n = proc.write(h, "ping")
+    proc.write(h, null)
+    string got = await proc.read(h, 100, 2000)
+    int code = await proc.wait(h, 2000)
+    proc.close(h)
+    return { "written": n, "echo": got, "code": code }
+
+get endpoint("/net/basic"):
+    return { "in": net.ip_in("10.1.2.3", "10.0.0.0/8"), "out": net.ip_in("11.1.2.3", "10.0.0.0/8"), "list": net.ip_in("::1", ["10.0.0.0/8", "::1"]), "v6net": net.ip_in("2001:db8::5", "2001:db8::/32"), "v4_in_v6": net.ip_in("10.0.0.1", "::/0"), "bad": net.ip_in("nope", "0.0.0.0/0"), "priv": net.is_private("192.168.1.10"), "meta": net.is_private("169.254.169.254"), "pub": net.is_private("8.8.8.8"), "ula": net.is_private("fd12::1"), "v4": net.ip_version("1.2.3.4"), "v6": net.ip_version("::1"), "none": net.ip_version("1.2.3") }
+
+get endpoint("/zip/create"):
+    string dir = os.path_join(os.temp_dir(), "lux-zip-test")
+    os.make_dir(dir)
+    await os.write_file(os.path_join(dir, "a.txt"), "hello zip hello zip hello zip hello zip hello zip")
+    await os.write_file(os.path_join(dir, "b.bin"), "")
+    Json n = await zip.create(os.path_join(dir, "out.zip"), [os.path_join(dir, "a.txt"), [os.path_join(dir, "b.bin"), "../../evil/b.bin"]])
+    return { "n": n, "path": os.path_join(dir, "out.zip") }
+
+# Past 65535 entries the archive needs the ZIP64 end records.
+get endpoint("/zip/many"):
+    string dir = os.path_join(os.temp_dir(), "lux-zip-many")
+    os.make_dir(dir)
+    string src = os.path_join(dir, "a.txt")
+    await os.write_file(src, "x")
+    List<Json> items = []
+    for int i in range(70000):
+        items.add([src, "f" + str(i) + ".txt"])
+    Json n = await zip.create(os.path_join(dir, "many.zip"), items)
+    return { "n": n, "path": os.path_join(dir, "many.zip") }
+
+every "1s":
+    state.incr("every_ticks")
+
+every "1s":
+    List<Json> none = []
+    Json boom = none[5]
+
+every "200ms":
+    state.incr("every_fast")
+
+get endpoint("/every/ticks"):
+    return { "ticks": state.get("every_ticks", 0), "fast": state.get("every_fast", 0) }
+
+get endpoint("/handles"):
+    int a = csv.parse("x\n1\n")
+    int b = csv.parse("x\n2\n")
+    csv.close(a)
+    csv.close(b)
+    return { "not_small": a > 1000000 and b > 1000000, "not_sequential": b - a != 1 }
+
+get endpoint("/regex/many"):
+    int hits = 0
+    for int i in range(300):
+        if regex.test("^x" + str(i) + "$", "x" + str(i)):
+            hits = hits + 1
+    return { "hits": hits, "first_again": regex.test("^x0$", "x0") }
+
 get endpoint("/csv/basic"):
     string data = "name,age,city\nana,30,madrid\nbob,25,paris\ncleo,35,madrid\n"
     int h = csv.parse(data)
@@ -33,17 +218,29 @@ get endpoint("/csv/basic"):
     csv.close(h)
     return { "columns": cols, "rows": rows, "row_count": n }
 
-get endpoint("/csv/filter_and_aggregate"):
-    string data = "name,age,city\nana,30,madrid\nbob,25,paris\ncleo,35,madrid\n"
-    int h = csv.parse(data)
-    int madrid = csv.filter_eq(h, "city", "madrid")
-    List<Json> rows = csv.rows(madrid)
-    double total = csv.sum(h, "age")
-    double avg = csv.mean(h, "age")
-    List<Json> grouped = csv.group_sum(h, "city", "age")
-    csv.close(h)
-    csv.close(madrid)
-    return { "madrid_rows": rows, "total_age": total, "avg_age": avg, "grouped": grouped }
+fn bool in_madrid(Json r):
+    return r["city"] == "madrid"
+
+fn int add_age(int acc, Json r):
+    return acc + r["age"]
+
+get endpoint("/csv/read_and_aggregate"):
+    List<Json> rows = csv.read("name,age,city\nana,30,madrid\nbob,25,paris\ncleo,35,madrid\n")
+    List<Json> madrid = rows.filter(in_madrid)
+    return { "madrid": madrid, "total_age": rows.reduce(add_age, 0), "first": rows[0] }
+
+get endpoint("/csv/excel"):
+    List<Json> rows = csv.read("﻿nombre;precio\n\"Pérez; J.\";1,5\n", true, ";")
+    return { "rows": rows, "out": csv.write(rows, null, ";") }
+
+get endpoint("/csv/types"):
+    List<Json> rows = csv.read("zip,phone,n,f,big,neg,exp,sp,pi\n01234,+34600111222,42,2.50,1234567890123456789012,-7,1e3, 5,3.14159265358979323\n")
+    List<Json> raw = csv.read("a\n42\n", true, ",", false)
+    return { "row": rows[0], "raw": raw[0]["a"] }
+
+get endpoint("/csv/write"):
+    List<Json> rows = [{ "a": 1, "b": "x,y" }, { "a": "=cmd", "b": null }]
+    return { "dicts": csv.write(rows), "lists": csv.write([[1, 2], [3, 4]], ["p", "q"]) }
 
 get endpoint("/csv/quoted"):
     string data = "name,note\n\"Smith, John\",\"He said \"\"hi\"\"\"\nplain,ok\n"
@@ -263,8 +460,8 @@ get endpoint("/regex/bad_pattern"):
 # does not have -- verified by hand instead (see the module's own comment
 # in modules/base_modules/rooms.cpp). What a plain GET *can* check: an
 # empty/unknown room behaves like "nobody home" rather than an error, and
-# join()/leave()/leave_all() refuse to run outside a ws route instead of
-# dereferencing a null connection.
+# join()/leave()/leave_all() refuse to run outside a ws or sse route instead
+# of dereferencing a null connection.
 get endpoint("/rooms/count_empty"):
     return { "n": rooms.count("nobody-here") }
 

@@ -1,26 +1,18 @@
 # reproductor.lux — Órdenes del reproductor y lo que se publica hacia fuera.
 #
-# Un dueño por cada dato:
-#   - El backend decide QUÉ suena: pista, cola, estado deseado (sonando /
-#     pausa), volumen, repetición, aleatorio e historial. Todo cambio pasa por
-#     mutar_estado() (queue.lux) y sube `revision`; el cliente descarta
-#     cualquier respuesta con una revision más vieja que la última aplicada.
-#   - El motor de audio del cliente (public/src/ipc/motor-audio.js) es el
-#     único dueño del SONIDO y del TIEMPO. El backend solo lo mueve estrenando
-#     un `cue` (queue.lux: cuear): "carga esta pista / colócate aquí". El
-#     cliente aplica cada cue una vez, y todo lo que informa lleva el cue en
-#     el que estaba, así que un informe atrasado de la canción anterior nunca
-#     se aplica a la siguiente.
-#   - La posición se ANCLA: el motor informa del instante de época en que la
-#     posición 0 habría sonado (al empezar de verdad, al saltar y cada pocos
-#     segundos). La posición es entonces "ahora − ancla" para cualquiera que
-#     la lea desde fuera (la tarjeta, MPRIS, Discord), sin re-anclar en cada
-#     informe.
+# El backend es el único dueño del reproductor (como en el original, donde la
+# lógica vivía en Rust y la interfaz solo pintaba y emitía órdenes):
+#   - decide QUÉ suena (pista, cola, sonando/pausa, volumen, repetición,
+#     aleatorio, historial). Todo cambio pasa por mutar_estado() (queue.lux) y
+#     sube `revision`; las pistas nuevas o los saltos estrenan un `cue`.
+#   - el motor de audio nativo (audio_engine.cpp, módulo `audio`) toca lo que
+#     el estado dice: motor_sincronizar() (motor.lux) aplica cada cue una vez.
+#     La posición que ve la interfaz es la del motor, lo que se oye.
 #
-# Toda orden -- de la interfaz, del menú nativo, de la bandeja, de MPRIS o de
-# la tarjeta del escritorio -- entra por reproductor_orden(): muta, anota la
-# escucha, publica en MPRIS/Discord y despierta a la ventana. Antes cada
-# entrada tenía su copia y cada copia hacía una parte distinta.
+# Toda orden -- de la interfaz, del menú nativo, de la bandeja, de MPRIS, de la
+# tarjeta del escritorio o del propio motor cuando acaba una pista -- entra por
+# reproductor_orden(): muta, anota la escucha, mueve el motor y publica en
+# MPRIS/Discord.
 
 # ─── Estado para la interfaz ─────────────────────────────────────────────────
 
@@ -88,16 +80,15 @@ fn void escucha_cerrar():
     state.remove("escucha_ms")
     state.remove("escucha_t")
 
-# Lo escuchado de `e.track_id` cuando la orden no trae la cifra del motor:
-# lo último informado más lo que ha sonado desde entonces; sin informe
-# (la pista acaba de empezar), la posición.
+# Lo escuchado de `e.track_id` hasta ahora: lo que el motor lleva sonado de
+# verdad (sin pausas ni saltos). Si el motor no tiene esa pista (todavía no se
+# cargó, o se descargaba), la posición.
 fn int escucha_estimada(EstadoCola e):
-    if state.get("escucha_pista", "") != e.track_id:
-        return posicion_viva(e)
-    int ms = int(state.get("escucha_ms", "0"))
-    if e.status == "playing":
-        ms = ms + time.now() - int(state.get("escucha_t", "0"))
-    return ms
+    if e.track_id != "":
+        Json st = audio.status()
+        if jstr(st["trackId"], "") == e.track_id:
+            return jint(st["listenedMs"], 0)
+    return posicion_viva(e)
 
 # La interfaz repinta las estadísticas cuando cambia este sello (events.lux).
 fn void marcar_estadisticas():
@@ -107,12 +98,15 @@ fn void marcar_estadisticas():
 
 fn Json reproductor_orden(string orden, Json args):
     EstadoCola antes = leer_estado()
-    # Posición que el motor tenía al dar la orden (-1: la orden viene de
-    # fuera de la ventana y no la trae; entonces manda el ancla).
-    int pos_motor = jint(jget(args, "__posMs"), -1)
+    if orden == "position":
+        # Consulta barata (la vista de "ahora suena" la pide a 4 Hz): no muta nada.
+        int dur = jint(jget(audio.status(), "durationMs"), 0)
+        int pos = posicion_viva(antes)
+        return { "positionMs": pos, "bufferedMs": dur > 0 ? dur : pos }
+    # Lo escuchado hasta ahora. Un aviso del motor (handoff/ended) trae el
+    # suyo: para entonces el motor ya cambió de pista.
     int escuchado = jint(jget(args, "__listenedMs"), -1)
-    bool del_motor = escuchado >= 0
-    if not del_motor:
+    if escuchado < 0:
         escuchado = escucha_estimada(antes)
     bool natural = false
 
@@ -125,9 +119,9 @@ fn Json reproductor_orden(string orden, Json args):
         set_contexto(str(ctx), pistas_de_contexto_dto(ctx, track_id), track_id)
         mutar_estado("set_track", track_id, "", 0)
     elif orden == "toggle":
-        mutar_estado("toggle", "", "", pos_motor)
+        mutar_estado("toggle", "", "", -1)
     elif orden == "pause":
-        mutar_estado("pause", "", "", pos_motor)
+        mutar_estado("pause", "", "", -1)
     elif orden == "resume":
         mutar_estado("resume", "", "", 0)
     elif orden == "next":
@@ -143,8 +137,7 @@ fn Json reproductor_orden(string orden, Json args):
         mutar_estado("avanzar", "natural", "", 0)
     elif orden == "previous":
         # Regla de los 3 s de Spotify: por encima, reinicia la actual.
-        int donde = pos_motor >= 0 ? pos_motor : posicion_viva(antes)
-        if donde > 3000:
+        if posicion_viva(antes) > 3000:
             mutar_estado("seek", "", "", 0)
         else:
             mutar_estado("retroceder", "", "", 0)
@@ -166,54 +159,23 @@ fn Json reproductor_orden(string orden, Json args):
     if antes.track_id != "" and (cambio_pista or (natural and despues.cue != antes.cue)):
         escucha_progreso(antes.track_id, escuchado, antes.context)
         escucha_cerrar()
-    elif del_motor:
+    else:
         escucha_progreso(antes.track_id, escuchado, antes.context)
     if cambio_pista and despues.track_id != "":
         asegurar_descarga(despues.track_id, "immediate")
+    # Cuando el motor ya está tocando la pista a la que la cola acaba de
+    # avanzar (relevo gapless/crossfade), se adopta tal cual: ni recargar ni
+    # saltar. Si la cola no coincide con lo que el motor eligió (cambió entre
+    # medias), motor_sincronizar carga la que toca.
+    string entra = jstr(jget(args, "__entra"), "")
+    if orden == "ended" and entra != "" and despues.track_id == entra:
+        state.set("motor_clave", str(despues.cue) + ":" + despues.track_id)
+    motor_sincronizar(despues)
     if despues.revision != antes.revision:
         publicar_integraciones()
-        despertar_ventana()
     return estado_dto()
 
-# Informe del motor: dónde está de verdad y cuánto lleva sonado. No es una
-# decisión (no sube revision ni despierta a nadie), y solo se acepta del cue
-# vigente mientras suena: un informe que llega tarde de la canción anterior,
-# o después de una pausa, no pisa nada.
-fn void reproductor_informe(Json args):
-    EstadoCola e = leer_estado()
-    if jint(jget(args, "cue"), -1) != e.cue or e.status != "playing":
-        return
-    await sqlite.exec("update player_state set position_ms = ?, anchor_ms = ? where id = 1 and cue = ?",
-        jint(jget(args, "positionMs"), 0), jint(jget(args, "anchorMs"), 0), e.cue)
-    int escuchado = jint(jget(args, "listenedMs"), -1)
-    # Otra vez el cue: una orden que cambió de pista mientras tanto ya cerró
-    # esta escucha, y este informe la reabriría duplicada.
-    if escuchado >= 0 and leer_estado().cue == e.cue:
-        escucha_progreso(e.track_id, escuchado, e.context)
-    publicar_integraciones()
-
-# Lo que sonaría al terminar la actual, para que el motor lo precargue
-# (gapless/crossfade). Si aún no está descargado, se pide en segundo plano:
-# para cuando termine la actual, con suerte ya está.
-fn Json reproductor_siguiente():
-    EstadoCola e = leer_estado()
-    string id = pista_siguiente_natural(e)
-    if id == "":
-        return { "trackId": null, "available": false, "cue": e.cue }
-    List<Json> f = await sqlite.query("select 1 as ok from audio_files where track_id = ?", id)
-    bool disponible = len(f) > 0
-    if not disponible:
-        asegurar_descarga(id, "prefetch")
-    return { "trackId": id, "available": disponible, "cue": e.cue }
-
 # ─── Hacia fuera ─────────────────────────────────────────────────────────────
-
-# Hace que la ventana pida el estado YA. Su propio sondeo va a 1 s, y
-# WebKitGTK lo frena a varios segundos con la ventana minimizada: una pausa
-# desde las teclas multimedia tardaba eso en callar la música. Esto se
-# ejecuta aunque la ventana esté oculta.
-fn void despertar_ventana():
-    window.eval_js("window.__localifyDespertar && window.__localifyDespertar()")
 
 # URL PÚBLICA de la carátula: la del álbum (i.scdn.co, lh3.googleusercontent),
 # o la miniatura del vídeo si no hay álbum con portada. Tiene que ser pública:

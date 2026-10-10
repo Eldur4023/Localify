@@ -70,7 +70,6 @@ fn string? portada_album_url_fallback(string album_id):
 
 # Portada de álbum: la suya, o la miniatura de una de sus pistas con vídeo.
 fn Json? portada_album_respuesta(string id):
-    db_init()
     string destino = os.path_join(covers_dir(), "album-" + id + ".jpg")
     string? url = portada_album_url(id)
     if url == null:
@@ -84,7 +83,6 @@ fn Json? portada_album_respuesta(string id):
     return send_file(destino, covers_dir())
 
 get endpoint("/api/cover/track/:id", string id):
-    db_init()
     string destino = os.path_join(covers_dir(), "track-" + id + ".jpg")
     # La portada del álbum es más fiable que la miniatura del vídeo: muchas
     # miniaturas de "audio oficial" traen la carátula centrada sobre un
@@ -111,7 +109,6 @@ get endpoint("/api/cover/track/:id", string id):
 
 # Portada de playlist: la sube el usuario (multipart) o se borra.
 post endpoint("/api/cover/playlist/:id", string id, File imagen):
-    db_init()
     string d = covers_dir()
     # save() escribe con nombre seguro y devuelve el nombre final
     string nombre = imagen.save(d)
@@ -146,11 +143,9 @@ fn Json? portada_playlist_respuesta(string id):
     return status(404)
 
 get endpoint("/api/cover/playlist/:id", string id):
-    db_init()
     return await portada_playlist_respuesta(id)
 
 delete endpoint("/api/cover/playlist/:id", string id):
-    db_init()
     await sqlite.exec("update playlists set cover_path = null, updated_at = unixepoch() where id = ?", id)
     os.remove_file(os.path_join(covers_dir(), "playlist-" + id + ".jpg"))
     return { "ok": true }

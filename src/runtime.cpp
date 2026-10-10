@@ -265,37 +265,6 @@ int main(int argc, char** argv) {
     }
 
     lux::App app;
-    app.set_templates(mod->program.app.templates_dir);
-    for (const auto& m : mod->program.app.statics)
-        app.serve_static(m.url_prefix, m.fs_root, m.spa);
-
-    auto dispatch = [mod](lux::Request& req, lux::Response& res) -> lux::Task<void> {
-        auto match = mod->router.match(req.method, req.path);
-        if (!match.found) {
-            res.status(404).json_text(R"({"error":"Not Found"})");
-            co_return;
-        }
-        req.params = std::move(match.params);
-        co_await match.handler(req, res);
-    };
-    app.any("/",  dispatch);
-    app.any("/*", dispatch);
-
-    app.on_error([mod](int code, lux::Request& req, lux::Response& res) {
-        auto it = mod->error_handlers.find(code);
-        if (it == mod->error_handlers.end()) it = mod->error_handlers.find(0);
-        if (it == mod->error_handlers.end()) return;
-        lux_script::NativeCtx ctx{req, res};
-        ctx.error_code    = code;
-        ctx.error_message = res.status_code() >= 500 ? "internal error" : "invalid request";
-        lux_script::VM vm;
-        auto result = vm.start(*it->second, {}, ctx, &mod->functions, nullptr);
-        if (result.status == lux_script::VM::Status::Done &&
-            !ctx.response_written && !result.value.is_null())
-            res.header("Content-Type", "application/json; charset=utf-8")
-               .send(result.value.to_json_text());
-        res.status(code);
-    });
 
     uint16_t port = find_free_port();
 
@@ -303,13 +272,16 @@ int main(int argc, char** argv) {
     // desktop "quit" action, systemd stop...) starts the shutdown before
     // the user closes the window by hand -- otherwise the server drains but
     // the window stays open with nothing behind it.
-    app.on_before_stop([] {
+    serve_module(app, [mod] { return mod; }, [] {
         std::lock_guard<std::mutex> lk(g_window_mutex);
         if (g_window) {
             g_shutdown_from_signal.store(true);
             g_window->terminate();
         }
     });
+
+    // Before the server starts: `on start:` blocks and the first `every` ticks already call audio.*.
+    install_audio_hooks();
 
     std::thread server_thread([&app, port] { app.run("127.0.0.1", port); });
     if (!wait_for_server(port, std::chrono::milliseconds(5000)))
@@ -347,6 +319,7 @@ int main(int argc, char** argv) {
     window.run("http://127.0.0.1:" + std::to_string(port) + "/");
     luxdesktop::mpris_shutdown();
     luxdesktop::discord_shutdown();
+    luxdesktop::shutdown_audio();
     save_geometry(app_id, window.last_width(), window.last_height());
     std::error_code ec;
     fs::remove("./port", ec);

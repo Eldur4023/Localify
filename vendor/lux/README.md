@@ -1,12 +1,12 @@
 # Lux
 
-![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?style=flat&logo=cplusplus&logoColor=white)
+![C++23](https://img.shields.io/badge/C%2B%2B-23-00599C?style=flat&logo=cplusplus&logoColor=white)
 ![CMake](https://img.shields.io/badge/CMake-3.20%2B-064F8C?style=flat&logo=cmake&logoColor=white)
 ![Linux only](https://img.shields.io/badge/platform-Linux-FCC624?style=flat&logo=linux&logoColor=black)
 ![Binary size](https://img.shields.io/badge/binary-1.5_MB-informational?style=flat)
 ![Tests](https://img.shields.io/badge/tests-246_passing-brightgreen?style=flat)
 
-Lux is a web framework focused on giving both performance and a simple and easy developer experience. Its core is written in C++20, but the programming itself is done in LuxScript, a language made exclusively for the Lux framework.
+Lux is a web framework focused on giving both performance and a simple and easy developer experience. Its core is written in C++23, but the programming itself is done in LuxScript, a language made exclusively for the Lux framework.
 
 
 # So... Do I have to learn a new language?
@@ -318,8 +318,8 @@ that's the reverse proxy's job. Also no user-defined generic classes: `List<T>` 
 
 ## Build
 
-Requires **Linux** since I use epoll, `sendfile(2)` and `SO_REUSEPORT`. **CMake 3.20+** and **C++20**
-(GCC 11+ or Clang 13+).
+Requires **Linux** since I use epoll, `sendfile(2)` and `SO_REUSEPORT`. **CMake 3.20+** and **C++23**
+(GCC 12+ or Clang 14+).
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -408,6 +408,21 @@ compiler needs to know about.
 The full walkthrough — including what changes if the module needs a third-party library,
 which is the one case that still needs a few lines of `CMakeLists.txt` by hand — is in
 [NATIVE-MODULES.md](NATIVE-MODULES.md) and [src/lux_script/modules/README.md](src/lux_script/modules/README.md).
+
+---
+
+## Lux Desktop
+
+An Electron/Tauri equivalent, built as a separate project on top of Lux:
+[**Lux Desktop**](https://github.com/Eldur4023/Lux-Local). A native GTK3 +
+WebKitGTK window instead of a bundled Chromium, LuxScript instead of Node,
+and a build that produces one native binary — compile it, run it, the
+window opens. Window title/size/icon, native menus (nested submenus,
+checkboxes, keyboard accelerators), a system tray icon, file dialogs,
+clipboard access and desktop notifications are all plain LuxScript, via a
+drop-in `window` native module — no changes to Lux's own grammar or
+compiler. Lux itself is vendored there as plain source and used purely as
+a library.
 
 ---
 

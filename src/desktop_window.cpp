@@ -81,17 +81,6 @@ void DesktopWindow::reload() {
         nullptr);
 }
 
-void DesktopWindow::eval_js(const std::string& js) {
-    auto* copy = new std::string(js);
-    webview_dispatch(static_cast<webview_t>(handle_),
-        [](webview_t w, void* arg) {
-            auto* s = static_cast<std::string*>(arg);
-            webview_eval(w, s->c_str());
-            delete s;
-        },
-        copy);
-}
-
 void DesktopWindow::minimize() {
     webview_dispatch(static_cast<webview_t>(handle_),
         [](webview_t w, void*) {

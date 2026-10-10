@@ -63,7 +63,12 @@ class BlockingPool {
 public:
     ~BlockingPool();
 
-    void start(size_t core_workers, size_t max_workers = 0);
+    // stall > 0: grow only once no worker has taken a job for that long -- the
+    // workers are stuck, not just busy. A CPU-saturated pool finishing jobs
+    // steadily gains nothing from more threads but time-slicing: 50
+    // connections of /cpu kept 16 threads on 8 cores and doubled the p99.
+    void start(size_t core_workers, size_t max_workers = 0,
+               std::chrono::milliseconds stall = {});
     void submit(std::function<void()> job);
     void stop();
 
@@ -86,6 +91,8 @@ private:
     size_t                             max_workers_  = 0;
     size_t                             live_workers_ = 0;  // core + overflow, mutex-guarded
     size_t                             idle_workers_ = 0;  // currently waiting for a job
+    std::chrono::milliseconds             stall_{};
+    std::chrono::steady_clock::time_point last_taken_;      // mutex-guarded
 };
 
 // One pool for the whole process -- every event loop's synchronous routes
@@ -93,6 +100,30 @@ private:
 // get picked up by an idle worker instead of queuing behind requests already
 // running on that loop.
 BlockingPool& blocking_pool();
+
+// A SEPARATE pool, sized much larger, for `await <module>.<fn>()` calls into
+// an is_async native module function (os.run(), http.*, read_file(),
+// write_file() -- see run_builtin_module_async(), project.cpp). These are
+// not the CPU-bound work blocking_pool() above is sized for: a worker
+// running os.run() spends nearly all of its time inside poll()/read()/
+// waitpid(), blocked on a subprocess or a remote server, not competing for
+// a CPU core -- os.run() alone can legitimately hold a worker for up to 15
+// real seconds (kRunTimeoutMs, os.cpp) waiting on a child process that is
+// itself just sleeping or waiting on the network. Sharing blocking_pool()'s
+// small, deliberately CPU-count-sized worker budget (see its own comment)
+// for this meant a burst of a few dozen concurrent os.run()/http.* calls
+// exhausted every worker for the FULL DURATION of the slowest one, and
+// every OTHER request needing that same pool -- including a trivial
+// no-`await` route on a completely unrelated connection, or another
+// os.run() call that would itself have finished in milliseconds -- queued
+// up behind them: confirmed against the real binary, 40 concurrent
+// `os.run("sleep", ["4"])` calls made an unrelated `os.run("echo", ["hi"])`
+// take 3.5-11s instead of ~1ms. A pool sized for "mostly blocked on I/O,
+// not CPU" work can and should run far more workers than there are cores,
+// the same way a thread spending 99% of its time in read() costs almost
+// nothing to oversubscribe -- see io_blocking_pool_start() (app.cpp) for
+// the actual cap.
+BlockingPool& io_blocking_pool();
 
 // ─── BlockingAwaitable ───────────────────────────────────────────────────────
 //
@@ -108,6 +139,15 @@ BlockingPool& blocking_pool();
 struct BlockingAwaitable {
     core::EventLoop*     loop;
     std::function<void()> work;
+    // Which pool to submit to. Defaults to blocking_pool() (the CPU-bound
+    // one) so every EXISTING caller -- a no-`await` route/chunk -- keeps
+    // using exactly that pool with no change. run_builtin_module_async()
+    // (project.cpp) passes &io_blocking_pool() instead, since an is_async
+    // native module call is I/O-bound, not CPU-bound -- see
+    // io_blocking_pool()'s comment above for why that split exists at all.
+    BlockingPool*         pool = nullptr;
+
+    BlockingPool& target() const { return pool ? *pool : blocking_pool(); }
 
     // If nobody has started the pool -- App::listen() always does before
     // serving real traffic, but an embedder calling into lux_script
@@ -120,7 +160,7 @@ struct BlockingAwaitable {
     // required. That guarantee is exactly what several tests (see
     // tests/native_route_shadow.cpp) are built on.
     bool await_ready() {
-        if (blocking_pool().size() == 0) {
+        if (target().size() == 0) {
             work();
             return true;
         }
@@ -129,8 +169,7 @@ struct BlockingAwaitable {
 
     void await_suspend(std::coroutine_handle<> h) {
         auto* l = loop;
-        auto  w = work;
-        blocking_pool().submit([l, h, w]() mutable {
+        target().submit([l, h, w = std::move(work)]() mutable {
             w();
             l->post([h]() mutable { h.resume(); });
         });

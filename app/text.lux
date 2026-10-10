@@ -15,7 +15,7 @@ fn List<string> diacriticos():
 # cualquier signo ASCII (Rust usaba is_alphanumeric(); lo no latino que NO
 # está aquí —cirílico, kana, kanji— atraviesa como letra).
 fn List<string> separadores_unicode():
-    return ["–", "—", "'", "'", "\"", "\"", "…", "‹", "›", "«", "»", "·", "♪", "♫", "♥", "★", "©", "™", "®", "✓", "¿", "¡", "¦", "§", "¨", "¯", "´", "¸", "×", "÷", "¬", "°", "±", "¶", "¤", "¢", "£", "¥", "€"]
+    return ["–", "—", "‘", "’", "“", "”", "…", "‹", "›", "«", "»", "·", "♪", "♫", "♥", "★", "©", "™", "®", "✓", "¿", "¡", "¦", "§", "¨", "¯", "´", "¸", "×", "÷", "¬", "°", "±", "¶", "¤", "¢", "£", "¥", "€"]
 
 # Los 95 imprimibles ASCII (32..126): un byte que esté aquí y no en la lista
 # alfanumérica es signo, y por tanto separador.
@@ -25,12 +25,22 @@ fn string tabla_ascii_127():
 fn bool ascii_printable(string c):
     return tabla_ascii_127().index_of(c) >= 0
 
+# Ojo con Lux: len() de un string cuenta CARACTERES (UTF-8), pero slice() e
+# index_of() trabajan en BYTES. Todo bucle que recorra un texto con slice()
+# necesita el largo en bytes; con len() se quedaba corto en cuanto había un
+# carácter no ASCII ("… yokohama arena" salía "… yokohama").
+fn int largo_bytes(string s):
+    int n = len(s)
+    while s.slice(n, n + 1) != "":
+        n = n + 1
+    return n
+
 # Longitud de la secuencia UTF-8 que empieza en `i`: bytes consecutivos que no
 # son ASCII imprimible ni tab/salto (aproximación suficiente — los controles
 # ASCII sueltos son inexistentes en títulos reales).
 fn int largo_utf8(string s, int i):
     int j = i
-    int n = len(s)
+    int n = largo_bytes(s)
     int largo = 0
     while j < n and largo < 4:
         string b = s.slice(j, j + 1)
@@ -65,7 +75,7 @@ fn string normalizar(string entrada):
     string alfa = "abcdefghijklmnopqrstuvwxyz0123456789"
     string out = ""
     bool espacio_pendiente = false
-    int n = len(sin)
+    int n = largo_bytes(sin)
     int i = 0
     while i < n:
         string c = sin.slice(i, i + 1)
@@ -153,8 +163,8 @@ fn double similitud(string a, string b):
     if a == "" or b == "":
         return 0.0
 
-    int la = len(a)
-    int lb = len(b)
+    int la = largo_bytes(a)
+    int lb = largo_bytes(b)
     # Ojo: '/' es división real (double) y el tipo declarado no convierte en
     # runtime — int() explícito para que range() reciba enteros.
     int ventana = int((la > lb ? la : lb) / 2) - 1

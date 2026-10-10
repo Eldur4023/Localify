@@ -1,10 +1,14 @@
 #include <lux_script/crypto.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <sys/random.h>
+#if defined(__x86_64__)
+#include <immintrin.h>
+#endif
 
 namespace lux_script::crypto {
 
@@ -28,7 +32,7 @@ constexpr uint32_t kK[64] = {
 
 inline uint32_t rotr(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
 
-void compress(uint32_t h[8], const uint8_t block[64]) {
+void compress_soft(uint32_t h[8], const uint8_t block[64]) {
     uint32_t w[64];
     for (int i = 0; i < 16; ++i) {
         w[i] = (uint32_t(block[i * 4]) << 24) | (uint32_t(block[i * 4 + 1]) << 16) |
@@ -61,13 +65,59 @@ void compress(uint32_t h[8], const uint8_t block[64]) {
     h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
 }
 
+#if defined(__x86_64__)
+// SHA-256 on the CPU's SHA extensions (SHA-NI): several times the portable
+// rounds above. Picked at run time, so the binary still runs on CPUs without.
+__attribute__((target("sha,sse4.1,ssse3")))
+void compress_ni(uint32_t h[8], const uint8_t block[64]) {
+    const __m128i mask = _mm_set_epi64x(0x0c0d0e0f08090a0bULL, 0x0405060700010203ULL);
+    __m128i tmp    = _mm_shuffle_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(h)), 0xB1);
+    __m128i state1 = _mm_shuffle_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(h + 4)), 0x1B);
+    __m128i state0 = _mm_alignr_epi8(tmp, state1, 8);   // ABEF
+    state1         = _mm_blend_epi16(state1, tmp, 0xF0); // CDGH
+    const __m128i save0 = state0, save1 = state1;
+
+    __m128i m[4];
+    for (int i = 0; i < 4; ++i)
+        m[i] = _mm_shuffle_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(block + 16 * i)), mask);
+    for (int r = 0; r < 16; ++r) {
+        __m128i msg = _mm_add_epi32(m[r & 3], _mm_loadu_si128(reinterpret_cast<const __m128i*>(kK + 4 * r)));
+        state1 = _mm_sha256rnds2_epu32(state1, state0, msg);
+        state0 = _mm_sha256rnds2_epu32(state0, state1, _mm_shuffle_epi32(msg, 0x0E));
+        if (r < 12) {   // the next four schedule words replace the ones just used
+            __m128i t = _mm_add_epi32(_mm_sha256msg1_epu32(m[r & 3], m[(r + 1) & 3]),
+                                      _mm_alignr_epi8(m[(r + 3) & 3], m[(r + 2) & 3], 4));
+            m[r & 3] = _mm_sha256msg2_epu32(t, m[(r + 3) & 3]);
+        }
+    }
+    state0 = _mm_add_epi32(state0, save0);
+    state1 = _mm_add_epi32(state1, save1);
+    tmp    = _mm_shuffle_epi32(state0, 0x1B);
+    state1 = _mm_shuffle_epi32(state1, 0xB1);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(h), _mm_blend_epi16(tmp, state1, 0xF0));
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(h + 4), _mm_alignr_epi8(state1, tmp, 8));
+}
+const auto compress_impl = __builtin_cpu_supports("sha") && __builtin_cpu_supports("sse4.1") ? compress_ni : compress_soft;
+#else
+const auto compress_impl = compress_soft;
+#endif
+
+void compress(uint32_t h[8], const uint8_t block[64]) { compress_impl(h, block); }
+
 constexpr size_t kBlock = 64;
 
 } // namespace
 
-std::string sha256(std::string_view data) {
-    uint32_t h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-                     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+namespace {
+constexpr uint32_t kIV[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                             0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+
+// Finishes a hash whose state `h` has already absorbed `prefix` bytes (a
+// multiple of the block): the IV and 0 for a plain sha256, a precomputed
+// HMAC pad for pbkdf2_sha256.
+std::string sha256_from(const uint32_t start[8], size_t prefix, std::string_view data) {
+    uint32_t h[8];
+    std::memcpy(h, start, sizeof h);
 
     const auto* p   = reinterpret_cast<const uint8_t*>(data.data());
     size_t      len = data.size();
@@ -82,7 +132,7 @@ std::string sha256(std::string_view data) {
     tail[rest] = 0x80;
 
     size_t tail_len = (rest + 1 + 8 <= kBlock) ? kBlock : 2 * kBlock;
-    uint64_t bits   = static_cast<uint64_t>(len) * 8;
+    uint64_t bits   = static_cast<uint64_t>(prefix + len) * 8;
     for (int i = 0; i < 8; ++i)
         tail[tail_len - 1 - static_cast<size_t>(i)] =
             static_cast<uint8_t>((bits >> (8 * i)) & 0xFF);
@@ -98,23 +148,157 @@ std::string sha256(std::string_view data) {
     }
     return out;
 }
+} // namespace
+
+std::string sha256(std::string_view data) { return sha256_from(kIV, 0, data); }
+
+std::string sha1(std::string_view data) {
+    auto rol = [](uint32_t v, int n) { return (v << n) | (v >> (32 - n)); };
+    uint32_t h[5] = {0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0};
+    std::string m(data);
+    m += '\x80';
+    while (m.size() % 64 != 56) m += '\0';
+    const uint64_t bits = uint64_t(data.size()) * 8;
+    for (int s = 56; s >= 0; s -= 8) m += static_cast<char>(bits >> s);
+    for (size_t off = 0; off < m.size(); off += 64) {
+        uint32_t w[80];
+        for (int i = 0; i < 16; ++i)
+            w[i] = (uint32_t(uint8_t(m[off + i * 4])) << 24) | (uint32_t(uint8_t(m[off + i * 4 + 1])) << 16) |
+                   (uint32_t(uint8_t(m[off + i * 4 + 2])) << 8) | uint32_t(uint8_t(m[off + i * 4 + 3]));
+        for (int i = 16; i < 80; ++i) w[i] = rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+        uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
+        for (int i = 0; i < 80; ++i) {
+            uint32_t f, k;
+            if      (i < 20) { f = (b & c) | (~b & d);           k = 0x5A827999; }
+            else if (i < 40) { f = b ^ c ^ d;                    k = 0x6ED9EBA1; }
+            else if (i < 60) { f = (b & c) | (b & d) | (c & d);  k = 0x8F1BBCDC; }
+            else             { f = b ^ c ^ d;                    k = 0xCA62C1D6; }
+            uint32_t t = rol(a, 5) + f + e + k + w[i];
+            e = d; d = c; c = rol(b, 30); b = a; a = t;
+        }
+        h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
+    }
+    std::string out;
+    for (uint32_t v : h) for (int s = 24; s >= 0; s -= 8) out += static_cast<char>(v >> s);
+    return out;
+}
+
+std::string hmac_sha1(std::string_view key, std::string_view message) {
+    std::string k(key);
+    if (k.size() > 64) k = sha1(k);
+    k.resize(64, '\0');
+    std::string ipad(64, '\0'), opad(64, '\0');
+    for (size_t i = 0; i < 64; ++i) { ipad[i] = k[i] ^ 0x36; opad[i] = k[i] ^ 0x5c; }
+    return sha1(opad + sha1(ipad + std::string(message)));
+}
+
+std::string base32_encode(std::string_view raw) {
+    static constexpr char kAlpha[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    std::string out;
+    uint32_t buf = 0; int bits = 0;
+    for (unsigned char ch : raw) {
+        buf = (buf << 8) | ch; bits += 8;
+        while (bits >= 5) { out += kAlpha[(buf >> (bits - 5)) & 31]; bits -= 5; }
+    }
+    if (bits > 0) out += kAlpha[(buf << (5 - bits)) & 31];
+    return out;
+}
+
+bool base32_decode(std::string_view text, std::string& out) {
+    out.clear();
+    uint32_t buf = 0; int bits = 0;
+    for (char ch : text) {
+        int v;
+        if (ch >= 'A' && ch <= 'Z') v = ch - 'A';
+        else if (ch >= 'a' && ch <= 'z') v = ch - 'a';
+        else if (ch >= '2' && ch <= '7') v = ch - '2' + 26;
+        else if (ch == ' ' || ch == '=' || ch == '-') continue;
+        else return false;
+        buf = (buf << 5) | uint32_t(v); bits += 5;
+        if (bits >= 8) { out += static_cast<char>((buf >> (bits - 8)) & 0xFF); bits -= 8; }
+    }
+    return true;
+}
 
 std::string hmac_sha256(std::string_view key, std::string_view message) {
-    // RFC 2104: a key longer than the block is replaced by its hash.
-    std::string k(key);
+    // RFC 2104: a key longer than the block is replaced by its hash. The two
+    // padded-key blocks are compressed once per key, not per call: a JWT
+    // secret never changes, and this halves the compressions of a short
+    // message. ponytail: 4 keys per thread, round-robin; a fifth just
+    // recomputes, as every call used to.
+    struct Pads { std::string key; uint32_t inner[8], outer[8]; bool used = false; };
+    thread_local Pads cache[4];
+    thread_local size_t next = 0;
+    Pads* p = nullptr;
+    for (auto& c : cache) if (c.used && c.key == key) { p = &c; break; }
+    if (!p) {
+        p = &cache[next++ % 4];
+        std::string k(key);
+        if (k.size() > kBlock) k = sha256(k);
+        k.resize(kBlock, '\0');
+        uint8_t ipad[kBlock], opad[kBlock];
+        for (size_t i = 0; i < kBlock; ++i) {
+            ipad[i] = static_cast<uint8_t>(k[i]) ^ 0x36;
+            opad[i] = static_cast<uint8_t>(k[i]) ^ 0x5c;
+        }
+        std::memcpy(p->inner, kIV, sizeof p->inner); compress(p->inner, ipad);
+        std::memcpy(p->outer, kIV, sizeof p->outer); compress(p->outer, opad);
+        p->key.assign(key);
+        p->used = true;
+    }
+    return sha256_from(p->outer, kBlock, sha256_from(p->inner, kBlock, message));
+}
+
+std::string pbkdf2_sha256(std::string_view password, std::string_view salt,
+                          unsigned iterations, size_t length) {
+    // HMAC with its two padded-key blocks compressed once, up front: every
+    // iteration then costs two compressions instead of four.
+    std::string k(password);
     if (k.size() > kBlock) k = sha256(k);
     k.resize(kBlock, '\0');
-
-    std::string inner(kBlock, '\0'), outer(kBlock, '\0');
+    uint8_t  ipad[kBlock], opad[kBlock];
+    uint32_t inner[8], outer[8];
     for (size_t i = 0; i < kBlock; ++i) {
-        inner[i] = static_cast<char>(static_cast<uint8_t>(k[i]) ^ 0x36);
-        outer[i] = static_cast<char>(static_cast<uint8_t>(k[i]) ^ 0x5c);
+        ipad[i] = static_cast<uint8_t>(k[i]) ^ 0x36;
+        opad[i] = static_cast<uint8_t>(k[i]) ^ 0x5c;
     }
+    std::memcpy(inner, kIV, sizeof inner); compress(inner, ipad);
+    std::memcpy(outer, kIV, sizeof outer); compress(outer, opad);
+    auto hmac = [&](std::string_view m) { return sha256_from(outer, kBlock, sha256_from(inner, kBlock, m)); };
+    // One HMAC of a 32-byte value, in words, no allocation: two compressions of a
+    // block that is the value, 0x80, zeros and the length (64 + 32 bytes = 768 bits).
+    auto hmac32 = [&](const uint32_t in[8], uint32_t out[8]) {
+        uint8_t blk[kBlock] = {};
+        auto fill = [&](const uint32_t v[8]) {
+            for (int i = 0; i < 8; ++i)
+                for (int b = 0; b < 4; ++b) blk[i * 4 + b] = static_cast<uint8_t>(v[i] >> (24 - 8 * b));
+        };
+        fill(in);
+        blk[32] = 0x80; blk[62] = 0x03; blk[63] = 0x00;   // 768 = 0x0300
+        uint32_t h[8]; std::memcpy(h, inner, sizeof h); compress(h, blk);
+        fill(h);
+        std::memcpy(out, outer, sizeof h); compress(out, blk);
+    };
 
-    inner.append(message);
-    std::string inner_hash = sha256(inner);
-    outer.append(inner_hash);
-    return sha256(outer);
+    std::string out;
+    for (uint32_t block = 1; out.size() < length; ++block) {
+        std::string first(salt);
+        for (int s = 24; s >= 0; s -= 8) first += static_cast<char>((block >> s) & 0xFF);
+        const std::string u0 = hmac(first);
+        uint32_t u[8], t[8];
+        for (int i = 0; i < 8; ++i)
+            u[i] = (uint32_t(uint8_t(u0[i * 4])) << 24) | (uint32_t(uint8_t(u0[i * 4 + 1])) << 16) |
+                   (uint32_t(uint8_t(u0[i * 4 + 2])) << 8) | uint32_t(uint8_t(u0[i * 4 + 3]));
+        std::memcpy(t, u, sizeof t);
+        for (unsigned i = 1; i < iterations; ++i) {
+            hmac32(u, u);
+            for (int j = 0; j < 8; ++j) t[j] ^= u[j];
+        }
+        for (int i = 0; i < 8; ++i)
+            for (int b = 0; b < 4; ++b) out += static_cast<char>(t[i] >> (24 - 8 * b));
+    }
+    out.resize(length);
+    return out;
 }
 
 // ─── Base64url (RFC 4648 §5, no padding) ─────────────────────────────────────
@@ -127,70 +311,50 @@ int decode_char(char c) {
     if (c >= 'A' && c <= 'Z') return c - 'A';
     if (c >= 'a' && c <= 'z') return c - 'a' + 26;
     if (c >= '0' && c <= '9') return c - '0' + 52;
-    if (c == '-') return 62;
-    if (c == '_') return 63;
+    if (c == '-' || c == '+') return 62;
+    if (c == '_' || c == '/') return 63;
     return -1;
 }
 } // namespace
 
-std::string base64url_encode(std::string_view raw) {
+namespace {
+// One encoder for both alphabets: the url variant (JWT, session cookies)
+// drops the '=' padding, the standard one (sqlite BLOBs, PDF export) keeps it.
+std::string encode_b64(std::string_view raw, const char* alphabet, bool pad) {
     std::string out;
     out.reserve((raw.size() + 2) / 3 * 4);
-
-    size_t i = 0;
-    for (; i + 2 < raw.size(); i += 3) {
-        uint32_t v = (uint32_t(uint8_t(raw[i])) << 16) |
-                     (uint32_t(uint8_t(raw[i + 1])) << 8) |
-                      uint32_t(uint8_t(raw[i + 2]));
-        out += kAlphabet[(v >> 18) & 0x3F];
-        out += kAlphabet[(v >> 12) & 0x3F];
-        out += kAlphabet[(v >> 6) & 0x3F];
-        out += kAlphabet[v & 0x3F];
-    }
-    if (i + 1 == raw.size()) {
+    for (size_t i = 0; i < raw.size(); i += 3) {
+        size_t   n = std::min<size_t>(3, raw.size() - i);
         uint32_t v = uint32_t(uint8_t(raw[i])) << 16;
-        out += kAlphabet[(v >> 18) & 0x3F];
-        out += kAlphabet[(v >> 12) & 0x3F];
-    } else if (i + 2 == raw.size()) {
-        uint32_t v = (uint32_t(uint8_t(raw[i])) << 16) |
-                     (uint32_t(uint8_t(raw[i + 1])) << 8);
-        out += kAlphabet[(v >> 18) & 0x3F];
-        out += kAlphabet[(v >> 12) & 0x3F];
-        out += kAlphabet[(v >> 6) & 0x3F];
+        if (n > 1) v |= uint32_t(uint8_t(raw[i + 1])) << 8;
+        if (n > 2) v |= uint32_t(uint8_t(raw[i + 2]));
+        for (size_t k = 0; k < 4; ++k) {
+            if (k <= n) out += alphabet[(v >> (18 - 6 * k)) & 0x3F];
+            else if (pad) out += '=';
+        }
+    }
+    return out;
+}
+} // namespace
+
+std::string hex_encode(std::string_view raw) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(raw.size() * 2);
+    for (unsigned char c : raw) {
+        out += kHex[c >> 4];
+        out += kHex[c & 0xF];
     }
     return out;
 }
 
-std::string base64_encode(std::string_view raw) {
-    static const char kStd[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    out.reserve((raw.size() + 2) / 3 * 4);
+std::string base64url_encode(std::string_view raw) {
+    return encode_b64(raw, kAlphabet, false);
+}
 
-    size_t i = 0;
-    for (; i + 2 < raw.size(); i += 3) {
-        uint32_t v = (uint32_t(uint8_t(raw[i])) << 16) |
-                     (uint32_t(uint8_t(raw[i + 1])) << 8) |
-                      uint32_t(uint8_t(raw[i + 2]));
-        out += kStd[(v >> 18) & 0x3F];
-        out += kStd[(v >> 12) & 0x3F];
-        out += kStd[(v >> 6) & 0x3F];
-        out += kStd[v & 0x3F];
-    }
-    if (i + 1 == raw.size()) {
-        uint32_t v = uint32_t(uint8_t(raw[i])) << 16;
-        out += kStd[(v >> 18) & 0x3F];
-        out += kStd[(v >> 12) & 0x3F];
-        out += "==";
-    } else if (i + 2 == raw.size()) {
-        uint32_t v = (uint32_t(uint8_t(raw[i])) << 16) |
-                     (uint32_t(uint8_t(raw[i + 1])) << 8);
-        out += kStd[(v >> 18) & 0x3F];
-        out += kStd[(v >> 12) & 0x3F];
-        out += kStd[(v >> 6) & 0x3F];
-        out += '=';
-    }
-    return out;
+std::string base64_encode(std::string_view raw) {
+    return encode_b64(raw,
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/", true);
 }
 
 bool base64url_decode(std::string_view text, std::string& out) {
@@ -227,8 +391,8 @@ std::string random_bytes(size_t n) {
     while (got < n) {
         // getrandom(2) over /dev/urandom: it draws from the same CSPRNG but
         // needs no file descriptor, so it cannot fail merely because the
-        // process is out of them (a real failure mode under load -- see
-        // SECURITY-AUDIT.md #13) and it blocks instead of returning
+        // process is out of them (a real failure mode under load) and it
+        // blocks instead of returning
         // low-quality output before the kernel's entropy pool is
         // initialised at boot (irrelevant days into a server's uptime, but
         // free correctness). Available unconditionally: this project only

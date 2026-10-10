@@ -1,0 +1,346 @@
+# recomendaciones.lux — Inicio. Puerto de crates/localify-services/src/
+# recomendaciones.rs del original.
+#
+# ## El orden es una postura
+#
+# Primero lo que NO conoces -- "Puede que te guste", "Descubre", "Porque
+# escuchaste esto", "Redescubre" -- y después lo tuyo -- tus playlists, sigue
+# escuchando, lo que más escuchas --. Con las secciones de historial arriba,
+# Inicio era un resumen de lo que ya habías puesto: útil el primer día,
+# insufrible el vigésimo.
+#
+# ## Qué significa "local"
+#
+# El criterio es nuestro: tus artistas, tus álbumes, tus playlists, lo que
+# llevas meses sin escuchar. Preguntarle al catálogo "¿qué tiene este
+# artista?" es la misma consulta del buscador, con una palabra elegida aquí a
+# partir de tu historial; no sale de la máquina nada sobre lo que escuchas.
+#
+# ## Reglas de todas las secciones de descubrimiento
+#   - nada que ya hayas escuchado (si no, no descubre nada);
+#   - ni directos, ni versiones, ni remixes: "Bloody Power Fame (Live)" no es
+#     una canción nueva si ya tienes "Bloody Power Fame";
+#   - una canción aparece una sola vez en todo el descubrimiento;
+#   - una sección con menos de 4 no aparece: mejor nada que fingir conocerte.
+
+fn int por_seccion():
+    return 12
+
+fn int minimo_seccion():
+    return 4
+
+# Días que se miran para "lo que más escuchas" y como semilla.
+fn int ventana_dias():
+    return 30
+
+# Días sin escuchar para que algo se pueda redescubrir.
+fn int dias_olvido():
+    return 90
+
+# La tanda del catálogo vale seis horas.
+fn int frescura_catalogo_s():
+    return 6 * 3600
+
+# ─── Identidad de una canción ────────────────────────────────────────────────
+
+# "La misma canción" aunque sea otra grabación: título canónico + artista.
+fn string clave_cancion(Json fila):
+    return titulo_canonico(jstr(fila["title"], "")) + "|" + normalizar(jstr(fila["artistDisplay"], ""))
+
+fn bool es_version(Json fila):
+    return clase_de_version(jstr(fila["title"], "")) != "original"
+
+# Claves de todo lo que has escuchado alguna vez.
+fn List<string> claves_escuchadas():
+    List<Json> f = await sqlite.query("""
+        select distinct t.title, t.artist_display from play_history h join tracks t on t.id = h.track_id
+        """)
+    List<string> out = []
+    for int i in range(0, len(f)):
+        out.add(titulo_canonico(jstr(f[i]["title"], "")) + "|" + normalizar(jstr(f[i]["artist_display"], "")))
+    return out
+
+# Las filas de `ids` (en ese orden) que pasan el filtro de descubrimiento, sin
+# repetir canción ni con lo ya usado; como mucho `tope`. Marca lo que coge en
+# `usadas`.
+fn List<Json> filtrar_nuevas(List<string> ids, List<string> escuchadas, List<string> usadas, int tope):
+    List<Json> out = []
+    for int i in range(0, len(ids)):
+        if len(out) >= tope:
+            break
+        Json? fila = track_row_por_id(ids[i])
+        if fila == null or jint(fila["durationMs"], 0) <= 0 or es_version(fila):
+            continue
+        string clave = clave_cancion(fila)
+        if escuchadas.contains(clave) or usadas.contains(clave):
+            continue
+        usadas.add(clave)
+        out.add(fila)
+    return out
+
+# Toma uno de cada montón por vuelta: sin esto, el montón más grande (tu
+# artista más escuchado) se come la fila entera.
+fn List<string> intercalar(List<List<string>> montones, int tope):
+    List<string> out = []
+    int vuelta = 0
+    bool quedaba = true
+    while quedaba and len(out) < tope:
+        quedaba = false
+        for int m in range(0, len(montones)):
+            List<string> monton = montones[m]
+            if vuelta < len(monton):
+                quedaba = true
+                if not out.contains(monton[vuelta]):
+                    out.add(monton[vuelta])
+        vuelta = vuelta + 1
+    return out
+
+fn void empujar(List<Json> secciones, string clave, string kind, List<Json> items):
+    if len(items) >= minimo_seccion():
+        secciones.add({ "key": clave, "params": [], "items": { "kind": kind, "items": items } })
+
+# ─── Similitud local (sin red) ───────────────────────────────────────────────
+# Puerto de SQL_SIMILITUD / SQL_DESCUBRIR (similarity.rs) con tres de sus
+# cuatro señales: artista compartido, mismo álbum y co-ocurrencia en tus
+# playlists. (La cuarta, géneros, no existe en este esquema.)
+
+fn string sql_similares():
+    return """
+        artistas_semilla as (
+            select distinct ta.artist_id from track_artists ta join semilla s on s.id = ta.track_id
+        ),
+        albumes_semilla as (
+            select distinct t.album_id from tracks t join semilla s on s.id = t.id where t.album_id is not null
+        ),
+        candidatos as (
+            select distinct ta.track_id, 0.45 as peso
+              from track_artists ta join artistas_semilla a on a.artist_id = ta.artist_id
+            union all
+            select distinct t.id, 0.15
+              from tracks t join albumes_semilla al on al.album_id = t.album_id
+            union all
+            select distinct p2.track_id, 0.15
+              from playlist_items p1 join semilla s on s.id = p1.track_id
+              join playlist_items p2 on p2.playlist_id = p1.playlist_id
+        )
+        select c.track_id as id, sum(c.peso) as puntuacion
+        from candidatos c
+        where c.track_id not in (select track_id from play_history)
+        group by c.track_id
+        order by puntuacion desc, c.track_id
+        limit 80
+        """
+
+fn List<string> ids_de(List<Json> filas):
+    List<string> out = []
+    for int i in range(0, len(filas)):
+        out.add(jstr(filas[i]["id"], ""))
+    return out
+
+# "Descubre": lo que encaja con lo que escuchas este mes y no has puesto nunca.
+fn List<string> descubrir_ids():
+    return ids_de(await sqlite.query("""
+        with semilla(id) as (
+            select distinct track_id from play_history where played_at >= unixepoch() - ? * 86400
+        ),
+        """ + sql_similares(), ventana_dias()))
+
+# "Porque escuchaste esto": lo afín a cada una de tus últimas cinco canciones
+# escuchadas enteras, intercalado por canción.
+fn List<string> porque_escuchaste_ids():
+    List<Json> semillas = await sqlite.query("""
+        select track_id from play_history where completed = 1
+        group by track_id order by max(played_at) desc limit 5
+        """)
+    List<List<string>> montones = []
+    for int i in range(0, len(semillas)):
+        montones.add(ids_de(await sqlite.query("with semilla(id) as (select ?), " + sql_similares(),
+            jstr(semillas[i]["track_id"], ""))))
+    return intercalar(montones, 80)
+
+# "Redescubre": lo que te gustó (me gusta, o lo pusiste a menudo) y llevas
+# meses sin escuchar.
+fn List<Json> redescubrir():
+    return track_rows_de(await sqlite.query(sql_pista_dto() + """
+        where (f.track_id is not null or (select count(*) from play_history h where h.track_id = t.id) >= 3)
+          and coalesce((select max(h.played_at) from play_history h where h.track_id = t.id), 0) < unixepoch() - ? * 86400
+        order by play_count desc
+        limit ?
+        """, dias_olvido(), por_seccion()))
+
+# ─── "Puede que te guste": candidatos del catálogo ───────────────────────────
+# Nunca espera a la red: Inicio enseña la última tanda guardada, y la tarea de
+# fondo (recomendaciones_tick) trae otra cuando la vieja caduca. La primera vez
+# la fila no sale; es preferible a una pantalla que tarda.
+
+fn List<string> tanda_catalogo():
+    Json? tanda = parse_json(ajuste("home_catalogo", ""))
+    if tanda == null:
+        return []
+    List<string> out = []
+    List<Json> ids = jlist(tanda["ids"])
+    for int i in range(0, len(ids)):
+        out.add(jstr(ids[i], ""))
+    return out
+
+# Cada minuto mira si toca; trae una tanda nueva como mucho cada seis horas
+# (y, si falla o no hay historial, no reintenta antes de diez minutos).
+fn void recomendaciones_tick():
+    Json? tanda = parse_json(ajuste("home_catalogo", ""))
+    int generada = tanda == null ? 0 : jint(tanda["generada"], 0)
+    if ahora() - generada < frescura_catalogo_s():
+        return
+    if ahora() - int(state.get("home_catalogo_intento", "0")) < 600:
+        return
+    state.set("home_catalogo_intento", str(ahora()))
+
+    # Semilla: tus cinco artistas más escuchados del último mes.
+    List<Json> artistas = await sqlite.query("""
+        select ar.id as id, ar.name as nombre, count(*) as n
+        from play_history h
+        join track_artists ta on ta.track_id = h.track_id and ta.position = 0
+        join artists ar on ar.id = ta.artist_id
+        where h.played_at >= unixepoch() - ? * 86400
+        group by ar.id order by n desc limit 5
+        """, ventana_dias())
+    if len(artistas) == 0:
+        return
+    List<string> escuchadas = claves_escuchadas()
+    List<List<string>> montones = []
+    for int i in range(0, len(artistas)):
+        string nombre = jstr(artistas[i]["nombre"], "")
+        string nombre_norm = normalizar(nombre)
+        # Con id de canal de YouTube (UC...), los resultados se reconocen por ese
+        # id: el nombre no distingue a "SAMURAI" de otro "Samurai". Si solo
+        # tenemos el de Spotify/MusicBrainz, el nombre exacto es lo que hay.
+        string artista_id = jstr(artistas[i]["id"], "")
+        bool por_id = artista_id.starts_with("UC")
+        List<string> ids = ytm_buscar_pistas(nombre, 20)
+        # Solo canciones de ESE artista (la búsqueda por nombre trae también
+        # versiones de otros), que no conozcas y que no sean directos/versiones.
+        List<string> suyas = []
+        List<string> vistas = []
+        for int k in range(0, len(ids)):
+            Json? fila = track_row_por_id(ids[k])
+            if fila == null or jint(fila["durationMs"], 0) <= 0 or es_version(fila):
+                continue
+            List<Json> de_el = await sqlite.query("""
+                select 1 as ok from track_artists ta join artists ar on ar.id = ta.artist_id
+                where ta.track_id = ? and (case when ? then ar.id = ? else ar.name_norm = ? end)
+                """, ids[k], por_id ? 1 : 0, artista_id, nombre_norm)
+            if len(de_el) == 0:
+                continue
+            string clave = clave_cancion(fila)
+            if escuchadas.contains(clave) or vistas.contains(clave):
+                continue
+            vistas.add(clave)
+            suyas.add(ids[k])
+        montones.add(suyas)
+    List<string> elegidas = intercalar(montones, por_seccion() * 2)
+    if len(elegidas) == 0:
+        return
+    ajuste_poner("home_catalogo", str({ "generada": ahora(), "ids": elegidas }))
+    log.info("recomendaciones: tanda del catálogo con " + str(len(elegidas)) + " canciones")
+
+# ─── Inicio ──────────────────────────────────────────────────────────────────
+
+fn List<Json> cmd_home():
+    List<Json> secciones = []
+    List<string> escuchadas = claves_escuchadas()
+    List<string> usadas = []
+
+    # 1. Lo que no conoces.
+    empujar(secciones, "home.from_catalog", "tracks", filtrar_nuevas(tanda_catalogo(), escuchadas, usadas, por_seccion()))
+    empujar(secciones, "home.discover", "tracks", filtrar_nuevas(descubrir_ids(), escuchadas, usadas, por_seccion()))
+    empujar(secciones, "home.because_you_listened", "tracks", filtrar_nuevas(porque_escuchaste_ids(), escuchadas, usadas, por_seccion()))
+    empujar(secciones, "home.rediscover", "tracks", sin_repetir(redescubrir()))
+
+    # 2. Y después, lo tuyo.
+    empujar(secciones, "home.top_playlists", "playlists", playlists_mas_escuchadas())
+    List<Json> sonadas = await sqlite.query("""
+        select h.track_id as id from play_history h
+        group by h.track_id order by max(h.played_at) desc limit 30
+        """)
+    List<Json> recientes = []
+    for int i in range(0, len(sonadas)):
+        Json? p = track_row_por_id(jstr(sonadas[i]["id"], ""))
+        if p != null:
+            recientes.add(p)
+    empujar(secciones, "home.recent", "tracks", sin_repetir(recientes))
+    empujar(secciones, "home.top_tracks", "tracks", sin_repetir(track_rows_de(await sqlite.query(sql_pista_dto() + """
+        where t.id in (select track_id from play_history where played_at >= unixepoch() - ? * 86400)
+        order by (select count(*) from play_history h where h.track_id = t.id and h.played_at >= unixepoch() - ? * 86400) desc
+        limit 30
+        """, ventana_dias(), ventana_dias()))))
+
+    # "Álbumes que escuchas": por cuántas canciones suyas suenan, no por
+    # escuchas totales (un disco del que solo repites el single no lo escuchas).
+    List<Json> albumes = await sqlite.query("""
+        select a.id, a.title, a.release_date, a.album_type,
+               coalesce((select ar.name from album_artists aa join artists ar on ar.id = aa.artist_id
+                         where aa.album_id = a.id order by aa.position limit 1), '') as artist_display,
+               coalesce((select count(*) from tracks t where t.album_id = a.id), 0) as n_tracks,
+               coalesce((select count(*) from tracks t join audio_files af on af.track_id = t.id where t.album_id = a.id), 0) as n_disponibles,
+               (select count(distinct h.track_id) from play_history h join tracks t on t.id = h.track_id
+                 where t.album_id = a.id and h.played_at >= unixepoch() - ? * 86400) as distintas
+        from albums a
+        where distintas > 0
+        order by distintas desc, a.title limit ?
+        """, ventana_dias(), por_seccion())
+    List<Json> albums_out = []
+    for int i in range(0, len(albumes)):
+        albums_out.add(album_row_dto(albumes[i]))
+    empujar(secciones, "home.top_albums", "albums", albums_out)
+
+    List<Json> artistas = await sqlite.query("""
+        select ar.id, ar.name,
+               coalesce((select count(*) from track_artists ta where ta.artist_id = ar.id), 0) as n_tracks,
+               0 as n_disponibles,
+               (select count(*) from play_history h join track_artists ta on ta.track_id = h.track_id
+                 where ta.artist_id = ar.id and h.played_at >= unixepoch() - ? * 86400) as escuchas
+        from artists ar
+        where escuchas > 0
+        order by escuchas desc limit ?
+        """, ventana_dias(), por_seccion())
+    List<Json> artists_out = []
+    for int i in range(0, len(artistas)):
+        artists_out.add(artist_row_dto(artistas[i]))
+    empujar(secciones, "home.top_artists", "artists", artists_out)
+
+    # Con la biblioteca recién estrenada no hay historial: lo que sí hay.
+    if len(secciones) == 0:
+        empujar(secciones, "home.favorites", "tracks", track_rows_de(await sqlite.query(sql_pista_dto() + " where f.track_id is not null order by f.added_at desc limit ?", por_seccion())))
+    return secciones
+
+# Una fila por canción: el estudio y el directo de la misma no van juntos.
+fn List<Json> sin_repetir(List<Json> filas):
+    List<Json> out = []
+    List<string> vistas = []
+    for int i in range(0, len(filas)):
+        string clave = clave_cancion(filas[i])
+        if not vistas.contains(clave) and len(out) < por_seccion():
+            vistas.add(clave)
+            out.add(filas[i])
+    return out
+
+# "Tus playlists favoritas": las que más se ponen (por el contexto con el que
+# sonó cada escucha, no por si contienen canciones oídas).
+fn List<Json> playlists_mas_escuchadas():
+    List<Json> top = await sqlite.query("""
+        select pid, count(*) as n from (
+            select case
+                when context like 'playlist:%' then substr(context, 10)
+                when json_valid(context) and json_extract(context, '$.kind') = 'playlist' then json_extract(context, '$.id')
+            end as pid
+            from play_history where played_at >= unixepoch() - ? * 86400
+        ) where pid is not null group by pid order by n desc limit ?
+        """, ventana_dias(), por_seccion())
+    List<Json> todas = await cmd_playlist_list()
+    List<Json> out = []
+    for int i in range(0, len(top)):
+        string pid = jstr(top[i]["pid"], "")
+        for int k in range(0, len(todas)):
+            if jstr(todas[k]["id"], "") == pid:
+                out.add(todas[k])
+                break
+    return out

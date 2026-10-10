@@ -1,4 +1,5 @@
 #pragma once
+#include <tuple>
 #include <optional>
 #include <set>
 #include <string>
@@ -70,12 +71,16 @@ struct FuncionNativa {
 struct FirmaNativa {
     std::vector<Type> params;
     Type               retorno = Type::void_();
+    // It awaits (its chunk's has_await, already propagated to callers):
+    // generated as a coroutine, and every call to it is a co_await.
+    bool               asincrona = false;
 };
 // Por nombre de funcion Lux -- construida una sola vez por
 // compile_native() a partir de TODO el programa (no solo las funciones que
 // terminan compilando), porque una funcion nativa puede llamar a otra que
 // el mapa (alfabetico) todavia no proceso.
 using TablaFirmas = std::unordered_map<std::string, FirmaNativa>;
+
 
 // Un campo de clase ya reducido a su Type -- solo entra a ClaseNativa::campos
 // si es representable (ver tipo_elemento_contenedor_soportado en
@@ -135,9 +140,29 @@ struct ClaseNativa {
     std::unordered_map<std::string, FirmaNativa> metodos;
     std::vector<ReglaNativa>                      reglas;
     bool                                          reglas_ok = true;
+    // A class with a field that is not a scalar (a List, another class, a
+    // `?` class) is held as the VM holds every instance: a Value Dict. Its
+    // constructors without a body, by arity: the parameters they set.
+    bool                                           dinamica = false;
+    std::map<size_t, std::vector<std::string>>     ctor_params;
 };
 // Por nombre de clase Lux.
 using TablaClases = std::unordered_map<std::string, ClaseNativa>;
+
+// What a failed check asks compile_native to change before trying again: a
+// function's return, or a parameter a caller passes a Value to, held as a
+// Value (Json) from then on.
+struct Peticiones {
+    bool                                                      retorno_value = false;
+    std::vector<std::pair<std::string, size_t>>               params;          // function, parameter
+    std::vector<std::tuple<std::string, std::string, size_t>> metodo_params;   // class, method, parameter
+};
+
+// The type native code holds a declared one in: `int?`, `string?`,
+// `List<int>?` may be null, and a class held as a Dict (dinamica) is one,
+// so they are a Value (Json); so is a List/Dict whose elements are not one
+// native type. Anything else as declared.
+Type tipo_nativo(const Type& t, const TablaClases* clases = nullptr);
 
 // A que clase (y que papel) pertenece una funcion de la tabla global,
 // indexada igual que FunctionTable/nombre_por_indice: `metodo` vacio
@@ -181,7 +206,9 @@ std::optional<FuncionNativa> generar_funcion_nativa(const FnDecl& fn, const IrBl
                                                      const std::vector<std::string>& nombre_por_indice,
                                                      const TablaFirmas& firmas,
                                                      const TablaClases& clases,
-                                                     const TablaRoles& roles);
+                                                     const TablaRoles& roles,
+                                                     std::string* motivo = nullptr,
+                                                     Peticiones* peticiones = nullptr);
 
 // Igual que generar_funcion_nativa(), para el cuerpo de un metodo: `this`
 // ocupa la ranura 0 (antes que los parametros, ver Emitter::check_method),
@@ -196,7 +223,8 @@ std::optional<FuncionNativa> generar_metodo_nativo(const std::string& clase, con
                                                     const std::vector<std::string>& nombre_por_indice,
                                                     const TablaFirmas& firmas,
                                                     const TablaClases& clases,
-                                                    const TablaRoles& roles);
+                                                    const TablaRoles& roles,
+                                                    Peticiones* peticiones = nullptr);
 
 // El texto C++ del struct/caja de una clase nativa -- LPunto, con la misma
 // semantica de referencia real (§8) que LList/LDict (caja con refcount no
@@ -290,6 +318,13 @@ struct RutaNativa {
     // tablas de NativeModule (rutas_por_indice / rutas_async_por_indice)
     // dejar el puntero que resuelva dlsym().
     bool asincrona = false;
+
+    // The render() keys ("page.html|title:string,...") this route calls,
+    // each compiled to its own C++ function (generate_native_template).
+    std::set<std::string> plantillas;
+    // Its record structs (native_gen.cpp, FormaRegistro): before every
+    // route and template, which may both use them.
+    std::string registros_cpp;
 };
 
 // Genera el C++ de una ruta, o nullopt si algo de ella (parametros o cuerpo)
@@ -303,7 +338,9 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
                                               const std::vector<std::string>& nombre_por_indice,
                                               const TablaFirmas& firmas,
                                               const TablaClases& clases,
-                                              const TablaRoles& roles);
+                                              const TablaRoles& roles,
+                                              std::string* motivo = nullptr,
+                                              Peticiones* peticiones = nullptr);
 
 // Funciones libres que necesita el binding de parametros que genera
 // generate_native_route() -- mismo criterio, mismo formato de error, que
@@ -313,5 +350,14 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
 // cuando el modulo tiene al menos una ruta nativa (a diferencia de las
 // otras: una funcion nativa nunca necesita lux::Request/Response).
 std::string route_runtime_prelude();
+
+// The C++ function a render() of `key` calls under --native.
+std::string native_template_fn(const std::string& key);
+
+// That function, from the template compiled for `key` -- the same one
+// build_routes compiles at run time, so an expression it hands back to the
+// VM (anything but a name or a chain of fields) is found there by index.
+// The values stay arguments: only the template's shape is compiled.
+std::string generate_native_template(const struct Template& t, const std::string& key);
 
 } // namespace lux_script

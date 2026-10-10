@@ -268,6 +268,33 @@ get endpoint("/range_for_loop"):
 get endpoint("/range_bad_step"):
     return { "r": range(0, 5, 0) }
 
+# --native turns these into a counter loop instead of a List: the same
+# bounds read once, and a body that moves `i` does not move the loop.
+get endpoint("/range_for_shapes"):
+    List<int> down = []
+    for int i in range(5, 0, -2):
+        down.add(i)
+    int empty = 0
+    for int i in range(3, 3):
+        empty = empty + 1
+    int n = 0
+    for int i in range(3):
+        i = i + 10
+        n = n + i
+    return { "down": down, "empty": empty, "n": n }
+
+# len() counts codepoints eight bytes at a time: long enough to take that
+# path, with multi-byte ones straddling the 8-byte steps.
+get endpoint("/len_utf8"):
+    string s = "ñandú 🐻 ñandú ñandú añoñó 🐻 x"
+    return { "len": len(s), "long": len("añoñó 🐻 ".repeat(500)) }
+
+get endpoint("/range_for_bad_step"):
+    int s = 0
+    for int i in range(0, 5, s):
+        s = s + 1
+    return { "s": s }
+
 # switch: sugar for an if/elif chain (see parse_switch_into, parser.cpp) --
 # nothing downstream ever sees a switch, only an If.
 get endpoint("/switch_basic/:n", int n):
@@ -352,3 +379,24 @@ class EnumOrder:
 
 post endpoint("/enum_order", EnumOrder o):
     return { "status": o.status }
+
+fn string parity(int x):
+    if x % 2 == 0:
+        return "even"
+    return "odd"
+
+get endpoint("/list_more"):
+    List<int> l = [3, 1, 4, 1, 5, 9, 2, 6]
+    List<int> empty = []
+    List<int> stack = [1, 2, 3]
+    Json popped = stack.pop()
+    stack.insert(0, 0)
+    stack.insert(-1, 9)
+    return { "first": l.first(), "last": l.last(), "none": empty.first(), "sum": l.sum(), "fsum": [1, 2.5].sum(), "min": l.min(), "max": l.max(), "unique": l.unique(), "any": l.any(is_even), "all": l.all(is_even), "count": l.count(is_even), "groups": l.group_by(parity), "chunks": [1, 2, 3, 4, 5].chunk(2), "popped": popped, "stack": stack, "items": { "a": 1, "b": 2 }.items() }
+
+get endpoint("/float_conv"):
+    double x = float("3.5")
+    return { "a": x, "b": float(2), "c": float("1e3"), "d": float(true) }
+
+get endpoint("/float_bad"):
+    return { "r": float("abc") }

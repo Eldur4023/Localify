@@ -3,10 +3,11 @@
 **Localify**, el reproductor de música local (port de
 [Localify](https://github.com/), originalmente Rust + Tauri), construido
 sobre [Lux](vendor/lux): ventana nativa GTK3 + WebKitGTK, LuxScript en vez
-de Node, y un binario nativo único. El audio lo reproduce el propio WebView
-(elemento `<audio>` sobre rutas con soporte Range), la biblioteca vive en
-SQLite, y la resolución de canciones (YouTube Music + MusicBrainz + yt-dlp)
-está reescrita íntegramente en LuxScript.
+de Node, y un binario nativo único. El audio lo reproduce un **motor nativo**
+(miniaudio + ffmpeg, `src/audio_engine.cpp`) que el backend LuxScript manda
+por el módulo `audio`, la biblioteca vive en SQLite, y la resolución de
+canciones (YouTube Music + MusicBrainz + yt-dlp) está reescrita íntegramente
+en LuxScript.
 
 ## Qué incluye el port
 
@@ -17,8 +18,9 @@ está reescrita íntegramente en LuxScript.
   prioridad absoluta + cola de contexto), aleatorio con permutación estable
   y semilla persistida, repetición off/cola/pista, regla de 3 s del botón
   "anterior", sesión restaurada al arrancar (`app/queue.lux`,
-  `app/player.lux`). El audio se sirve por `/audio/:id` con `send_file`
-  (Range/206) y lo decodifica GStreamer dentro de WebKitGTK.
+  `app/player.lux`). El backend es el único dueño del reproductor
+  (`app/motor.lux`): aplica el estado al motor de audio y reacciona a sus
+  avisos (relevo gapless/crossfade, fin de pista).
 - **Resolución de canciones** — cliente InnerTube de YouTube Music
   (`app/ytmusic.lux`), MusicBrainz (`app/musicbrainz.lux`), el scorer
   completo del emparejador (Jaro-Winkler, factor de duración multiplicativo,
@@ -33,16 +35,52 @@ está reescrita íntegramente en LuxScript.
   YouTube Music y de Spotify (página embed, sin credenciales)
   (`app/playlists.lux`).
 - **Letras** vía LRCLIB con caché positiva y negativa (`app/lyrics.lux`).
-- **Frontend** — SPA vanilla ES modules en `app/public/js/` + `app/templates/`,
-  tema oscuro heredado de los tokens del original; la capa IPC es un único
-  módulo `api.js` sobre `fetch`.
+- **Frontend** — SPA vanilla ES modules en `app/public/src/` + `app/templates/`,
+  tema oscuro heredado de los tokens del original. La capa IPC es `fetch`
+  contra `/api/invoke` para las órdenes y **SSE** (`/api/events/stream`) para
+  los eventos: el backend empuja una foto de su estado cuando cambia.
+
+## Cómo está montado el audio
+
+Como en el original (`crates/localify-audio`), el audio no pasa por el
+WebView: el camino de audio de WebKitGTK (GStreamer) fallaba con salidas
+Bluetooth y obligaba a medio frontend a existir solo para sincronizar dos
+dueños del estado.
+
+- **Motor** (`src/audio_engine.cpp`): ffmpeg decodifica a PCM f32 por una
+  tubería a un anillo SPSC de 4 s por voz; el hilo de audio mezcla dos voces
+  (gapless, crossfade equal-power), aplica un ecualizador de 10 bandas y
+  volumen (v³), y lee solo atómicos y anillos: no asigna, no toma locks, no
+  hace I/O. La posición es la que se oye. El motor **no conoce la cola**: el
+  backend le da la pista actual (`audio.load`) y la siguiente
+  (`audio.preload`), y recibe avisos (`handoff` / `ended` / `error`).
+- **Salida**: miniaudio sobre PulseAudio/PipeWire o ALSA; la salida se elige
+  en Ajustes por nombre (`audio.devices`, `audio.set_device`).
+- **Tareas de fondo** (`app/events.lux`, bloques `every` de Lux): el tick del
+  reproductor (200 ms), las descargas (1 s) y la búsqueda remota. No dependen
+  de que la ventana esté a la vista.
+- **Migraciones** versionadas (`settings.schema_version`) en `on start:`.
+
+## Tests
+
+```bash
+cmake --build build --target audio_engine_test app-headless
+./build/audio_engine_test          # el mezclador sin tarjeta de sonido (render() a mano)
+python3 tests/e2e_audio.py         # backend + motor + SSE, sin ventana ni sonido
+ctest --test-dir build             # las dos
+```
+
+`app-headless <dir-de-la-app> [puerto]` levanta el servidor y el motor sin
+ventana (con `LUX_AUDIO_NULL=1` no suena nada). `LUXDESKTOP_APP_DIR=<dir>
+./build/app-dev` arranca el modo dev contra otra copia de la app.
 
 ## Requisitos
 
 - `libgtk-3-dev`, `libwebkit2gtk-4.1-dev` (o `-4.0-dev`) para compilar.
+- **ffmpeg** en el PATH: decodifica todo el audio que se reproduce.
 - **yt-dlp** en el PATH para descargar (obligatorio para el catálogo remoto).
-- **ffmpeg/ffprobe** en el PATH para remux, etiquetas y verificación —
-  opcionales: sin ellos el audio se guarda tal cual y suena igual.
+- **ffprobe** para verificar y etiquetar lo descargado (opcional: sin él el
+  audio se guarda tal cual).
 - Si YouTube pide verificación, configura cookies en Ajustes.
 
 ## Dónde viven los datos

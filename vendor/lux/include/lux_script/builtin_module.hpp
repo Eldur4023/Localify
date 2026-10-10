@@ -1,6 +1,10 @@
 #pragma once
 #include <map>
 #include <memory>
+#include <chrono>
+#include <mutex>
+#include <random>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
@@ -41,6 +45,22 @@ struct BuiltinModuleFn {
     int         max_args;     // -1 = no limit
     NativeFn    fn;           // same signature as any other builtin
     bool        is_async = false;
+    // Argument types, checked by call() before fn runs, so a function body
+    // can trust them: s string, i int, n int or float, b bool, l List,
+    // d Dict, f function, x anything; uppercase also accepts null; after
+    // '|' the rest are optional; a trailing '*' takes any number more;
+    // '>' then one letter is what it returns (s i b l d, r float; anything else,
+    // or nothing, is Json), which the compiler checks the call site against.
+    std::string sig;
+    std::string returns;      // "string", "int", ... or "" (Json)
+    std::string full_name;    // "hash.sha256", filled in by the registry
+
+    BuiltinModuleFn(std::string n, int min, int max, NativeFn f, bool async = false)
+        : name(std::move(n)), min_args(min), max_args(max), fn(f), is_async(async) {}
+    // min/max come from the signature: {"hmac_sha256", "ss", fn}
+    BuiltinModuleFn(std::string n, const char* signature, NativeFn f, bool async = false);
+
+    Value call(NativeCtx& ctx, std::vector<Value>& args, std::string& error) const;
 };
 
 // What a module needs to describe itself.  `configure()` is optional --
@@ -95,7 +115,6 @@ public:
     bool activate(const std::string& name,
                   const std::map<std::string, std::string>& options,
                   std::string& error);
-    bool is_active(const std::string& name) const;
 
     // Resolves `<module>.<function>` to its BuiltinModuleFn, or nullptr.
     // Used at COMPILE time (Emitter::check_call) to validate the call and
@@ -203,5 +222,86 @@ struct ModuleRegistrar {
             return std::make_unique<ClassName>();                             \
         });                                                                   \
     }
+
+// The common case, a module that is just a name and a function table:
+//
+//     LUX_MODULE(hash, {
+//         {"sha256", 1, 1, fn_hash_sha256},
+//     })
+//
+// A module that needs configure() still writes its class and uses
+// LUX_REGISTER_MODULE.
+namespace detail {
+class TableModule final : public BuiltinModule {
+public:
+    TableModule(const char* name, std::vector<BuiltinModuleFn> fns) : name_(name), fns_(std::move(fns)) {}
+    const char*                         name() const override { return name_; }
+    const std::vector<BuiltinModuleFn>& functions() const override { return fns_; }
+private:
+    const char*                  name_;
+    std::vector<BuiltinModuleFn> fns_;
+};
+} // namespace detail
+
+#define LUX_MODULE(Name, ...)                                                 \
+    namespace {                                                               \
+    ::lux_script::detail::ModuleRegistrar lux_module_registrar_##Name(        \
+        +[]() -> std::unique_ptr<::lux_script::BuiltinModule> {               \
+            return std::make_unique<::lux_script::detail::TableModule>(       \
+                #Name, std::vector<::lux_script::BuiltinModuleFn> __VA_ARGS__); \
+        });                                                                   \
+    }
+
+// Integer handles for module objects that outlive a request (csv tables,
+// pdf documents). Mutex-protected: every event-loop thread can reach them.
+//
+// An id is random (53 bits: exact in JSON, and no route can guess another
+// user's document by counting), and an entry nobody touched for `idle` is
+// dropped, so a handler that forgot close() does not leak it for good.
+template <class T>
+class HandleTable {
+public:
+    using Clock = std::chrono::steady_clock;
+    explicit HandleTable(Clock::duration idle = std::chrono::minutes(10)) : idle_(idle) {}
+
+    long long put(std::unique_ptr<T> v) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        sweep_locked();
+        long long id;
+        do id = random_id(); while (items_.count(id));
+        items_.emplace(id, Entry{std::shared_ptr<T>(std::move(v)), Clock::now()});
+        return id;
+    }
+    long long put(T v) { return put(std::make_unique<T>(std::move(v))); }
+
+    // Kept alive by the caller's shared_ptr even if close() runs meanwhile.
+    std::shared_ptr<T> get(long long id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = items_.find(id);
+        if (it == items_.end()) return nullptr;
+        it->second.used = Clock::now();
+        return it->second.value;
+    }
+    bool close(long long id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return items_.erase(id) > 0;
+    }
+
+private:
+    struct Entry { std::shared_ptr<T> value; Clock::time_point used; };
+
+    static long long random_id() {
+        thread_local std::mt19937_64 rng{std::random_device{}()};
+        return static_cast<long long>(rng() & ((1ULL << 53) - 1)) | 1;
+    }
+    void sweep_locked() {
+        const auto now = Clock::now();
+        std::erase_if(items_, [&](const auto& kv) { return now - kv.second.used > idle_; });
+    }
+
+    Clock::duration                         idle_;
+    std::mutex                              mutex_;
+    std::unordered_map<long long, Entry>    items_;
+};
 
 } // namespace lux_script

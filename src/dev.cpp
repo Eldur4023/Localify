@@ -148,7 +148,11 @@ void watch_loop(std::vector<fs::path> inputs) {
 } // namespace
 
 int main() {
-    fs::current_path(LUXDESKTOP_APP_DIR); // app.lux's own paths ("./templates",
+    // LUXDESKTOP_APP_DIR in the environment points dev mode at another copy of
+    // the app (its ./data/ is then that copy's), e.g. a scratch one for tests.
+    const char* env_dir = std::getenv("LUXDESKTOP_APP_DIR");
+    const fs::path app_dir = env_dir && *env_dir ? fs::path(env_dir) : fs::path(LUXDESKTOP_APP_DIR);
+    fs::current_path(app_dir); // app.lux's own paths ("./templates",
                                            // "./public") are relative to itself
 
     std::vector<fs::path> inputs;
@@ -167,54 +171,21 @@ int main() {
     publish_module(mod);
 
     lux::App app;
-    app.set_templates(mod->program.app.templates_dir);
-    for (const auto& m : mod->program.app.statics)
-        app.serve_static(m.url_prefix, m.fs_root, m.spa);
-
-    // Reads current_module() on every request (not a captured `mod`), same
-    // as vendor/lux's own main.cpp: a hot reload has to reach in-flight
-    // dispatch immediately, not just the next process restart.
-    auto dispatch = [](lux::Request& req, lux::Response& res) -> lux::Task<void> {
-        auto live = current_module();
-        if (!live) { res.status(503).json_text(R"({"error":"no module loaded"})"); co_return; }
-        auto match = live->router.match(req.method, req.path);
-        if (!match.found) {
-            res.status(404).json_text(R"({"error":"Not Found"})");
-            co_return;
-        }
-        req.params = std::move(match.params);
-        co_await match.handler(req, res);
-    };
-    app.any("/",  dispatch);
-    app.any("/*", dispatch);
-
-    app.on_error([](int code, lux::Request& req, lux::Response& res) {
-        auto live = current_module();
-        if (!live) return;
-        auto it = live->error_handlers.find(code);
-        if (it == live->error_handlers.end()) it = live->error_handlers.find(0);
-        if (it == live->error_handlers.end()) return;
-        lux_script::NativeCtx ctx{req, res};
-        ctx.error_code    = code;
-        ctx.error_message = res.status_code() >= 500 ? "internal error" : "invalid request";
-        lux_script::VM vm;
-        auto result = vm.start(*it->second, {}, ctx, &live->functions, nullptr);
-        if (result.status == lux_script::VM::Status::Done &&
-            !ctx.response_written && !result.value.is_null())
-            res.header("Content-Type", "application/json; charset=utf-8")
-               .send(result.value.to_json_text());
-        res.status(code);
-    });
 
     uint16_t port = find_free_port();
 
-    app.on_before_stop([] {
+    // Reads current_module() on every request, so a hot reload reaches
+    // in-flight dispatch immediately.
+    serve_module(app, current_module, [] {
         std::lock_guard<std::mutex> lk(g_window_mutex);
         if (g_window) {
             g_shutdown_from_signal.store(true);
             g_window->terminate();
         }
     });
+
+    // Before the server starts: `on start:` blocks and the first `every` ticks already call audio.*.
+    install_audio_hooks();
 
     std::thread server_thread([&app, port] { app.run("127.0.0.1", port); });
     if (!wait_for_server(port, std::chrono::milliseconds(5000)))
@@ -241,10 +212,11 @@ int main() {
     }
     install_window_control_hooks();
     luxdesktop::mpris_init("localify-dev", opts.title, port);
-    lux::log().info("lux desktop (dev): watching " + fs::path(LUXDESKTOP_APP_DIR).string());
+    lux::log().info("lux desktop (dev): watching " + app_dir.string());
     window.run("http://127.0.0.1:" + std::to_string(port) + "/");
     luxdesktop::mpris_shutdown();
     luxdesktop::discord_shutdown();
+    luxdesktop::shutdown_audio();
     save_geometry(app_id, window.last_width(), window.last_height());
 
     if (!g_shutdown_from_signal.load()) std::raise(SIGTERM);

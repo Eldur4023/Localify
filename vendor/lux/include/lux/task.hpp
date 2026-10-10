@@ -4,6 +4,7 @@
 #include <utility>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <iostream>
 #include <lux/core/event_loop.hpp>
 #include "cancel.hpp"
@@ -49,8 +50,9 @@ struct Task {
 
                 // No continuation — schedule destruction on the event loop
                 if (h.promise().loop) {
-                    auto raw = std::coroutine_handle<>(h);
-                    h.promise().loop->post([raw]() mutable { raw.destroy(); });
+                    // Suspended here, so it may be destroyed here: posting it
+                    // cost an eventfd write and a loop wakeup per request.
+                    h.destroy();
                 }
                 return std::noop_coroutine();
             }
@@ -88,11 +90,6 @@ struct Task {
     }
 
     bool done() const { return handle && handle.done(); }
-
-    T get_result() {
-        if (handle.promise().exception) std::rethrow_exception(handle.promise().exception);
-        return std::move(handle.promise().result);
-    }
 
     // ── Awaiter interface (for co_await Task<T> inside another coroutine) ────
     bool await_ready() const noexcept { return false; }
@@ -134,8 +131,9 @@ struct Task<void> {
                 if (auto c = h.promise().continuation) return c;
 
                 if (h.promise().loop) {
-                    auto raw = std::coroutine_handle<>(h);
-                    h.promise().loop->post([raw]() mutable { raw.destroy(); });
+                    // Suspended here, so it may be destroyed here: posting it
+                    // cost an eventfd write and a loop wakeup per request.
+                    h.destroy();
                 }
                 return std::noop_coroutine();
             }
@@ -182,6 +180,66 @@ struct Task<void> {
     }
 };
 
+// ─── when_both ───────────────────────────────────────────────────────────────
+//
+// `co_await when_both(a, b)` starts both tasks before waiting for either and
+// yields {result_a, result_b}: two independent queries cost the slower of the
+// two instead of the sum. Single-threaded by design -- completions resume on
+// the event loop -- so the countdown needs no atomics.
+//
+// The count starts at 3, not 2: either task may finish synchronously inside
+// await_suspend (an inline sqlite read does), and the last to finish resumes
+// the waiter. Holding a third share until both are launched keeps that
+// resume from happening while await_suspend is still on the stack.
+template <typename T>
+class WhenBoth {
+public:
+    WhenBoth(Task<T> a, Task<T> b) : a_(std::move(a)), b_(std::move(b)) {}
+
+    bool await_ready() const noexcept { return false; }
+
+    bool await_suspend(std::coroutine_handle<> outer) {
+        outer_ = outer;
+        ha_.emplace(run(a_, ra_, ea_));
+        hb_.emplace(run(b_, rb_, eb_));
+        ha_->handle.resume();
+        hb_->handle.resume();
+        return --left_ != 0;   // both already done: carry on without suspending
+    }
+
+    std::pair<T, T> await_resume() {
+        if (ea_) std::rethrow_exception(ea_);
+        if (eb_) std::rethrow_exception(eb_);
+        return {std::move(ra_), std::move(rb_)};
+    }
+
+private:
+    // Hands control back to the waiter from inside a runner, which stays
+    // suspended here until ~WhenBoth destroys its frame.
+    struct ResumeWaiter {
+        std::coroutine_handle<> h;
+        bool await_ready() const noexcept { return false; }
+        std::coroutine_handle<> await_suspend(std::coroutine_handle<>) noexcept { return h; }
+        void await_resume() const noexcept {}
+    };
+
+    Task<void> run(Task<T>& t, T& out, std::exception_ptr& err) {
+        try { out = co_await t; }
+        catch (...) { err = std::current_exception(); }
+        if (--left_ == 0) co_await ResumeWaiter{outer_};
+    }
+
+    Task<T>                 a_, b_;
+    T                       ra_{}, rb_{};
+    std::exception_ptr      ea_, eb_;
+    std::optional<Task<void>> ha_, hb_;
+    std::coroutine_handle<> outer_;
+    int                     left_ = 3;
+};
+
+template <typename T>
+WhenBoth<T> when_both(Task<T> a, Task<T> b) { return WhenBoth<T>(std::move(a), std::move(b)); }
+
 // ─── SleepAwaitable ──────────────────────────────────────────────────────────
 // Non-blocking sleep: suspends the coroutine and resumes it after `ms`
 // milliseconds via the event loop's timerfd (one-shot, no extra threads).
@@ -201,6 +259,25 @@ struct SleepAwaitable {
     void await_suspend(std::coroutine_handle<> h) noexcept {
         if (!loop) { h.resume(); return; }
 
+        // If the token is ALREADY cancelled before the timer is even
+        // armed, the resume must happen ASYNCHRONOUSLY (via loop->post),
+        // never from within this call. A ws/sse handler's loop shape is
+        // `while ws.open: ... await sleep(ms)` -- it re-checks is_cancelled()
+        // only AFTER the await returns, not before calling sleep() again.
+        // If this resumed h synchronously, the coroutine would run straight
+        // through to the next sleep() call, hit this exact branch again
+        // (the token is still cancelled), and recurse on the same C++ call
+        // stack with no bound: what looks like a bounded per-iteration loop
+        // at the Lux Script level is actually unbounded native recursion,
+        // and it ends in a stack-overflow SIGSEGV that takes the whole
+        // process down, not just this one connection. Posting breaks the
+        // stack on every iteration instead, the same way a real epoll_wait
+        // round-trip would.
+        if (auto t = token.lock(); t && t->is_cancelled()) {
+            loop->post([h]() mutable { if (!h.done()) h.resume(); });
+            return;
+        }
+
         // Schedule the timer.  The callback clears the wake slot first so
         // cancel() can't fire it again after the timer has already won.
         int tfd = loop->schedule_timer(ms, [h, tok = token]() mutable {
@@ -208,9 +285,12 @@ struct SleepAwaitable {
             if (!h.done()) h.resume();
         });
 
-        // Register the early-wake callback.  If the token is already
-        // cancelled, set_wake() fires the callback immediately: we cancel
-        // the timerfd we just armed and resume the coroutine.
+        // Register the early-wake callback for a cancellation that arrives
+        // WHILE this timer is pending (the common case: the connection
+        // closes mid-sleep). This is not the synchronous-recursion hazard
+        // above -- cancel() is invoked from HttpConnection::close(), which
+        // is not itself running inside this coroutine's own call chain, so
+        // resuming h here does not grow this coroutine's call stack.
         if (auto t = token.lock()) {
             t->set_wake([h, tfd, l = loop]() mutable {
                 l->cancel_timer(tfd);
@@ -231,6 +311,25 @@ namespace detail {
 // sleep(ms, loop) — explicit loop (backward-compat / advanced use)
 inline SleepAwaitable sleep(int ms, core::EventLoop* loop) {
     return {ms, loop, detail::current_token};
+}
+
+// sleep(ms, loop, token) — explicit loop AND token.
+//
+// Required for any handler that can call sleep() more than once across a
+// suspension boundary -- a ws/sse route's `while ... : await sleep(ms)`
+// loop is exactly this shape. detail::current_token is set ONCE, inside
+// HttpConnection::dispatch(), and every OTHER connection dispatched on this
+// same event-loop thread overwrites it in between. A loop that re-enters
+// sleep() after its first suspension reads whatever connection most
+// recently dispatched on this thread, not its own -- on a busy server that
+// is essentially always a different (and possibly already-closed)
+// connection's token, so is_cancelled() checks against a token that says
+// nothing about this connection at all. Passing the token this coroutine
+// actually owns (Request::cancel_token) makes the awaitable correct
+// regardless of what else this thread dispatches while it sleeps.
+inline SleepAwaitable sleep(int ms, core::EventLoop* loop,
+                            std::weak_ptr<CancellationToken> token) {
+    return {ms, loop, std::move(token)};
 }
 
 // sleep(ms) — uses thread-locals set for the current request (no args needed)

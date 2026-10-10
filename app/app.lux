@@ -3,13 +3,14 @@
 # Puerto de la app de escritorio Localify (Rust/Tauri) al stack Lux:
 # LuxScript + ventana nativa GTK/WebKit + HTTP loopback. La lógica de
 # resolución (YouTube Music + MusicBrainz + yt-dlp) está reescrita en
-# LuxScript; la reproducción de audio la hace el elemento <audio> del
-# WebView servido por /audio/:id con soporte Range.
+# LuxScript; la reproducción de audio la hace un motor nativo (miniaudio +
+# ffmpeg, src/audio_engine.cpp) que este backend manda por el módulo `audio`.
 
 # Los imports son a nivel de proyecto: TODOS los módulos nativos usados por
 # los demás .lux de este directorio se declaran aquí.
 import sqlite
 import window
+import audio
 import os
 import time
 import hash

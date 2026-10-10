@@ -69,6 +69,10 @@ struct BuiltinModuleFn {
                                // the EXACT signature every other builtin already uses
                                // (natives.hpp) -- a module function IS a builtin,
                                // just namespaced under an import instead of always present.
+    bool        is_async;     // runs on the I/O pool; `await` required
+    std::string sig;          // argument types, e.g. "ss|i"; min/max come from it
+
+    Value call(NativeCtx&, std::vector<Value>&, std::string& error) const;  // checks sig, then fn
 };
 
 class BuiltinModule {
@@ -79,6 +83,12 @@ public:
                            std::string& error) { return true; }  // most modules need nothing
 };
 ```
+
+A module is usually just a name and a table, written with `LUX_MODULE(name, {{"fn", "sig",
+fn_ptr}, ...})`; only one that needs `configure()` writes the class. The signature is checked
+once, in `call()`, which both dispatch sites (the VM for a synchronous call, the async driver
+for an awaited one) go through — so a function body never re-checks its argument types, and
+every type error reads the same way.
 
 Reusing `NativeFn`'s calling convention is what lets the compiler's existing checking/emission
 machinery stay almost untouched — a module function is dispatched exactly like `len()` or
@@ -150,6 +160,9 @@ the arguments, emit one opcode with `(id << 8) | argc` — except the id space i
 with one line changed: `builtin_module_function_at(id)` instead of `native_at(id)`.
 
 ### 3.4 Why every module call has type `Json`, and why that is not a shortcut
+
+> Superseded: module functions now declare a return type (the `>` of their signature) and
+> `--native` compiles their calls (§6). What follows is how the first cut stayed correct.
 
 `hash.sha256()` always returns a `string`, in reality — but its `IrExpr::type` is set to
 `Type::json()`, not `Type::primitive(Kind::String)`. This is deliberate, not a shortcut taken
@@ -316,8 +329,8 @@ hypothetical one.
    `src/lux_script/modules/README.md`; this walkthrough is adding an official one, so it goes
    in `base_modules/`), following `hash.cpp`'s shape: free functions matching `NativeFn`'s
    signature (`Value fn_qrcode_generate(NativeCtx&, std::vector<Value>& args, std::string&
-   error)`), a class implementing `BuiltinModule`, and `LUX_REGISTER_MODULE(QrcodeModule)` as
-   the file's last line. `NativeCtx&` can be ignored if the module needs no
+   error)`) and a `LUX_MODULE(qrcode, {...})` table with each function's signature as the
+   file's last lines (see `src/lux_script/modules/README.md` for the signature letters). `NativeCtx&` can be ignored if the module needs no
    request/response/session access, the way `hash`'s and `csv`'s functions do — accept it, do
    not use it. If the module needs to carry state across calls (`csv`'s tables, `pdf`'s
    documents), see §5.2 for the pattern that answers that — it is not a core-mechanism change,
@@ -415,27 +428,23 @@ the archive's now-unresolved symbols.
   uses, and resumes the handler on its own event loop thread when it finishes. A slow/hung
   remote server or child process still ties up a pool worker for the duration (bounded by each
   module's own timeout), but no longer the event-loop thread serving every OTHER connection on
-  that core. Same error convention `await <db-module>.*` already established: a failure comes
-  back as `{"error": message}` data, never a hard `fail()` of the handler — deliberately
-  different from calling the SAME function synchronously (a plain, non-`is_async` builtin, where
-  a non-empty `error` still means `fail()`), because `is_async` is an exclusive, checked-at-
-  compile-time calling convention: a given function is reached through exactly one of the two
-  paths, never both. No native (`--native`) codegen yet for either path (next bullet still
-  applies) — `await os.run(...)`/`await http.get(...)` fall back to bytecode like any other
-  `BuiltinModuleCall` today.
-- **No native (`--native`) codegen for any module function yet.** Deliberate and safe (§3.4),
-  not an oversight — falls back to bytecode per route, cleanly, with the fallback verified
-  against the real binary rather than assumed.
-- **No request-scoped handle cleanup.** `csv`/`pdf` handles live until explicitly `close()`d or
-  the process exits (§5.2) — nothing frees a request's leftover handles when it ends.
+  that core. A failure is raised at the `await` (`VM::resume_error`), exactly like a
+  synchronous function's — one error model, caught by `try` like any runtime error; the database
+  modules raise the same way. With `--native`, a module call compiles too: the generated code
+  calls the same `BuiltinModuleFn::call()` with the request's `NativeCtx` (a route's own; for a
+  function, the one its caller set, `current_native_ctx()`), an awaited one on the I/O pool,
+  and converts the result to the type the signature declares.
+- **Handles are released by idle time, not per request.** `csv`/`pdf`/`proc` handles are
+  random and dropped after 10 minutes (an hour for `proc`) unused — a leftover handle does not
+  live for good, but it is not freed the moment its request ends either.
 
 ## 7. How this is validated
 
 `hash` and `csv` are dependency-free, so they live in the always-runs suite:
 `tests/cases/modules.lux` + the `"== native modules =="` block in `tests/run_tests.sh` — real
 HTTP requests against a real running `lux` binary, `hash` checked byte-for-byte against
-Python's `hashlib`/`hmac`, `csv` checked against hand-computed filter/sum/mean/group_sum
-results and RFC 4180 quoted-field parsing, plus (in `"== compile errors =="`) the missing-
+Python's `hashlib`/`hmac`, `csv` checked through `read()`/`write()`, List methods and RFC 4180
+quoted-field parsing, plus (in `"== compile errors =="`) the missing-
 `import` case. All of it is part of the `regression` ctest suite.
 
 `pdf` carries an optional dependency (cairo, `LUX_PDF`), so — like `sqlite`/`postgres`/`mysql`
