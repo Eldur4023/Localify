@@ -19,13 +19,13 @@ import math
 import json
 
 app:
-    name      "Serverify"
+    name      "Localify"
     host      "127.0.0.1"
     templates "./templates"
     static    "/static" -> "./public"
 
     window:
-        title     "Serverify"
+        title     "Localify"
         width     1280
         height    820
         resizable true
