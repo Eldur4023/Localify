@@ -22,6 +22,11 @@ public:
     void start();
     void on_event(uint32_t events);
 
+    // Orderly shutdown (the drain in App::run): a connection with no request in progress
+    // closes now, instead of waiting for the client or for the idle timeout (60 s); one with a
+    // request in progress finishes it and then closes (keep-alive off). ONLY from its loop's thread.
+    void begin_shutdown();
+
 private:
     int                fd_;
     core::EventLoop&   loop_;
@@ -31,6 +36,7 @@ private:
     std::shared_ptr<lux::CancellationToken> cancel_token_; // one per request
     HttpParser         parser_;
     bool               closed_         = false;
+    bool               draining_       = false;   // begin_shutdown() was called: no more keep-alive
     // What epoll is watching: re-arming the same thing after every response
     // was an epoll_ctl per request for nothing.
     uint32_t           armed_          = EPOLLIN;   // as tcp_server adds it

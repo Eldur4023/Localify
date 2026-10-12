@@ -38,11 +38,15 @@ every "1s":
     # alguien tocó una playlist: despachar borra la marca)
     if srv_activo() and state.incr("srv_rec", 1, 30000) == 1:
         srv_reconciliar()
+    # y la biblioteca y los favoritos de la nube, cada 5 minutos (en segundo plano, sin avisar)
+    if srv_activo() and ajuste("server_autopull", "1") == "1" and state.incr("srv_pull", 1, 300000) == 1:
+        traer_nube()
 
 # "Puede que te guste": trae una tanda nueva del catálogo cuando caduca
 # (cada seis horas; recomendaciones.lux).
 every "1m":
     recomendaciones_tick()
+    sondeo_artistas_tick()
 
 # La búsqueda remota pendiente (la escribe /api/invoke, la corre esto).
 every "300ms":

@@ -15,6 +15,7 @@
 #include <curl/curl.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 #include <memory>
@@ -53,7 +54,11 @@ struct CurlGlobal {
             static_cast<CurlGlobal*>(g)->locks[d].unlock();
         });
         curl_share_setopt(share, CURLSHOPT_USERDATA, this);
-        for (auto d : {CURL_LOCK_DATA_CONNECT, CURL_LOCK_DATA_DNS, CURL_LOCK_DATA_SSL_SESSION})
+        for (auto d : {CURL_LOCK_DATA_CONNECT,
+#ifndef __ANDROID__
+                       CURL_LOCK_DATA_DNS,
+#endif
+                       CURL_LOCK_DATA_SSL_SESSION})
             curl_share_setopt(share, CURLSHOPT_SHARE, d);
     }
     ~CurlGlobal() { curl_share_cleanup(share); curl_global_cleanup(); }
@@ -276,6 +281,11 @@ Value do_request(const std::string& method, const std::string& url, const Value*
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "Lux/1.0");
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+#ifdef __ANDROID__
+    // No CA bundle on Android: the host app concatenates the system store
+    // into one PEM and points LUX_CA_BUNDLE at it (src/boot.cpp).
+    if (const char* ca = std::getenv("LUX_CA_BUNDLE")) curl_easy_setopt(curl, CURLOPT_CAINFO, ca);
+#endif
 
     const CURLcode rc = curl_easy_perform(curl);
     if (header_list) curl_slist_free_all(header_list);

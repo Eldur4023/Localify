@@ -66,7 +66,11 @@ export const player = {
 	resume: () => invoke("player_resume"),
 	next: () => invoke("player_next"),
 	previous: () => invoke("player_previous"),
-	seek: (positionMs) => invoke("player_seek", { positionMs }),
+	seek: (positionMs) => {
+		// shim móvil: el <audio> del WebView salta a la misma posición
+		window.__localifyWebAudio?.seek?.(positionMs);
+		return invoke("player_seek", { positionMs });
+	},
 	setVolume: (volume) => invoke("player_set_volume", { volume }),
 	setRepeat: (mode) => invoke("player_set_repeat", { mode }),
 	setShuffle: (enabled) => invoke("player_set_shuffle", { enabled }),
@@ -161,6 +165,22 @@ export const search = {
 		scope,
 		page: req,
 		noRemote
+	}),
+	/**
+	 * Resultados de YouTube normal (no YT Music), ya puntuados y filtrados
+	 * por el backend. Se pintan en su propia sección, sin persistir nada:
+	 * añadir es un gesto explícito (addWeb).
+	 */
+	web: (query, limit = 8) => invoke("library_search_web", {
+		query,
+		limit
+	}),
+	/** Crea la pista a partir de un resultado de YouTube y encola la descarga. */
+	addWeb: (candidato) => invoke("library_add_web_track", {
+		videoId: candidato.id,
+		title: candidato.title,
+		artistDisplay: candidato.artistDisplay,
+		durationMs: candidato.durationMs
 	})
 };
 export const playlists = {
@@ -289,6 +309,9 @@ export const social = {
 	}),
 	logout: () => invoke("server_logout"),
 	setUpload: (enabled) => invoke("server_set_upload", { enabled }),
+	setPresence: (enabled) => invoke("server_set_presence", { enabled }),
+	/** Avisa de lo que suena (título vacío = nada); el servidor lo muestra en Social. */
+	presence: (title, artist) => invoke("social_presence", { title, artist }),
 	/** Sube un lote de la biblioteca descargada; repetir con `next` hasta `done`. */
 	/** Descarga de la nube: trae biblioteca, favoritos y playlists que no tengo; nunca baja lo que ya tengo. */
 	pull: () => invoke("server_pull"),

@@ -101,6 +101,15 @@ fn bool trabajo_listo_para_reintento(Json j):
         espera = 8
     return ahora() >= desde + espera
 
+# El móvil no tiene yt-dlp: resuelve y baja él mismo (ytmovil.lux).
+fn void iniciar_descarga(string tid, string vid):
+    if descarga_movil():
+        string fallo = descargar_movil(tid, vid)
+        if fallo != "":
+            await sqlite.exec("update download_jobs set state = 'failed', last_error = ?, updated_at = unixepoch() where track_id = ?", fallo, tid)
+        return
+    descargar_iniciar(tid, vid)
+
 fn void promover_cola():
     int MAX_CONCURRENTES = 2
     while activos_descarga() < MAX_CONCURRENTES:
@@ -135,7 +144,7 @@ fn void promover_cola():
                         break
                     # el servidor no la tiene: de vuelta al flujo de siempre
                     if vid != "":
-                        descargar_iniciar(tid, vid)
+                        iniciar_descarga(tid, vid)
                     else:
                         await sqlite.exec("update download_jobs set state = 'matching', updated_at = unixepoch() where track_id = ?", tid)
                     promovido = true
@@ -144,7 +153,7 @@ fn void promover_cola():
             if vid != "":
                 int tocado = await sqlite.exec("update download_jobs set state = 'downloading', started_at = unixepoch(), updated_at = unixepoch() where track_id = ? and state = 'queued'", tid)
                 if tocado == 1:
-                    descargar_iniciar(tid, vid)
+                    iniciar_descarga(tid, vid)
                     promovido = true
                     break
             else:
@@ -482,7 +491,7 @@ fn int int_pode(string s):
 fn void finalizar(string tid):
     List<Json> f = await sqlite.query("""
         select j.tmp_path, t.title, t.artist_display, t.isrc, t.track_number,
-               al.title as album, al.release_date
+               t.album_id, al.title as album, al.release_date
         from download_jobs j
         join tracks t on t.id = j.track_id
         left join albums al on al.id = t.album_id
@@ -498,19 +507,16 @@ fn void finalizar(string tid):
     string isrc = jstr(f[0]["isrc"], "")
     int pista_num = jint(f[0]["track_number"], 0)
     string fecha = jstr(f[0]["release_date"], "")
+    string album_id = jstr(f[0]["album_id"], "")
 
     if not os.is_file(origen):
         await sqlite.exec("update download_jobs set state = 'failed', last_error = 'finalize.missing_file', updated_at = unixepoch() where track_id = ?", tid)
         return
 
-    # extensión y códec reales (ffprobe; si falta, se confía en el nombre)
+    # contenedor real (ffprobe; si falta, se confía en el nombre)
     string ext = "webm"
-    string codec = ""
     Json? info = ffprobe_info(origen)
     if info != null:
-        List<Json> streams = jlist(jget(info, "streams"))
-        if len(streams) > 0:
-            codec = jstr(streams[0]["codec_name"], "")
         string contenedor = jstr(jget(jget(info, "format"), "format_name"), "")
         if contenedor.contains("matroska") or contenedor.contains("webm"):
             ext = "webm"
@@ -521,27 +527,88 @@ fn void finalizar(string tid):
         elif contenedor.contains("mp3"):
             ext = "mp3"
 
-    # destino_para (remux.rs): WebM con Opus no es un .opus de verdad.
-    string ext_final = ext
-    bool remux = false
-    if ext == "webm" and (codec == "opus" or codec == "vorbis"):
-        ext_final = codec == "opus" ? "opus" : "ogg"
-        remux = true
-    elif ext == "webm":
-        ext_final = "webm"
+    # sin ffprobe (móvil) no hay forma de mirarlo: lo que trae el servidor es MP3
+    if info == null and state.get("srvdl:" + tid, "") != "":
+        ext = "mp3"
+
+    # Destino: SIEMPRE .mp3 (320 kbps, ID3v2.3 + ID3v1) con todas las
+    # etiquetas adheridas y la portada incrustada como fotograma APIC.
+    # Si el origen ya es mp3 (p. ej. vino del servidor) se copia tal cual.
+    string ext_final = "mp3"
+    bool ya_mp3 = ext == "mp3"
 
     string shard = shard_de(tid)
     garantizar_biblioteca()
     string dir_destino = os.path_join(biblioteca_raiz(), "audio", shard)
     os.make_dir(dir_destino)
+    # sin ffmpeg (móvil sin servidor) el crudo se queda con su contenedor
+    if not hay_binario("ffmpeg") and not ya_mp3:
+        ext_final = origen.ends_with(".m4a") ? "m4a" : "webm"
     string destino_abs = os.path_join(dir_destino, tid + "." + ext_final)
     string rel = "audio/" + shard + "/" + tid + "." + ext_final
 
-    if remux and hay_binario("ffmpeg"):
-        List<string> args = ["-y", "-i", origen, "-c", "copy", "-vn"]
+    # Portada para incrustar: la del álbum si ya está en la caché; si no,
+    # se descarga una vez (cover_url del álbum o miniatura del vídeo).
+    string portada = ""
+    if album_id != "":
+        string pa = os.path_join(covers_dir(), "album-" + album_id + ".jpg")
+        if os.is_file(pa):
+            portada = pa
+    bool portada_temporal = false
+    if portada == "" and hay_binario("ffmpeg"):
+        string? url = album_id != "" ? portada_album_url(album_id) : null
+        if url == null:
+            string yid = youtube_id_de_pista(tid)
+            if yid != "":
+                url = url_miniatura_video(yid)
+        if url != null:
+            string di = os.path_join(covers_dir(), "finalizar-" + tid + ".jpg")
+            if cachear_imagen(url, di) and os.is_file(di):
+                portada = di
+                portada_temporal = true
+
+    if not hay_binario("ffmpeg"):
+        # sin ffmpeg: el fichero tal cual (suenan igual; identidad por nombre)
+        if destino_abs != origen:
+            await os.copy_file(origen, destino_abs, true)
+    elif ya_mp3:
+        # ya está en el formato final (vino del servidor, p. ej. por relay):
+        # solo falta incrustarle la portada si el servidor no pudo (copia el
+        # stream mp3 sin recodificar, conservando las etiquetas que trae)
+        bool hecho = false
+        if portada != "":
+            # miniatura de vídeo (16:9): al cuadrado central, como en la rama de recodificado
+            List<string> vc = portada_temporal ? ["-c:v", "mjpeg", "-q:v", "2", "-vf", "crop=ih:ih"] : ["-c:v", "copy"]
+            Json r = await os.run("ffmpeg", ["-y", "-i", origen, "-i", portada,
+                                             "-map", "0:a", "-map", "1:v",
+                                             "-c:a", "copy"] + vc + [
+                                             "-id3v2_version", "3",
+                                             "-map_metadata", "0",
+                                             "-metadata:s:v", "title=Album cover",
+                                             "-metadata:s:v", "comment=Cover (front)",
+                                             destino_abs])
+            hecho = jint(r["status"], 1) == 0
+            if portada_temporal:
+                os.remove_file(portada)
+        if not hecho and destino_abs != origen:
+            await os.copy_file(origen, destino_abs, true)
+    else:
+        List<string> args = ["-y", "-i", origen]
+        if portada != "":
+            # dos entradas: el audio y la carátula (se copia el stream JPEG,
+            # ffmpeg la envuelve como APIC en el ID3 del mp3)
+            # una miniatura de vídeo es 16:9: se recorta al cuadrado central
+            # (la carátula en los vídeos "Topic"); la del álbum ya es cuadrada
+            List<string> vcodec = portada_temporal ? ["-c:v", "mjpeg", "-q:v", "2", "-vf", "crop=ih:ih"] : ["-c:v", "copy"]
+            args = args + ["-i", portada, "-map", "0:a", "-map", "1:v"] + vcodec + [
+                           "-metadata:s:v", "title=Album cover",
+                           "-metadata:s:v", "comment=Cover (front)"]
+        else:
+            args.add("-vn")
+        args = args + ["-c:a", "libmp3lame", "-b:a", "320k",
+                       "-id3v2_version", "3", "-write_id3v1", "1",
+                       "-map_metadata", "-1"]
         # etiquetas en el mismo pase: título, artista, álbum, pista, fecha, ISRC
-        args.add("-map_metadata")
-        args.add("-1")
         args.add("-metadata")
         args.add("title=" + titulo)
         if artista != "":
@@ -561,14 +628,12 @@ fn void finalizar(string tid):
             args.add("isrc=" + isrc)
         args.add(destino_abs)
         Json r = await os.run("ffmpeg", args)
+        if portada_temporal:
+            os.remove_file(portada)
         if jint(r["status"], 1) != 0:
             os.remove_file(destino_abs)
-            await sqlite.exec("update download_jobs set state = 'failed', last_error = 'finalize.remux_failed', updated_at = unixepoch() where track_id = ?", tid)
+            await sqlite.exec("update download_jobs set state = 'failed', last_error = 'finalize.transcode_failed', updated_at = unixepoch() where track_id = ?", tid)
             return
-    else:
-        # sin ffmpeg: el fichero tal cual (suenan igual; identidad por nombre)
-        if destino_abs != origen:
-            await os.copy_file(origen, destino_abs, true)
 
     # verificación de duración con ffprobe (±2000 ms, TAMANO_MINIMO 16 KB)
     int duracion_real_ms = 0
@@ -595,7 +660,7 @@ fn void finalizar(string tid):
         on conflict(track_id) do update set rel_path = excluded.rel_path, format = excluded.format,
             codec = excluded.codec, size_bytes = excluded.size_bytes, duration_ms = excluded.duration_ms,
             youtube_id = excluded.youtube_id, verified_at = excluded.verified_at
-        """, tid, rel, ext_final, codec, os.file_size(destino_abs), duracion_real_ms > 0 ? duracion_real_ms : null,
+        """, tid, rel, ext_final, ext_final, os.file_size(destino_abs), duracion_real_ms > 0 ? duracion_real_ms : null,
         seleccionar_youtube_id(tid))
 
     consolidar(tid)

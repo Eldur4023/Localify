@@ -38,6 +38,30 @@ curl -s -H "Authorization: Bearer $T" $B/tracks/dQw4w9WgXcQ/audio | cmp -s - "$W
 P='{"name":"Mix","visibility":"public","collaborative":true,"tracks":[{"id":"dQw4w9WgXcQ","title":"Yellow","artist":"Coldplay"},{"id":"OTRO","title":"Yellow","artist":"Coldplay","titleNorm":"yellow","artistNorm":"coldplay","durationMs":266100},{"id":"zzzzzzzzzzz","title":"Otra"}]}'
 ok "crear playlist" "$(j POST "$P" $B/playlists)" '"id":1'
 D=$(curl -s -H "Authorization: Bearer $T" $B/playlists/1); ok "detalle" "$D" '"available":true'; ok "no disponible" "$D" '"available":false'
+# portada de playlist y "escuchando ahora"
+head -c 3000 /dev/urandom > "$W/c.jpg"
+ok "sin portada" "$(curl -s -H "Authorization: Bearer $T" $B/playlists/1)" '"hasCover":false'
+ok "subir portada" "$(curl -s -o /dev/null -w %{http_code} -X PUT -H "Authorization: Bearer $T" -F cover=@"$W/c.jpg" $B/playlists/1/cover)" 204
+ok "con portada" "$(curl -s -H "Authorization: Bearer $T" $B/playlists/1)" '"hasCover":true'
+curl -s -H "Authorization: Bearer $T" $B/playlists/1/cover | cmp -s - "$W/c.jpg" && ok "portada idéntica" 1 1 || ok "portada idéntica" 0 1
+ok "portada ajena no se sube" "$(curl -s -o /dev/null -w %{http_code} -X PUT -H "Authorization: Bearer $TB" -F cover=@"$W/c.jpg" $B/playlists/1/cover)" 404
+ok "historial: subir" "$(j POST '{"items":[{"id":"x1","titleNorm":"yellow","artistNorm":"coldplay","durationMs":266000,"playedAt":'$(date +%s)',"completed":true,"msPlayed":180000},{"id":"nada","titleNorm":"zz","artistNorm":"zz","durationMs":1,"playedAt":5}]}' $B/plays)" '"stored":1'
+ok "tiempo escuchado" "$(curl -s -H "Authorization: Bearer $T" $B/users/ana)" '"listenedMs":180000'
+ok "historial: bajar" "$(curl -s -H "Authorization: Bearer $T" "$B/plays?since=0")" '"titleNorm":"yellow"'
+ok "historial: since filtra" "$(curl -s -H "Authorization: Bearer $T" "$B/plays?since=99999999999")" '[]'
+head -c 3000 /dev/urandom > "$W/av.jpg"
+ok "sin avatar" "$(curl -s -H "Authorization: Bearer $T" $B/me)" '"hasAvatar":false'
+ok "subir avatar" "$(curl -s -o /dev/null -w %{http_code} -X PUT -H "Authorization: Bearer $T" -F avatar=@"$W/av.jpg" $B/me/avatar)" 204
+ok "con avatar" "$(curl -s -H "Authorization: Bearer $T" $B/me)" '"hasAvatar":true'
+curl -s -H "Authorization: Bearer $TB" $B/users/ana/avatar | cmp -s - "$W/av.jpg" && ok "avatar visible a otros" 1 1 || ok "avatar visible a otros" 0 1
+ok "escaparate: más escuchadas" "$(curl -s -H "Authorization: Bearer $TB" $B/users/ana)" '"topTracks":[{"id":"dQw4w9WgXcQ","title":"Yellow"'
+head -c 20000 /dev/urandom > "$W/r.bin"
+ok "relay no pisa una pista ajena" "$(curl -s -X PUT -H "Authorization: Bearer $TB" -F audio=@"$W/r.bin" -F title=Hack -F title_norm=hack -F artist_norm=hack -F duration_ms=1 $B/relay/dQw4w9WgXcQ)" '"stored":false'
+curl -s -H "Authorization: Bearer $T" $B/tracks/dQw4w9WgXcQ/audio | cmp -s - "$W/a.opus" && ok "el audio original sigue intacto" 1 1 || ok "el audio original sigue intacto" 0 1
+ok "presencia" "$(j PUT '{"title":"Yellow","artist":"Coldplay"}' $B/presence)" 204
+ok "escuchando en usuarios" "$(curl -s -H "Authorization: Bearer $T" $B/users)" '"nowPlaying":{"title":"Yellow"'
+j PUT '{"title":"","artist":""}' $B/presence >/dev/null
+ok "parado no sale" "$(curl -s -H "Authorization: Bearer $T" $B/users | grep -c nowPlaying)" 0
 T=$TB; ok "pública legible" "$(curl -s -H "Authorization: Bearer $T" $B/playlists/1)" '"access":"reader"'
 ok "lector no edita" "$(j POST '{"tracks":[{"id":"x","title":"t"}]}' $B/playlists/1/tracks)" 403
 T=$TA; ok "añadir miembro" "$(j POST '{"username":"bob"}' $B/playlists/1/members)" 204

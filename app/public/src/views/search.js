@@ -3,6 +3,7 @@ import { alRecibir } from "../ipc/events.js";
 import { alCambiarIdioma, t } from "../i18n/index.js";
 import { carrusel, ponerFotoDeArtista, ponerPortada, ponerPortadaDePista, tarjeta, vacio } from "../ui/cards.js";
 import { filaSuelta } from "../ui/fila-suelta.js";
+import { duracion } from "../shell/player.js";
 import { icono } from "../ui/icons.js";
 import { arrastrable } from "../ui/dnd.js";
 import { abrirMenu } from "../ui/menu.js";
@@ -46,6 +47,10 @@ export function mountSearchView(contenedor, ruta) {
 	*/
 	let remotoAtendido = -1n;
 	let vigente = null;
+	/** Resultados de YouTube normal para la consulta vigente. */
+	let webVigente = null;
+	let webConsulta = "";
+	let webId = 0;
 	const desmontadores = [];
 	/** Fila compacta de pista, con su menú y su arrastre. */
 	function filaDePista(pista, contexto) {
@@ -130,6 +135,74 @@ export function mountSearchView(contenedor, ruta) {
 			seccion.append(grupoDePistas(grupo, ids));
 		}
 		return seccion;
+	}
+	/**
+	 * Resultados de YouTube normal, en su propia sección.
+	 *
+	 * No se mezclan con las pistas de la biblioteca a propósito: aquí no hay
+	 * metadatos de catálogo (álbum, artista real), solo lo que dice el título
+	 * del vídeo. Pulsar una fila la añade a la biblioteca y la descarga antes
+	 * de reproducirla — a partir de ahí es una pista como cualquier otra.
+	 */
+	function bloqueWeb(candidatas) {
+		const seccion = document.createElement("section");
+		seccion.className = "resultados__bloque";
+		const h = document.createElement("h3");
+		h.className = "carrusel__titulo";
+		h.textContent = t("search.youtube");
+		seccion.append(h);
+		for (const candidata of candidatas.slice(0, TOPE)) {
+			const fila = document.createElement("div");
+			fila.className = "track track--suelta fila-web";
+			const arte = document.createElement("span");
+			arte.className = "track__index";
+			arte.append(icono("music", 16));
+			const titulo = document.createElement("span");
+			titulo.className = "track__title";
+			titulo.textContent = candidata.title;
+			const secundario = document.createElement("span");
+			secundario.className = "track__artist";
+			secundario.textContent = candidata.artistDisplay;
+			const tiempo = document.createElement("span");
+			tiempo.className = "track__time";
+			tiempo.textContent = duracion(candidata.durationMs);
+			fila.title = t("search.web_add_hint");
+			const principal = document.createElement("div");
+			principal.className = "track__main";
+			principal.append(titulo, secundario);
+			fila.append(arte, principal, tiempo);
+			fila.addEventListener("click", async () => {
+				if (fila.dataset.anadiendo) return;
+				fila.dataset.anadiendo = "1";
+				fila.style.opacity = "0.5";
+				try {
+					await search.addWeb(candidata);
+					await player.playTrack(candidata.id, {
+						kind: "search",
+						query: entrada.value,
+						trackIds: [candidata.id]
+					});
+				} finally {
+					delete fila.dataset.anadiendo;
+					fila.style.opacity = "";
+				}
+			});
+			seccion.append(fila);
+		}
+		return seccion;
+	}
+	async function buscarWeb(consulta) {
+		const miId = ++webId;
+		try {
+			const r = await search.web(consulta);
+			// una respuesta de una pulsación ya superada se tira
+			if (miId !== webId) return;
+			webVigente = Array.isArray(r) ? r : [];
+		} catch {
+			if (miId === webId) webVigente = [];
+		}
+		webConsulta = consulta;
+		pintar();
 	}
 	/**
 	* Tarjeta grande de la primera coincidencia.
@@ -274,6 +347,12 @@ export function mountSearchView(contenedor, ruta) {
 			resultados.append(bloque);
 			algo = true;
 		}
+		// YouTube normal va al final y en su propia sección: los resultados del
+		// catálogo mandan, esto es el rastro que queda fuera de él.
+		if (webVigente && webVigente.length > 0 && webConsulta === entrada.value.trim()) {
+			resultados.append(bloqueWeb(webVigente));
+			algo = true;
+		}
 		// El estado remoto ya no aporta canciones —vienen fundidas en `tracks`—,
 		// solo dice si queda algo por llegar. "Sin credenciales" no es un error: es
 		// accionable desde Ajustes, y callarlo dejaría al usuario preguntándose por
@@ -306,6 +385,8 @@ export function mountSearchView(contenedor, ruta) {
 		}
 		if (consulta.length === 0) {
 			vigente = null;
+			webVigente = null;
+			webConsulta = "";
 			pintar();
 			return;
 		}
@@ -323,6 +404,8 @@ export function mountSearchView(contenedor, ruta) {
 				vigente = null;
 				pintar();
 			});
+			// YouTube normal se consulta en paralelo y en su propia sección.
+			void buscarWeb(consulta);
 		}, 250);
 	}
 	entrada.addEventListener("input", buscar);

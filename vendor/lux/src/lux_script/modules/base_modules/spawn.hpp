@@ -83,7 +83,9 @@ inline bool start(const std::vector<std::string>& argv, const Options& o, Child&
     };
     bool ok = wire(o.in, STDIN_FILENO, c.in) && wire(o.out, STDOUT_FILENO, c.out) &&
               wire(o.err, STDERR_FILENO, c.err);
+#ifndef __ANDROID__
     if (ok && !o.cwd.empty()) posix_spawn_file_actions_addchdir_np(&fa, o.cwd.c_str());
+#endif
 
     // The environment: ours, minus every key the options touch, plus what
     // they set.
@@ -97,19 +99,33 @@ inline bool start(const std::vector<std::string>& argv, const Options& o, Child&
     }
     for (const auto& [k, v] : o.env)
         if (v.is_str()) env_storage.push_back(k + "=" + v.as_str());
+    const std::vector<std::string> run_argv = [&, argv]() {
+#ifdef __ANDROID__
+        // bionic no tiene posix_spawn_file_actions_addchdir_np: el "cd" lo hace
+        // un shell intermedio (los procesos externos son excepcionales allí).
+        if (ok && !o.cwd.empty()) {
+            std::vector<std::string> wrapped = {"/system/bin/sh", "-c",
+                                                "cd \"$1\" && shift && exec \"$@\"",
+                                                "lux", o.cwd};
+            for (size_t i = 0; i < argv.size(); ++i) wrapped.push_back(argv[i]);
+            return wrapped;
+        }
+#endif
+        return std::vector<std::string>(argv);
+    }();
     std::vector<char*> envp, args;
     for (auto& s : env_storage) envp.push_back(s.data());
     envp.push_back(nullptr);
-    for (const auto& a : argv) args.push_back(const_cast<char*>(a.c_str()));
+    for (const auto& a : run_argv) args.push_back(const_cast<char*>(a.c_str()));
     args.push_back(nullptr);
 
-    int rc = ok ? posix_spawnp(&c.pid, argv[0].c_str(), &fa, nullptr, args.data(), envp.data()) : errno;
+    int rc = ok ? posix_spawnp(&c.pid, run_argv[0].c_str(), &fa, nullptr, args.data(), envp.data()) : errno;
     posix_spawn_file_actions_destroy(&fa);
     for (int fd : theirs) ::close(fd);   // only the child needs its ends
     if (rc != 0) {
         for (int fd : ours) ::close(fd);
         c = Child{};
-        error = "could not start '" + argv[0] + "': " + std::strerror(rc);
+        error = "could not start '" + run_argv[0] + "': " + std::strerror(rc);
         return false;
     }
     return true;

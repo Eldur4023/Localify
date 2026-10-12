@@ -194,6 +194,15 @@
   box-sizing: border-box;
 }
 
+/* Fila de resultado de YouTube normal (sección «En YouTube» de la búsqueda).
+   No tiene carátula: el icono ocupa su sitio y el título absorbe el ancho. */
+.fila-web .track__index {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: start;
+}
+
 /* ── Fichas de álbum y artista ───────────────────────────────────────────── */
 
 .vista__header--ficha {
@@ -1432,3 +1441,298 @@ a.social__fila:hover {
   gap: 6px;
   margin: 8px 0;
 }
+
+/* ── Perfil: portada con degradado, cifras, escaparate ─────────────────── */
+
+.perfil__cabecera {
+  --perfil-color: color-mix(in srgb, var(--accent) 55%, #000);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-inline: calc(var(--sp-5) * -1);
+  padding: var(--sp-6) var(--sp-5) var(--sp-5);
+  text-align: center;
+  background: linear-gradient(to bottom, var(--perfil-color), transparent);
+  transition: background 0.4s ease;
+}
+
+.perfil__avatar {
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--accent) 35%, var(--bg-elevated));
+  color: var(--text-base);
+  font-weight: var(--fw-bold);
+}
+
+.perfil__avatar--grande {
+  flex-basis: 132px;
+  width: 132px;
+  height: 132px;
+  font-size: 56px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.perfil__avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.perfil__datos {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.perfil__nombre {
+  margin: 0;
+  font-size: 32px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.perfil__usuario {
+  color: var(--text-subdued);
+  font-size: var(--fs-sm);
+}
+
+.perfil__bio {
+  margin: var(--sp-2) 0 0;
+  max-width: 40ch;
+  color: var(--text-base);
+}
+
+.perfil__cifras {
+  display: flex;
+  gap: var(--sp-6);
+  margin-top: var(--sp-2);
+}
+
+.perfil__cifra {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.perfil__cifra strong {
+  font-size: var(--fs-lg);
+}
+
+.perfil__cifra span {
+  color: var(--text-subdued);
+  font-size: var(--fs-xs);
+}
+
+/* Lo que suena ahora: píldora con ecualizador animado */
+.perfil__ahora {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  max-width: 100%;
+  margin-top: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.35);
+  text-align: start;
+}
+
+.perfil__ahora-texto {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  font-size: var(--fs-sm);
+}
+
+.perfil__ahora-texto small {
+  color: var(--accent);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.perfil__ahora-texto strong,
+.perfil__ahora-texto span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.perfil__barras {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 18px;
+}
+
+.perfil__barras i {
+  width: 3px;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 1px;
+  transform-origin: bottom;
+  animation: perfil-barra 0.9s ease-in-out infinite alternate;
+}
+
+.perfil__barras i:nth-child(2) { animation-delay: -0.3s; }
+.perfil__barras i:nth-child(3) { animation-delay: -0.6s; }
+
+@keyframes perfil-barra {
+  from { transform: scaleY(0.25); }
+  to { transform: scaleY(1); }
+}
+
+@media (min-width: 701px) {
+  .perfil__cabecera {
+    flex-direction: row;
+    flex-wrap: wrap;
+    text-align: start;
+  }
+  .perfil__datos { align-items: flex-start; }
+}
+
+/* Playlists en rejilla */
+.perfil__rejilla {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: var(--sp-4);
+}
+
+.perfil__lista {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+}
+
+.perfil__lista strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.perfil__arte {
+  aspect-ratio: 1;
+  width: 100%;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background: var(--bg-elevated);
+  color: var(--text-subdued);
+  margin-bottom: var(--sp-2);
+}
+
+.perfil__arte img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* Lo más escuchado: puesto, miniatura y barra proporcional */
+.perfil__pista {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+}
+
+.perfil__puesto {
+  flex: 0 0 2ch;
+  text-align: end;
+  color: var(--text-subdued);
+  font-variant-numeric: tabular-nums;
+}
+
+.perfil__miniatura {
+  position: relative;
+  display: grid;
+  place-items: center;
+  color: var(--text-subdued);
+  flex: 0 0 48px;
+  width: 48px;
+  height: 48px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--bg-elevated);
+}
+
+.perfil__miniatura img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.perfil__barra {
+  display: block;
+  height: 3px;
+  margin-top: 4px;
+  width: var(--ancho);
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: 0.7;
+}
+
+.perfil__pista .social__texto { flex: 1; min-width: 0; }
+
+.perfil__plegable {
+  margin-top: var(--sp-4);
+}
+
+.perfil__plegable > summary {
+  cursor: pointer;
+  padding: var(--sp-3) 0;
+  font-weight: var(--fw-bold);
+}
+
+.social__fila .perfil__avatar {
+  margin-inline-end: var(--sp-3);
+}
+
+/* Engranaje de cuenta en la esquina de la portada y editor de perfil */
+.perfil__cabecera { position: relative; }
+
+.perfil__cuenta {
+  position: absolute;
+  top: var(--sp-3);
+  right: var(--sp-5);
+}
+
+.perfil__editar-form {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--sp-3);
+}
+
+.perfil__cambiar-foto {
+  align-self: center;
+  position: relative;
+  border-radius: 50%;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+.perfil__camara {
+  position: absolute;
+  inset: auto 0 0 0;
+  padding: var(--sp-1) 0;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: var(--fs-xs);
+  text-align: center;
+}
+
+.perfil__dialogo { max-height: 90dvh; overflow-y: auto; }

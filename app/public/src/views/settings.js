@@ -155,7 +155,7 @@ export function mountSettingsView(contenedor) {
 			cuerpo
 		};
 	}
-	function campo(etiqueta, control, ayuda) {
+	function campo(etiqueta, control) {
 		const fila = document.createElement("div");
 		fila.className = "ajustes__campo";
 		const l = document.createElement("label");
@@ -169,12 +169,6 @@ export function mountSettingsView(contenedor) {
 		if (!objetivo.id) objetivo.id = `aj-${Math.random().toString(36).slice(2, 9)}`;
 		l.htmlFor = objetivo.id;
 		fila.append(l, control);
-		if (ayuda) {
-			const p = document.createElement("p");
-			p.className = "ajustes__ayuda";
-			p.textContent = ayuda;
-			fila.append(p);
-		}
 		return fila;
 	}
 	function selector(opciones, valor, alCambiar) {
@@ -531,10 +525,6 @@ export function mountSettingsView(contenedor) {
 		// la aplicación.
 		if (pestañaActiva === "descargas") {
 			const { el: bloque, cuerpo } = seccion(t("settings.downloads"));
-			const ayuda = document.createElement("p");
-			ayuda.className = "ajustes__ayuda";
-			ayuda.textContent = t("settings.cookies_help");
-			cuerpo.append(ayuda);
 			// El desplegable lista los navegadores y una entrada más para el fichero.
 			// Van en el mismo control porque son la misma decisión —de dónde salen
 			// las cookies— y separarlos en dos obligaría a explicar cuál manda.
@@ -605,10 +595,6 @@ export function mountSettingsView(contenedor) {
 			acciones.className = "ajustes__acciones";
 			acciones.append(comprobar, actualizar);
 			cuerpo.append(acciones, resultado);
-			const nota = document.createElement("p");
-			nota.className = "ajustes__ayuda";
-			nota.textContent = t("settings.ytdlp_help");
-			cuerpo.append(nota);
 			panel.append(bloque);
 		}
 		// Discord

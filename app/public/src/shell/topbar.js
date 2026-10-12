@@ -14,7 +14,18 @@ export function mountTopBar(contenedor, router) {
 	nav.className = "topbar__nav";
 	const atras = botonIcono("chevron-left", "", () => router.atras(), { tamano: 20 });
 	const adelante = botonIcono("chevron-right", "", () => router.adelante(), { tamano: 20 });
-	nav.append(atras, adelante);
+	// Solo en móvil (CSS): abre el cajón con la barra lateral.
+	const app = document.querySelector(".app");
+	const menu = botonIcono("menu", "", () => app.classList.toggle("is-drawer-abierto"), {
+		tamano: 20,
+		clase: "topbar__menu"
+	});
+	// Solo en móvil (CSS): en vistas de detalle sustituye a ☰ y vuelve a la anterior.
+	const volver = botonIcono("chevron-left", "", () => router.atras(), {
+		tamano: 22,
+		clase: "topbar__volver"
+	});
+	nav.append(menu, volver, atras, adelante);
 	const titulo = document.createElement("h1");
 	titulo.className = "topbar__title";
 	// Ajustes vive aquí y no en la barra lateral: esa lista es de sitios donde
@@ -29,7 +40,9 @@ export function mountTopBar(contenedor, router) {
 	// una canción concreta no debería obligar a navegar a otra pantalla primero.
 	// Se monta entre el título y Ajustes, así que se añade en este orden.
 	const rapida = mountBusquedaRapida(contenedor, router);
-	contenedor.append(ajustes);
+	// Solo en móvil (CSS): la búsqueda rápida se sustituye por esta lupa.
+	const lupa = botonIcono("search", "", () => router.ir("search"), { tamano: 20, clase: "topbar__lupa" });
+	contenedor.append(lupa, ajustes);
 	function etiquetas() {
 		atras.setAttribute("aria-label", t("nav.back"));
 		atras.title = t("nav.back");
@@ -37,10 +50,16 @@ export function mountTopBar(contenedor, router) {
 		adelante.title = t("nav.forward");
 		ajustes.setAttribute("aria-label", t("nav.settings"));
 		ajustes.title = t("nav.settings");
+		lupa.setAttribute("aria-label", t("nav.search"));
+		volver.setAttribute("aria-label", t("nav.back"));
 	}
 	function sincronizar() {
 		atras.disabled = !router.puedeIrAtras();
 		adelante.disabled = !router.puedeIrAdelante();
+		const r = router.actual();
+		// Detalle = cualquier cosa que no sea una de las cuatro pestañas de primer nivel
+		const detalle = !["home", "search", "library", "social", "settings", "liked"].includes(r.nombre) || (r.nombre === "social" && r.params.length > 0);
+		contenedor.classList.toggle("topbar--detalle", detalle);
 	}
 	etiquetas();
 	sincronizar();

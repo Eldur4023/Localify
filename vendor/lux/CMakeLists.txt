@@ -19,7 +19,7 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
     message(FATAL_ERROR "Lux requires Linux: it uses epoll, sendfile(2) and SO_REUSEPORT.")
 endif()
 
@@ -301,6 +301,7 @@ function(lux_optional_module option label)
         return()
     endif()
     find_package(PkgConfig QUIET)
+    message(STATUS "PKGCFG exe='${PKG_CONFIG_EXECUTABLE}' found=${PkgConfig_FOUND} ver='${PKG_CONFIG_VERSION_STRING}'")
     if(PkgConfig_FOUND)
         pkg_check_modules(_${option} QUIET ${M_PACKAGES})
     endif()
@@ -356,7 +357,8 @@ lux_link_script(crypto_check)
 # not an instrumented version of it.
 enable_testing()
 
-# In-process test linked against lux_script: tests/<name>.cpp -> test_<name>.
+# En Android los tests shadow enlazan curl/ssl que no existen en el NDK: fuera.
+if(NOT ANDROID)
 function(lux_script_test name)
     add_executable(test_${name} tests/${name}.cpp)
     lux_link_script(test_${name})
@@ -423,6 +425,8 @@ target_link_options(test_native_route_shadow PRIVATE -rdynamic)
 # this test needs it). --whole-archive would force it in regardless and
 # collide with the copy this test already carries, since this executable is
 # not exercising BuiltinModuleRegistry/module self-registration at all.
+endif()
+
 if(LUX_POSTGRES AND PQ_INC AND PQ_LIB)
     add_executable(test_placeholders tests/placeholders.cpp)
     target_include_directories(test_placeholders PRIVATE ${PQ_INC})

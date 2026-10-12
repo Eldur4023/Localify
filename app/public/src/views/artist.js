@@ -88,6 +88,28 @@ export function mountArtistView(contenedor, ruta) {
 			}
 			secciones.append(bloque);
 		}
+		if (detalle.singles?.length > 0) {
+			const { el: bloque, cuerpo } = carrusel(t("artist.singles"));
+			for (const album of detalle.singles) {
+				cuerpo.append(tarjeta({
+					titulo: album.title,
+					subtitulo: album.year ? String(album.year) : t("library.albums"),
+					destino: `#/album/${album.id}`,
+					albumId: album.id
+				}));
+			}
+			secciones.append(bloque);
+		}
+		if (detalle.allTracks?.length > detalle.topTracks.length) {
+			const bloque = document.createElement("section");
+			bloque.className = "resultados__bloque";
+			const h = document.createElement("h3");
+			h.className = "carrusel__titulo";
+			h.textContent = `${t("artist.all_songs")} (${detalle.allTracks.length})`;
+			bloque.append(h);
+			detalle.allTracks.forEach((p, i) => bloque.append(filaDePista(p, i)));
+			secciones.append(bloque);
+		}
 		if (detalle.topTracks.length === 0 && detalle.albums.length === 0) {
 			secciones.append(vacio(t("artist.empty")));
 		}

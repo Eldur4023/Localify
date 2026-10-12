@@ -2,7 +2,7 @@
 * Compartir una playlist y hacerla conjunta (Serverify).
 *
 * Tu playlist es solo tuya: nadie puede tocarla salvo las personas que invites, y
-* invitar a alguien es lo que la hace conjunta. La visibilidad (privada/pública)
+* invitar a alguien es lo que la hace conjunta. La visibilidad (oculta/pública)
 * solo decide quién puede VERLA; los demás nunca pueden editarla.
 *
 * El servidor guarda una REFERENCIA (título, artista, duración); la música y la
@@ -76,7 +76,7 @@ export async function publicarPlaylist(p) {
 		});
 		const filaNueva = nodo("div", "social__fila social__fila--plana");
 		filaNueva.append(nuevo, invitar);
-		cuerpo.append(filaNueva, nodo("p", "ajustes__ayuda", t("social.joint_help")));
+		cuerpo.append(filaNueva);
 	}
 	async function cambiar(accion) {
 		try {
@@ -95,7 +95,7 @@ export async function publicarPlaylist(p) {
 	cerrar.addEventListener("click", () => dlg.close());
 	const acciones = nodo("div", "dialogo__acciones");
 	acciones.append(cerrar);
-	form.append(nodo("h2", "dialogo__titulo", t("social.share_title", { name: p.name })), nodo("p", "ajustes__etiqueta", t("social.who_sees")), vis, nodo("p", "ajustes__ayuda", t("social.visibility_help")), cuerpo, error, acciones);
+	form.append(nodo("h2", "dialogo__titulo", t("social.share_title", { name: p.name })), nodo("p", "ajustes__etiqueta", t("social.who_sees")), vis, cuerpo, error, acciones);
 	dlg.append(form);
 	document.body.append(dlg);
 	dlg.addEventListener("close", () => dlg.remove());

@@ -184,6 +184,9 @@ fn int cmd_rescan():
 # ─── Detalles ────────────────────────────────────────────────────────────────
 
 fn Json cmd_album_detail(string id):
+    # álbum de catálogo (YouTube Music) aún sin pistas: se traen al abrirlo
+    if id.starts_with("MPRE") and len(await sqlite.query("select 1 from tracks where album_id = ? limit 1", id)) == 0:
+        importar_album(id)
     List<Json> albumes = await sqlite.query("select id, title, release_date, album_type, label from albums where id = ?", id)
     if len(albumes) == 0:
         return error_api("NOT_FOUND", "error.not_found").status(404)
@@ -218,30 +221,51 @@ fn Json cmd_album_detail(string id):
         "tracks": rows
     }
 
-fn Json cmd_artist_detail(string id):
+fn Json cmd_artist_detail(string id0):
+    string alias = ajuste("alias:" + id0, "")
+    string id = alias != "" ? alias : id0
     List<Json> artistas = await sqlite.query("select id, name from artists where id = ?", id)
+    # "srv:<nombre>" fusionado antes de existir los alias: el nombre va en el propio id
+    if len(artistas) == 0 and id.starts_with("srv:"):
+        artistas = await sqlite.query("select id, name from artists where name_norm = ? order by id like 'UC%' desc limit 1", id.slice(4))
+        if len(artistas) > 0:
+            id = jstr(artistas[0]["id"], "")
     if len(artistas) == 0:
         return error_api("NOT_FOUND", "error.not_found").status(404)
+    # La discografía real: se trae de YouTube Music (si el artista es un duplicado "local:"/"srv:",
+    # del canal que le corresponde por nombre) y se junta con lo que ya hay en la biblioteca.
+    string canal = canal_de_artista(id)
+    importar_discografia(canal)
+    string otro = canal != "" ? canal : id
     List<Json> pistas = await sqlite.query(sql_pista_dto() + """
-        join track_artists ta on ta.track_id = t.id and ta.artist_id = ?
+        join track_artists ta on ta.track_id = t.id and ta.artist_id in (?, ?)
+        group by t.id
         order by play_count desc, t.title_norm asc
-        """, id)
-    List<Json> top = track_rows_de(pistas)
+        """, id, otro)
+    List<Json> todas = track_rows_de(pistas)
     List<Json> albumes = await sqlite.query("""
         select distinct a.id, a.title, a.release_date, a.album_type, '' as artist_display,
                coalesce((select count(*) from tracks t where t.album_id = a.id), 0) as n_tracks,
                coalesce((select count(*) from tracks t join audio_files af on af.track_id = t.id where t.album_id = a.id), 0) as n_disponibles
         from albums a
-        join album_artists aa on aa.album_id = a.id and aa.artist_id = ?
+        join album_artists aa on aa.album_id = a.id and aa.artist_id in (?, ?)
         order by a.release_date desc
-        """, id)
+        """, id, otro)
     List<Json> albums_out = []
+    List<Json> singles_out = []
     for int i in range(0, len(albumes)):
-        albums_out.add(album_row_dto(albumes[i]))
+        if jstr(albumes[i]["album_type"], "album") == "single":
+            singles_out.add(album_row_dto(albumes[i]))
+        else:
+            albums_out.add(album_row_dto(albumes[i]))
     int locales = 0
-    for int i in range(0, len(top)):
-        if jstr(top[i]["availability"]["kind"], "") == "local":
+    for int i in range(0, len(todas)):
+        if jstr(todas[i]["availability"]["kind"], "") == "local":
             locales = locales + 1
+    List<Json> top = []
+    for int i in range(0, len(todas)):
+        if i < 10:
+            top.add(todas[i])
     return {
         "id": jstr(artistas[0]["id"], ""),
         "name": jstr(artistas[0]["name"], ""),
@@ -249,7 +273,9 @@ fn Json cmd_artist_detail(string id):
         "genres": [],
         "localTrackCount": locales,
         "topTracks": top,
-        "albums": albums_out
+        "allTracks": todas,
+        "albums": albums_out,
+        "singles": singles_out
     }
 
 # ─── Candidatos y reasignación de metadatos ─────────────────────────────────
@@ -502,8 +528,17 @@ fn Json cmd_search_query(Json args):
     for int i in range(0, len(artistas)):
         artists_out.add(artist_row_dto(artistas[i]))
 
+    # Si lo escrito ES el nombre de un artista ("lady gaga"), la primera coincidencia es el
+    # artista (el que más canciones tiene), no una de sus canciones.
+    Json? exacto = null
+    for int i in range(0, len(artists_out)):
+        if normalizar(jstr(artists_out[i]["name"], "")) == normalizar(q):
+            if exacto == null or jint(artists_out[i]["trackCount"], 0) > jint(exacto["trackCount"], 0):
+                exacto = artists_out[i]
     Json top = null
-    if len(grupos) > 0:
+    if exacto != null:
+        top = { "kind": "artist", "item": exacto }
+    elif len(grupos) > 0:
         top = { "kind": "track", "item": grupos[0]["principal"] }
     elif len(albums_out) > 0:
         top = { "kind": "album", "item": albums_out[0] }

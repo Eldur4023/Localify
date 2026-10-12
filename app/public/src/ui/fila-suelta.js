@@ -23,7 +23,11 @@ export function filaSuelta(pista, opciones) {
 	const tiempo = document.createElement("span");
 	tiempo.className = "track__time";
 	tiempo.textContent = duracion(pista.durationMs);
-	el.append(titulo, secundario, tiempo);
+	// Título y artista apilados, como en la lista de canciones de la biblioteca
+	const principal = document.createElement("div");
+	principal.className = "track__main";
+	principal.append(titulo, secundario);
+	el.append(principal, tiempo);
 	const reproducir = () => {
 		void player.playTrack(pista.id, opciones.contexto());
 	};

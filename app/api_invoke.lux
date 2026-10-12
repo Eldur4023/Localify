@@ -420,6 +420,10 @@ fn Json despachar_base(string cmd, Json args):
         return await cmd_fusionar_duplicados()
     if cmd == "library_search_candidates":
         return await cmd_buscar_candidatos(args)
+    if cmd == "library_search_web":
+        return yt_web_puntuados(arg_str(args, "query", ""), jint(jget(args, "limit"), 8))
+    if cmd == "library_add_web_track":
+        return await cmd_anadir_web(args)
     if cmd == "library_assign_metadata":
         return await cmd_asignar_metadata(args)
     if cmd == "library_import_files":

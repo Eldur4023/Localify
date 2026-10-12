@@ -14,6 +14,15 @@ fn string covers_dir():
 fn bool cachear_imagen(string url, string destino):
     if os.is_file(destino) and os.file_size(destino) > 100:
         return true
+    if descargar_imagen(url, destino):
+        return true
+    # una miniatura de vídeo que no existe en esa resolución: la siguiente
+    string otra = miniatura_alternativa(url)
+    if otra == "":
+        return false
+    return cachear_imagen(otra, destino)
+
+fn bool descargar_imagen(string url, string destino):
     Dict<string, string> cabeceras = { "User-Agent": agente_navegador() }
     Json? r = null
     try:
@@ -32,9 +41,19 @@ fn bool cachear_imagen(string url, string destino):
         return false
     return await os.write_file(destino, bytes)
 
-# miniatura de un vídeo de YouTube.
+# Miniatura de un vídeo de YouTube. Las de 4:3 (hqdefault) llevan barras
+# negras horneadas en la propia imagen, y `object-fit: cover` no puede
+# recortarlas; las de 16:9 (maxresdefault, hq720) no, y su cuadrado central es
+# justo la carátula de los vídeos "Topic". Se prueba de mayor a menor.
 fn string url_miniatura_video(string video_id):
-    return "https://i.ytimg.com/vi/" + video_id + "/hqdefault.jpg"
+    return "https://i.ytimg.com/vi/" + video_id + "/maxresdefault.jpg"
+
+fn string miniatura_alternativa(string url):
+    if url.contains("/maxresdefault.jpg"):
+        return url.replace("/maxresdefault.jpg", "/hq720.jpg")
+    if url.contains("/hq720.jpg"):
+        return url.replace("/hq720.jpg", "/hqdefault.jpg")
+    return ""
 
 # youtube_id de una pista: video-id directo, audio_files.youtube_id o la
 # mejor coincidencia registrada.
@@ -82,8 +101,34 @@ fn Json? portada_album_respuesta(string id):
     header("Content-Type", "image/jpeg")
     return send_file(destino, covers_dir())
 
-get endpoint("/api/cover/track/:id", string id):
-    string destino = os.path_join(covers_dir(), "track-" + id + ".jpg")
+# Pistas del catálogo del servidor (ids de Spotify, sin álbum ni vídeo conocido): se busca
+# "artista título" en YouTube Music y se usa la carátula del primer resultado de duración
+# compatible. La imagen queda en la caché de disco como las demás.
+fn string? portada_por_busqueda(string tid):
+    List<Json> f = await sqlite.query("select title, artist_display, duration_ms from tracks where id = ?", tid)
+    if len(f) == 0:
+        return null
+    Json? r = ytm_buscar(jstr(f[0]["artist_display"], "") + " " + jstr(f[0]["title"], ""), "canciones")
+    if r == null:
+        return null
+    int dur = jint(f[0]["duration_ms"], 0)
+    List<Json> elementos = elementos_de_lista(r)
+    for int i in range(0, len(elementos)):
+        if i >= 5:
+            break
+        PistaCatalogo p = ytm_cancion(elementos[i])
+        string mini = miniatura(elementos[i])
+        if p.id == "" or mini == "":
+            continue
+        int dif = p.duration_ms - dur
+        if dif < 0:
+            dif = -dif
+        if dur <= 0 or p.duration_ms <= 0 or dif <= 10000:
+            return mini
+    return null
+
+fn Json? portada_pista_respuesta(string id):
+    string destino = os.path_join(covers_dir(), "track2-" + id + ".jpg")
     # La portada del álbum es más fiable que la miniatura del vídeo: muchas
     # miniaturas de "audio oficial" traen la carátula centrada sobre un
     # lienzo más ancho, con el margen (gris o negro) incrustado en los
@@ -98,14 +143,20 @@ get endpoint("/api/cover/track/:id", string id):
             url = portada_album_url(album_id)
     if url == null:
         string yid = youtube_id_de_pista(id)
-        if yid == "":
-            return status(404)
-        url = url_miniatura_video(yid)
+        if yid != "":
+            url = url_miniatura_video(yid)
+        else:
+            url = portada_por_busqueda(id)
+            if url == null:
+                return status(404)
     bool ok = cachear_imagen(url, destino)
     if not ok or not os.is_file(destino):
         return status(404)
     header("Content-Type", "image/jpeg")
     return send_file(destino, covers_dir())
+
+get endpoint("/api/cover/track/:id", string id):
+    return await portada_pista_respuesta(id)
 
 # Portada de playlist: la sube el usuario (multipart) o se borra.
 post endpoint("/api/cover/playlist/:id", string id, File imagen):
@@ -163,7 +214,85 @@ get endpoint("/api/cover/albums/:id", string id):
 get endpoint("/api/cover/:id", string id):
     return await portada_album_respuesta(id)
 
+# Foto de artista: la cabecera de su página en YouTube Music (browse). Se
+# descarga una vez a la caché; sin foto (404) la UI enseña el icono de reserva.
+# Los artistas que no vienen de YouTube Music ("srv:<nombre>" del servidor, "local:" de ficheros) no tienen canal de
+# YouTube Music: se busca por nombre y se usa el primer artista que se llame igual.
+# Con caché: el resultado (también el "no hay") se recuerda, para que ni las miniaturas de una
+# lista ni el sondeo repitan la búsqueda en YouTube Music una y otra vez.
+fn string canal_de_artista(string id0):
+    string alias = ajuste("alias:" + id0, "")
+    string id = alias != "" ? alias : id0
+    if id.starts_with("UC"):
+        return id
+    string recordado = state.get("canal:" + id, "")
+    if recordado != "":
+        return recordado == "-" ? "" : recordado
+    string canal = buscar_canal_de_artista(id)
+    state.set("canal:" + id, canal == "" ? "-" : canal, canal == "" ? 1800000 : 86400000)
+    return canal
+
+fn string buscar_canal_de_artista(string id):
+    if id.starts_with("UC"):
+        return id
+    List<Json> f = await sqlite.query("select name from artists where id = ?", id)
+    if len(f) == 0:
+        return ""
+    string nombre = jstr(f[0]["name"], "")
+    # ¿hay otro artista con el mismo nombre que sí tiene canal? ("local:" y "srv:" duplican a los de YouTube Music)
+    List<Json> igual = await sqlite.query("select id from artists where id like 'UC%' and lower(name) = lower(?) limit 1", nombre)
+    if len(igual) > 0:
+        return jstr(igual[0]["id"], "")
+    # "A, B" es una colaboración: el artista que tiene foto es el primero
+    List<string> intentos = [nombre]
+    if nombre.contains(", "):
+        intentos.add(nombre.slice(0, nombre.index_of(", ")))
+    for int n in range(0, len(intentos)):
+        string buscado = normalizar(intentos[n])
+        Json? r = ytm_buscar(intentos[n], "artistas")
+        if r == null:
+            continue
+        List<Json> elementos = elementos_de_lista(r)
+        string aproximado = ""
+        for int i in range(0, len(elementos)):
+            if i >= 5:
+                break
+            List<Tramo> t = tramos(elementos[i], 0)
+            string canal = jstr(jget(jget(jget(elementos[i], "navigationEndpoint"), "browseEndpoint"), "browseId"), "")
+            if canal == "" or len(t) == 0:
+                continue
+            string visto = normalizar(t[0].texto)
+            if visto == buscado:
+                return canal
+            if aproximado == "" and (visto.starts_with(buscado) or buscado.starts_with(visto)):
+                aproximado = canal
+        if aproximado != "":
+            return aproximado
+    return ""
+
 get endpoint("/api/cover/artist/:id", string id):
-    # el catálogo de YouTube Music no trae fotos de artista (sin Wikidata):
-    # 404 y la UI muestra el icono de reserva, igual que el original
-    return status(404)
+    string destino = os.path_join(covers_dir(), "artist-" + id.replace(":", "_") + ".jpg")
+    if not (os.is_file(destino) and os.file_size(destino) > 100):
+        if state.get("sinfoto:" + id, "") != "":
+            return status(404)
+        string canal = canal_de_artista(id)
+        if canal == "":
+            # sin foto de artista: la carátula de una de sus canciones es mejor que un hueco
+            List<Json> suya = await sqlite.query("select track_id from track_artists where artist_id = ? limit 1", id)
+            if len(suya) == 0:
+                return status(404)
+            return await portada_pista_respuesta(jstr(suya[0]["track_id"], ""))
+        Json? r = await ytm_navegar(canal)
+        string url = ""
+        if r != null:
+            Json cab = jget(r, "header")
+            Json inm = jget(jget(jget(jget(cab, "musicImmersiveHeaderRenderer"), "thumbnail"), "musicThumbnailRenderer"), "thumbnail")
+            Json vis = jget(jget(jget(jget(cab, "musicVisualHeaderRenderer"), "foregroundThumbnail"), "musicThumbnailRenderer"), "thumbnail")
+            List<Json> fotos = jlist(jget(inm != null ? inm : vis, "thumbnails"))
+            if len(fotos) > 0:
+                url = jstr(fotos[len(fotos) - 1]["url"], "")
+        if url == "" or not cachear_imagen(url, destino) or not os.is_file(destino):
+            state.set("sinfoto:" + id, "1", 1800000)
+            return status(404)
+    header("Content-Type", "image/jpeg")
+    return send_file(destino, covers_dir())

@@ -1,0 +1,59 @@
+# movil.lux — Soporte del port móvil (shell Android, ver android/ y
+# src/android.cpp).
+#
+# En el móvil no hay motor de audio nativo (los hooks de `audio` quedan
+# vacíos): quien suena es el elemento <audio> del WebView. Este módulo le da
+# las tres piezas que necesita:
+#
+#   1. GET /audio/:id       el fichero descargado, con Range (send_file)
+#   2. GET /api/capabilities  para que el frontend sepa que debe usar <audio>
+#   3. POST /api/player/media-event   el WebView reporta "ended" (para que la
+#      cola avance: sin motor no hay evento de fin) y su posición cada pocos
+#      segundos (sin motor, audio.status() no sabe nada)
+#
+# Todo es inofensivo en escritorio: el frontend no consulta /audio/:id si
+# nativeAudio es true, y los media-event solo los manda el shim móvil.
+
+fn bool en_movil():
+    return os.getenv("LUX_LOCALIFY_MOBILE", "") == "1"
+
+get endpoint("/api/capabilities"):
+    return { "mobile": en_movil(), "nativeAudio": not en_movil() }
+
+# Metadatos mínimos para la MediaSession (pantalla de bloqueo / notificación).
+get endpoint("/api/track-meta/:id", string id):
+    List<Json> f = await sqlite.query("""
+        select t.title, t.artist_display, t.duration_ms,
+               (select al.title from albums al where al.id = t.album_id) as album
+        from tracks t where t.id = ?""", id)
+    if len(f) == 0:
+        return status(404)
+    return {
+        "title": jstr(f[0]["title"], ""),
+        "artist": jstr(f[0]["artist_display"], ""),
+        "album": jstr(f[0]["album"], ""),
+        "durationMs": jint(f[0]["duration_ms"], 0)
+    }
+
+get endpoint("/audio/:id", string id):
+    List<Json> f = await sqlite.query("select rel_path from audio_files where track_id = ?", id)
+    if len(f) == 0:
+        return status(404)
+    string ruta = ruta_audio_abs(jstr(f[0]["rel_path"], ""))
+    if not os.is_file(ruta):
+        return status(404)
+    return send_file(ruta)
+
+post endpoint("/api/player/media-event", Json b):
+    string tipo = jstr(jget(b, "type"), "")
+    if tipo == "ended":
+        # sin motor no hay evento de fin: el WebView lo reporta y la cola
+        # avanza como si el motor hubiera entregado un "ended" natural
+        mutar_estado("avanzar", "natural", "", 0, 0.0)
+        return null
+    if tipo == "position":
+        int ms = jint(jget(b, "ms"), 0)
+        if ms > 0:
+            mutar_estado("seek", "", "", ms)
+        return null
+    return { "error": "invalid_type" }.status(400)

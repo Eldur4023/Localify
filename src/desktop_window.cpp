@@ -1,6 +1,7 @@
 #include "desktop_window.hpp"
 #include <webview/webview.h>
 #include <gtk/gtk.h>
+#include <gdk/gdkx.h>
 
 #include <future>
 
@@ -11,7 +12,9 @@ DesktopWindow::DesktopWindow(Options opts) {
     // it at login -- outside the .desktop launcher (so the pinned taskbar
     // icon never binds to that window) and racing the autostart launch.
     // Session restore is the autostart script's job, not the WM's.
-    if (GdkDisplay* display = gdk_display_get_default())
+    // X11 only: on a native Wayland session the group leader is not an X11
+    // window and gdk_property_delete() segfaults.
+    if (GdkDisplay* display = gdk_display_get_default(); GDK_IS_X11_DISPLAY(display))
         gdk_property_delete(gdk_display_get_default_group(display),
                             gdk_atom_intern_static_string("WM_COMMAND"));
     webview_set_title(w, opts.title.c_str());

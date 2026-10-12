@@ -20,6 +20,7 @@
 #include <script/bytecode_io.hpp>
 
 #include <atomic>
+#include <mutex>
 #include <cstdlib>
 
 namespace lux_script {
@@ -29,11 +30,25 @@ namespace {
 using luxium::page::DocTemplate;
 namespace li = luxp_internal;
 
+// std::atomic<shared_ptr>, salvo en el NDK de Android (su libc++ no lo trae): ahí, un mutex.
+struct SheetBox {
+#ifdef __ANDROID__
+    std::mutex m;
+    std::shared_ptr<const li::SheetData> p;
+    std::shared_ptr<const li::SheetData> load() { std::lock_guard<std::mutex> lock(m); return p; }
+    void store(std::shared_ptr<const li::SheetData> v) { std::lock_guard<std::mutex> lock(m); p = std::move(v); }
+#else
+    std::atomic<std::shared_ptr<const li::SheetData>> p;
+    std::shared_ptr<const li::SheetData> load() { return p.load(); }
+    void store(std::shared_ptr<const li::SheetData> v) { p.store(std::move(v)); }
+#endif
+};
+
 struct Plan {
     std::unique_ptr<DocTemplate>                      doc;        // null with html_only
     bool                                              html_only = false;   // JavaScript: never a .luxp
     std::string                                       skeleton;   // to rebuild the sheet when a file changes
-    std::atomic<std::shared_ptr<const li::SheetData>> sheet;
+    SheetBox                                          sheet;
     std::atomic<int64_t>                              checked{0};
     luxium::page::Blob                                program;    // compressed once; empty without a script
     std::atomic<size_t>                               size_hint{0};
@@ -168,7 +183,7 @@ private:
     // anything that would fail, goes through the VM -- the same as
     // render_template, so the value and the error are the VM's own.
     const Value* evaluate(uint32_t idx, Value& tmp) {
-        static const Value kNull;
+        static const Value kNull{};
         const Chunk& c = t_.exprs[idx];
         const auto& code = c.code;
         if (code.size() >= 2 && code.front().op == Op::LoadLocal && code.back().op == Op::Return &&

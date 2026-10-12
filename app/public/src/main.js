@@ -17,6 +17,7 @@
 * consulta por clic para datos que casi nunca cambian.
 */
 import { iniciar } from "./ipc/events.js";
+import { arrancarAudioWeb } from "./shell/web-audio.js";
 import { crearRouter } from "./router.js";
 import { mountAnchoLateral } from "./shell/ancho-lateral.js";
 import { mountSidebar } from "./shell/sidebar.js";
@@ -24,6 +25,8 @@ import { mountTopBar } from "./shell/topbar.js";
 import { mountPlayerBar } from "./shell/player.js";
 import { mountQueuePanel } from "./shell/queue-panel.js";
 import { mountNowPlaying } from "./shell/now-playing.js";
+import { mountTabs } from "./shell/tabs.js";
+import { mountGestos } from "./shell/gestos.js";
 import { mountAlbumView } from "./views/album.js";
 import { mountArtistView } from "./views/artist.js";
 import { mountHomeView } from "./views/home.js";
@@ -95,6 +98,9 @@ function main() {
 	// Los eventos se enganchan antes que nada: una descarga que termine mientras
 	// se monta la interfaz debe llegar igual.
 	void iniciar();
+	// En el móvil quien suena es el WebView (no hay motor nativo): el shim se
+	// activa solo si /api/capabilities lo dice.
+	void arrancarAudioWeb();
 	const router = crearRouter(vista, {
 		home: (c) => mountHomeView(c),
 		search: (c, r) => mountSearchView(c, r),
@@ -108,10 +114,21 @@ function main() {
 	}, "home");
 	const sidebar = mountSidebar(barraLateral, router);
 	const topbar = mountTopBar(barraSuperior, router);
+	const tabs = mountTabs(armazon, router);
 	// Cola y vista ampliada cuelgan del armazón, no del router: se abren encima
 	// de lo que haya y siguen abiertas al navegar (ver sus cabeceras).
 	const cola = mountQueuePanel(document.body);
 	const ampliada = mountNowPlaying(document.body);
+	mountGestos(document.querySelector(".app"), ampliada);
+	// Botón atrás de Android (MainActivity): primero cierra lo que esté encima —cola,
+	// vista de la canción, cajón—; solo si no hay nada, navega hacia atrás de verdad.
+	globalThis.__localifyAtras = () => {
+		if (cola.abierto()) cola.cerrar();
+		else if (ampliada.abierta()) ampliada.cerrar();
+		else if (armazon?.classList.contains("is-drawer-abierto")) armazon.classList.remove("is-drawer-abierto");
+		else return false;
+		return true;
+	};
 	// El reproductor va en su propio `try`: si fallara, la aplicacion seguiria
 	// siendo navegable, que es mejor que una ventana en blanco.
 	try {
@@ -138,6 +155,7 @@ function main() {
 	}
 	function sincronizar(ruta) {
 		sidebar.marcar(ruta.nombre, ruta.params[0]);
+		tabs.marcar(ruta.nombre);
 		topbar.titulo(tituloDe(ruta));
 	}
 	router.alNavegar(sincronizar);

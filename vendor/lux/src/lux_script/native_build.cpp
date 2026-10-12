@@ -479,8 +479,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     for (const char* dep : {LUX_NATIVE_SCRIPT_LIB, LUX_NATIVE_LIB, "/proc/self/exe"}) {
         std::error_code e1, e2;
         const auto p = std::filesystem::canonical(dep, e1);
-        clave += '\0' + std::to_string(e1 ? 0 : std::filesystem::file_size(p, e2)) + ':' +
-                 std::to_string(e1 ? 0 : std::filesystem::last_write_time(p, e2).time_since_epoch().count());
+        clave += '\0' + std::to_string(static_cast<unsigned long long>(e1 ? 0 : std::filesystem::file_size(p, e2))) + ':' +
+                 std::to_string(static_cast<long long>(e1 ? 0 : std::filesystem::last_write_time(p, e2).time_since_epoch().count()));
     }
     const std::string clave_hash = std::to_string(std::hash<std::string>{}(clave));
     std::string clave_previa;

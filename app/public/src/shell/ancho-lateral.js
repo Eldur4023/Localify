@@ -58,7 +58,8 @@ export function mountAnchoLateral(contenedor) {
 	let colapsada = false;
 	function aplicar() {
 		document.documentElement.style.setProperty("--sidebar-width", `${colapsada ? ANCHO_COLAPSADA : anchoAbierta}px`);
-		contenedor.classList.toggle(CLASE_COLAPSADA, colapsada);
+		// en móvil el cajón siempre va con etiquetas
+		contenedor.classList.toggle(CLASE_COLAPSADA, colapsada && !matchMedia("(max-width: 700px)").matches);
 		asa.setAttribute("aria-valuenow", String(colapsada ? ANCHO_COLAPSADA : anchoAbierta));
 	}
 	function guardar() {

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Loopback para el servidor propio (HTTP plano, dentro del teléfono) y
+  cleartext general: el relay de descargas habla con el helper del PC por
+  HTTP de LAN/Tailscale (192.168.x.x, 100.x.x.x — IPs no representables
+  como dominios en esta configuración). App personal: el compromiso vale.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

@@ -30,12 +30,15 @@ export function mountNowPlaying(contenedor) {
 	// El aviso de "sin letra" va con la canción, no donde iría la letra: ese
 	// panel desaparece cuando no hay nada que poner en él, y un mensaje dentro de
 	// algo que no se muestra no lo lee nadie.
+	// Datos del archivo: formato, tamaño, duración.
+	const meta = document.createElement("p");
+	meta.className = "ampliada__meta";
 	const sinLetra = document.createElement("p");
 	sinLetra.className = "ampliada__sin-letra";
 	sinLetra.hidden = true;
 	const izquierda = document.createElement("div");
 	izquierda.className = "ampliada__izquierda";
-	izquierda.append(arte, titulo, artista, album, sinLetra);
+	izquierda.append(arte, titulo, artista, album, meta, sinLetra);
 	const letra = document.createElement("div");
 	letra.className = "ampliada__letra";
 	el.append(cerrarBoton, izquierda, letra);
@@ -55,6 +58,15 @@ export function mountNowPlaying(contenedor) {
 		}
 		artista.textContent = estado.track?.artistDisplay ?? "";
 		album.textContent = estado.track?.albumTitle ?? "";
+		const d = estado.track?.availability;
+		const trozos = [];
+		if (d?.kind === "local") {
+			if (d.format) trozos.push(String(d.format).toUpperCase());
+			if (d.bytes > 0) trozos.push(`${(d.bytes / 1048576).toFixed(1)} MB`);
+		}
+		const ms = estado.track?.durationMs ?? 0;
+		if (ms > 0) trozos.push(`${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`);
+		meta.textContent = trozos.join(" · ");
 	}
 	function pintarLetra() {
 		letra.replaceChildren();
@@ -142,27 +154,47 @@ export function mountNowPlaying(contenedor) {
 		});
 	}
 	const dejarEventos = alRecibir((evento) => {
-		if (el.hidden) return;
+		if (!abierta) return;
 		if (evento.type === "trackChanged" || evento.type === "playStatusChanged") {
 			void sincronizar();
 		}
 	});
+	// En móvil la vista entra y sale deslizando (clase `is-visible`, ver
+	// mobile.css); `hidden` solo se pone cuando la salida ha terminado.
+	const movil = globalThis.matchMedia("(max-width: 700px)");
+	let abierta = false;
+	let salida = null;
 	function abrir() {
+		abierta = true;
+		globalThis.clearTimeout(salida);
 		el.hidden = false;
+		if (movil.matches) {
+			el.classList.remove("is-visible");
+			void el.offsetWidth; // fija el estado de partida para que haya transición
+			el.classList.add("is-visible");
+		}
+		document.body.classList.add("is-ampliada");
 		void sincronizar();
 		// El sondeo solo corre con la vista abierta: mantenerlo de fondo sería un
 		// comando cuatro veces por segundo para mover algo que nadie ve.
 		temporizador ??= globalThis.setInterval(sondear, SONDEO_MS);
 	}
 	function cerrar() {
-		el.hidden = true;
+		abierta = false;
+		if (movil.matches && !el.hidden) {
+			el.classList.remove("is-visible");
+			salida = globalThis.setTimeout(() => { if (!abierta) el.hidden = true; }, 260);
+		} else {
+			el.hidden = true;
+		}
+		document.body.classList.remove("is-ampliada");
 		if (temporizador !== null) {
 			globalThis.clearInterval(temporizador);
 			temporizador = null;
 		}
 	}
 	const alTeclado = (e) => {
-		if (e.key === "Escape" && !el.hidden) cerrar();
+		if (e.key === "Escape" && abierta) cerrar();
 	};
 	globalThis.addEventListener("keydown", alTeclado);
 	function etiquetas() {
@@ -177,10 +209,10 @@ export function mountNowPlaying(contenedor) {
 		abrir,
 		cerrar,
 		alternar() {
-			if (el.hidden) abrir();
+			if (!abierta) abrir();
 			else cerrar();
 		},
-		abierta: () => !el.hidden,
+		abierta: () => abierta,
 		destroy() {
 			cerrar();
 			dejarIdioma();

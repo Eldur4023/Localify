@@ -43,6 +43,22 @@ on start:
             created_at integer not null default (unixepoch())
         )""")
     await sqlite.exec("""
+        create table if not exists presence(
+            user_id integer primary key references users(id) on delete cascade,
+            title text not null default '', artist text not null default '',
+            updated_at integer not null default (unixepoch())
+        )""")
+    await sqlite.exec("""
+        create table if not exists plays(
+            user_id integer not null references users(id) on delete cascade,
+            track_id text not null,
+            played_at integer not null,
+            completed integer not null default 0,
+            primary key(user_id, track_id, played_at)
+        )""")
+    if len(await sqlite.query("select 1 from pragma_table_info('plays') where name = 'ms_played'")) == 0:
+        await sqlite.exec("alter table plays add column ms_played integer not null default 0")
+    await sqlite.exec("""
         create table if not exists tracks(
             id text primary key,
             title text not null, artist text not null default '', album text not null default '',
@@ -120,6 +136,38 @@ fn int i_of(Json j, string clave, int def):
         return def
     return int(j[clave])
 
+# Adaptadores del módulo json nativo (los mismos del app/, en versión mínima:
+# el servidor parsea respuestas de ffprobe/yt-dlp).
+fn Json? parse_json(string s):
+    try:
+        return json.parse(s)
+    catch e:
+        return null
+
+fn Json jget(Json j, string key):
+    if j == null:
+        return null
+    return j[key]
+
+fn string jstr(Json j, string def):
+    if j == null:
+        return def
+    return str(j)
+
+fn int jint(Json j, int def):
+    if j == null:
+        return def
+    return int(j)
+
+fn double jdbl(Json j, double def):
+    if j == null:
+        return def
+    # como en app/json.lux: ffprobe/yt-dlp mandan números como string JSON
+    Json? n = parse_json(str(j))
+    if n == null:
+        return def
+    return n * 1.0
+
 fn int yo():
     return int(jwt.claims["sub"])
 
@@ -138,7 +186,8 @@ fn bool id_valido(string id):
     return true
 
 fn Json user_dto(Json u):
-    return { "username": u["username"], "displayName": u["display_name"], "bio": u["bio"] }
+    return { "username": u["username"], "displayName": u["display_name"], "bio": u["bio"],
+             "hasAvatar": os.is_file("./data/avatars/" + str(u["id"]) + ".jpg") }
 
 # Identidad de una canción: título + artista normalizados (los normaliza el
 # cliente, con la misma función que su biblioteca) y, para no mezclar versiones
@@ -186,7 +235,9 @@ fn Json playlist_resumen(Json p):
         "id": p["id"], "name": p["name"], "description": p["description"],
         "visibility": p["visibility"], "collaborative": int(p["n_members"]) > 0,
         "owner": p["owner"], "ownerName": p["owner_name"],
-        "nTracks": p["n_tracks"], "updatedAt": p["updated_at"]
+        "nTracks": p["n_tracks"], "updatedAt": p["updated_at"],
+        "hasCover": os.is_file("./data/pcovers/" + str(p["id"]) + ".jpg"),
+        "coverSize": os.is_file("./data/pcovers/" + str(p["id"]) + ".jpg") ? os.file_size("./data/pcovers/" + str(p["id"]) + ".jpg") : 0
     }
 
 fn string sql_resumen():
@@ -273,17 +324,46 @@ group("/api"):
         List<Json> r = await sqlite.query("select * from users where id = ?", yo())
         return user_dto(r[0])
 
+    # foto de perfil (la sube su dueño; la ven todos los usuarios)
+    put endpoint("/me/avatar", File avatar):
+        if avatar.size < 100:
+            return { "error": "invalid" }.status(400)
+        os.make_dir("data/avatars")
+        avatar.save("./data/avatars", str(yo()) + ".jpg")
+        return status(204)
+
+    get endpoint("/users/:name/avatar", string name):
+        List<Json> r = await sqlite.query("select id from users where username = ?", name)
+        if len(r) == 0 or not os.is_file("./data/avatars/" + str(r[0]["id"]) + ".jpg"):
+            return status(404)
+        return send_file("./data/avatars/" + str(r[0]["id"]) + ".jpg")
+
+    # ── escuchando ahora ──
+    # El cliente avisa al cambiar de canción (title vacío = parado) y repite cada
+    # minuto mientras suena; pasados 150 s sin aviso se considera que no escucha.
+    put endpoint("/presence", Json b):
+        await sqlite.exec("""insert into presence(user_id, title, artist, updated_at) values(?, ?, ?, unixepoch())
+            on conflict(user_id) do update set title = excluded.title, artist = excluded.artist, updated_at = unixepoch()""",
+            yo(), s_of(b, "title", "").slice(0, 200), s_of(b, "artist", "").slice(0, 200))
+        return status(204)
+
     # ── usuarios (Social) ──
     get endpoint("/users"):
         List<Json> r = await sqlite.query("""
             select u.username, u.display_name, u.bio,
                    (select count(*) from playlists p where p.owner_id = u.id and p.visibility = 'public') as n_playlists,
-                   (select count(*) from tracks t where t.uploaded_by = u.id) as n_tracks
+                   (select count(*) from tracks t where t.uploaded_by = u.id) as n_tracks,
+                   u.id,
+                   (select title from presence x where x.user_id = u.id and x.updated_at > unixepoch() - 150) as np_title,
+                   (select artist from presence x where x.user_id = u.id and x.updated_at > unixepoch() - 150) as np_artist
             from users u order by u.display_name collate nocase""")
         List<Json> out = []
         for int i in range(0, len(r)):
             out.add({ "username": r[i]["username"], "displayName": r[i]["display_name"], "bio": r[i]["bio"],
-                      "nPlaylists": r[i]["n_playlists"], "nTracks": r[i]["n_tracks"] })
+                      "nPlaylists": r[i]["n_playlists"], "nTracks": r[i]["n_tracks"],
+                      "hasAvatar": os.is_file("./data/avatars/" + str(r[i]["id"]) + ".jpg") })
+            if jstr(r[i]["np_title"], "") != "":
+                out[i]["nowPlaying"] = { "title": r[i]["np_title"], "artist": r[i]["np_artist"] }
         return out
 
     get endpoint("/users/:name", string name):
@@ -296,6 +376,20 @@ group("/api"):
             pl.add(playlist_resumen(ps[i]))
         Json dto = user_dto(r[0])
         dto["playlists"] = pl
+        # escaparate: lo más escuchado (90 días) y lo que suena ahora
+        List<Json> top = await sqlite.query("""
+            select t.id, t.title, t.artist, sum(p.ms_played) as n from plays p join tracks t on t.id = p.track_id
+            where p.user_id = ? and p.played_at > unixepoch() - 7776000
+            group by p.track_id order by n desc, max(p.played_at) desc limit 8""", int(r[0]["id"]))
+        List<Json> tops = []
+        for int i in range(0, len(top)):
+            tops.add({ "id": top[i]["id"], "title": top[i]["title"], "artist": top[i]["artist"], "ms": top[i]["n"] })
+        dto["topTracks"] = tops
+        List<Json> tot = await sqlite.query("select coalesce(sum(ms_played), 0) as n from plays where user_id = ? and played_at > unixepoch() - 7776000", int(r[0]["id"]))
+        dto["listenedMs"] = tot[0]["n"]
+        List<Json> np = await sqlite.query("select title, artist from presence where user_id = ? and title != '' and updated_at > unixepoch() - 150", int(r[0]["id"]))
+        if len(np) > 0:
+            dto["nowPlaying"] = { "title": np[0]["title"], "artist": np[0]["artist"] }
         return dto
 
     # ── catálogo de audio ──
@@ -387,6 +481,92 @@ group("/api"):
             search_norm.trim(), title_norm.trim(), artist_norm.trim(), ext, audio.size, yo())
         return { "stored": true, "id": id }.status(201)
 
+    # ── relay de descargas ──
+    # El servidor NO toca YouTube: el cliente (móvil, sin yt-dlp) resuelve y
+    # baja los bytes con su propia IP (las URLs de googlevideo van ligadas a
+    # ella) y aquí solo se transcodifican a MP3 etiquetado para repartirlos.
+    # El cliente aporta el fichero crudo que bajó con su IP; se transcodifica
+    # a MP3 320k con etiquetas (y portada si la subió antes a /relay/:id/cover)
+    # y queda en el almacén común como un /tracks/:id más.
+    put endpoint("/relay/:id", string id, File audio, string title = "", string artist = "", string album = "", int duration_ms = 0, string search_norm = "", string title_norm = "", string artist_norm = ""):
+        if not id_valido(id):
+            return { "error": "invalid_id" }.status(400)
+        if title.trim() == "" or audio.size < 16384:
+            return { "error": "invalid" }.status(400)
+        # una pista que ya existe no se sobrescribe (sería pisar el audio de otra persona)
+        if len(await sqlite.query("select 1 from tracks where id = ?", id)) > 0:
+            os.remove_file("./data/relay/" + id + ".jpg")
+            return { "stored": false, "id": id }
+        # la identidad manda: si otro cliente ya aportó esta canción, no se duplica
+        string igual = id_por_identidad(title_norm, artist_norm, duration_ms)
+        if igual != "":
+            os.remove_file("./data/relay/" + id + ".jpg")
+            return { "stored": false, "id": igual, "duplicate": true }
+
+        os.make_dir("data/relay")
+        string raw = "./data/relay/" + id + ".raw"
+        audio.save("./data/relay", id + ".raw")
+
+        # ¿qué es lo que ha traído? (ffprobe; si falla, se asume webm)
+        string contenedor = ""
+        Json pr = await os.run("ffprobe", [
+            "-v", "error", "-show_entries", "format=format_name",
+            "-of", "json", raw
+        ])
+        Json? probe = jint(pr["status"], 1) == 0 ? parse_json(jstr(pr["stdout"], "")) : null
+        if probe != null:
+            contenedor = jstr(jget(jget(probe, "format"), "format_name"), "")
+
+        os.make_dir("data/audio")
+        string destino = "./data/audio/" + id + ".mp3"
+        string portada = "./data/relay/" + id + ".jpg"
+        bool tiene_portada = os.is_file(portada) and os.file_size(portada) > 100
+        bool ok = false
+        if contenedor.contains("mp3"):
+            # ya es mp3: tal cual
+            await os.move(raw, destino)
+            ok = os.is_file(destino) and os.file_size(destino) >= 16384
+        else:
+            List<string> args = ["-y", "-v", "error", "-i", raw]
+            if tiene_portada:
+                args = args + ["-i", portada, "-map", "0:a", "-map", "1:v", "-c:v", "copy",
+                               "-metadata:s:v", "title=Album cover", "-metadata:s:v", "comment=Cover (front)"]
+            else:
+                args.add("-vn")
+            args = args + ["-c:a", "libmp3lame", "-b:a", "320k",
+                           "-id3v2_version", "3", "-write_id3v1", "1",
+                           "-map_metadata", "-1",
+                           "-metadata", "title=" + title.trim()]
+            if artist.trim() != "":
+                args = args + ["-metadata", "artist=" + artist.trim()]
+            if album.trim() != "":
+                args = args + ["-metadata", "album=" + album.trim()]
+            args.add(destino)
+            Json fr = await os.run("ffmpeg", args)
+            ok = jint(fr["status"], 1) == 0 and os.is_file(destino) and os.file_size(destino) >= 16384
+        os.remove_file(portada)
+        if not ok:
+            if os.is_file(destino):
+                os.remove_file(destino)
+            return { "error": "transcode_failed" }.status(502)
+        os.remove_file(raw)
+
+        await sqlite.exec("""
+            insert into tracks(id, title, artist, album, duration_ms, search_norm, title_norm, artist_norm, ext, size, uploaded_by)
+            values(?, ?, ?, ?, ?, ?, ?, ?, 'mp3', ?, ?)
+            on conflict(id) do update set ext = 'mp3', size = excluded.size""",
+            id, title.trim(), artist, album, duration_ms,
+            search_norm.trim(), title_norm.trim(), artist_norm.trim(), os.file_size(destino), yo())
+        return { "stored": true, "id": id, "ext": "mp3" }.status(201)
+
+    # Portada opcional para incrustar en el relay (se sube ANTES del audio).
+    put endpoint("/relay/:id/cover", string id, File cover):
+        if not id_valido(id) or cover.size < 100:
+            return { "error": "invalid" }.status(400)
+        os.make_dir("data/relay")
+        cover.save("./data/relay", id + ".jpg")
+        return { "ok": true }
+
     # ── mi biblioteca (la nube del usuario) ──
     # Da de alta pistas en mi biblioteca por identidad: [{id, titleNorm, artistNorm, durationMs, favorite}]
     # -> { registered, missing: [ids de cliente que el servidor aún no tiene] }
@@ -419,6 +599,37 @@ group("/api"):
             out.add({ "id": r[i]["id"], "title": r[i]["title"], "artist": r[i]["artist"], "album": r[i]["album"],
                       "durationMs": r[i]["duration_ms"], "titleNorm": r[i]["title_norm"], "artistNorm": r[i]["artist_norm"],
                       "favorite": int(r[i]["favorite"]) == 1 })
+        return out
+
+    # Historial de escucha (alimenta Inicio en todos mis equipos): por identidad, como la biblioteca.
+    # POST [{id, titleNorm, artistNorm, durationMs, playedAt, completed}] -> { stored }
+    post endpoint("/plays", Json b):
+        List<Json> items = b["items"] == null ? [] : b["items"]
+        int guardadas = 0
+        for int i in range(0, len(items)):
+            if i >= 500:
+                break
+            string sid = id_de_referencia(s_of(items[i], "id", ""), s_of(items[i], "titleNorm", ""), s_of(items[i], "artistNorm", ""), i_of(items[i], "durationMs", 0))
+            if sid == "":
+                continue
+            await sqlite.exec("""insert into plays(user_id, track_id, played_at, completed, ms_played) values(?, ?, ?, ?, ?)
+                on conflict(user_id, track_id, played_at) do update set ms_played = max(ms_played, excluded.ms_played), completed = max(completed, excluded.completed)""",
+                yo(), sid, i_of(items[i], "playedAt", 0), items[i]["completed"] == true ? 1 : 0, i_of(items[i], "msPlayed", 0))
+            guardadas = guardadas + 1
+        return { "stored": guardadas }
+
+    # Mis escuchas posteriores a `since` (90 días como mucho), con lo necesario para casarlas en el cliente
+    get endpoint("/plays", int since = 0):
+        List<Json> r = await sqlite.query("""
+            select t.id, t.title_norm, t.artist_norm, t.duration_ms, p.played_at, p.completed, p.ms_played
+            from plays p join tracks t on t.id = p.track_id
+            where p.user_id = ? and p.played_at > max(?, unixepoch() - 7776000)
+            order by p.played_at limit 2000""", yo(), since)
+        List<Json> out = []
+        for int i in range(0, len(r)):
+            out.add({ "id": r[i]["id"], "titleNorm": r[i]["title_norm"], "artistNorm": r[i]["artist_norm"],
+                      "durationMs": r[i]["duration_ms"], "playedAt": r[i]["played_at"], "completed": int(r[i]["completed"]) == 1,
+                      "msPlayed": r[i]["ms_played"] })
         return out
 
     # Favorita (o no) por identidad: la pista del cliente puede tener otro id que la del servidor
@@ -537,6 +748,19 @@ group("/api"):
                 return status(403)
             escribir_pistas(id, b["tracks"], yo())
         return status(204)
+
+    # portada propia de la playlist: la sube su dueña, la ven quienes tienen acceso
+    put endpoint("/playlists/:id/cover", int id, File cover):
+        if acceso(id, yo()) != "owner" or cover.size < 100:
+            return status(404)
+        os.make_dir("data/pcovers")
+        cover.save("./data/pcovers", str(id) + ".jpg")
+        return status(204)
+
+    get endpoint("/playlists/:id/cover", int id):
+        if acceso(id, yo()) == "" or not os.is_file("./data/pcovers/" + str(id) + ".jpg"):
+            return status(404)
+        return send_file("./data/pcovers/" + str(id) + ".jpg")
 
     delete endpoint("/playlists/:id", int id):
         if acceso(id, yo()) != "owner":

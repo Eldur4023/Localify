@@ -86,11 +86,19 @@ Value fn_file_size(NativeCtx&, std::vector<Value>& a, std::string&) {
 }
 
 Value fn_mtime_ms(NativeCtx&, std::vector<Value>& a, std::string&) {
+#ifdef __ANDROID__
+    // libc++ del NDK no tiene clock_cast: stat(2) directo
+    struct ::stat st;
+    if (::stat(a[0].as_str().c_str(), &st) != 0) return Value::integer(-1);
+    return Value::integer(static_cast<long long>(st.st_mtim.tv_sec) * 1000 +
+                          st.st_mtim.tv_nsec / 1000000);
+#else
     std::error_code ec;
     auto t = fs::last_write_time(a[0].as_str(), ec);
     if (ec) return Value::integer(-1);
     return Value::integer(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::clock_cast<std::chrono::system_clock>(t).time_since_epoch()).count());
+#endif
 }
 
 // ─── Files ──────────────────────────────────────────────────────────────────

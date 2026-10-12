@@ -361,8 +361,10 @@ int main(int argc, char** argv) {
     // shootdown). Up to 1 MB is served, and reused, from the heap.
     // ponytail: each arena may keep up to 8 MB of freed memory; lower
     // M_TRIM_THRESHOLD if resident size matters more than those faults.
+#ifdef __GLIBC__
     mallopt(M_MMAP_THRESHOLD, 1 << 20);
     mallopt(M_TRIM_THRESHOLD, 8 << 20);
+#endif
     if (argc >= 2 && std::string(argv[1]) == "restore")
         return lux_script::restore_main({argv + 2, argv + argc});
 

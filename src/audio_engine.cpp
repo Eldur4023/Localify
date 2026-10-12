@@ -515,7 +515,11 @@ bool AudioEngine::start_device(const std::string& device_id, const std::string& 
     cfg.playback.format   = ma_format_f32;
     cfg.playback.channels = kChannels;
     cfg.sampleRate        = kRate;
-    cfg.periodSizeInMilliseconds = 20;
+    // Música, no juego: un búfer grande. Con 20 ms Localify obligaba a PipeWire a bajar el ciclo
+    // de TODO el sistema a 128 muestras mientras estaba abierto (los demás programas, p. ej. un
+    // juego, pasaban a latencia mínima con el coste en CPU/cortes que eso trae).
+    cfg.periodSizeInMilliseconds = 100;
+    cfg.performanceProfile       = ma_performance_profile_conservative;
     cfg.dataCallback      = Impl::data_callback;
     cfg.pUserData         = this;
     cfg.pulse.pStreamNamePlayback = app_name.c_str();

@@ -1,0 +1,216 @@
+# ytweb.lux — Búsqueda en YouTube normal (no YouTube Music).
+#
+# La búsqueda de la interfaz solo preguntaba al catálogo de YouTube Music
+# (ytmusic.lux), así que lo que solo existe en YouTube normal no aparecía.
+# Este módulo pregunta al buscador de youtube.com (InnerTube, cliente WEB),
+# puntúa los candidatos con la misma filosofía que scoring.lux —overlap de
+# tokens contra la consulta, bonificación a canales Topic y subidas
+# oficiales, penalización a covers, directos, nightcore, etc.— y descarta
+# lo que no llega al umbral. El frontend lo pinta en su propia sección,
+# separado de los resultados del catálogo: no se mezclan ni en pantalla ni
+# en la base de datos (aquí no se persiste nada; añadir es un gesto
+# explícito del usuario, library_add_web_track).
+
+# ─── Cliente ─────────────────────────────────────────────────────────────────
+
+fn Dict<string, string> contexto_web():
+    return {
+        "clientName": "WEB",
+        "clientVersion": "2.20240101.00.00",
+        "hl": "es",
+        "gl": "US"
+    }
+
+fn Json? yt_web_buscar(string consulta):
+    Dict cuerpo = {
+        "context": { "client": contexto_web() },
+        "query": consulta
+    }
+    return innertube_post("https://www.youtube.com/youtubei/v1/search", cuerpo)
+
+# ─── Parseo de videoRenderer ─────────────────────────────────────────────────
+
+fn string texto_de_runs(Json nodo):
+    List<Json> runs = jlist(jget(nodo, "runs"))
+    if len(runs) > 0:
+        return jstr(runs[0]["text"], "")
+    return jstr(jget(nodo, "simpleText"), "")
+
+# "3:45" / "1:02:03" → ms; 0 si no se puede parsear.
+fn int duracion_ms_de_texto(string s):
+    s = s.trim()
+    if s == "":
+        return 0
+    List<string> partes = s.split(":")
+    int total = 0
+    for int i in range(0, len(partes)):
+        string p = partes[i].trim()
+        bool numerico = len(p) > 0
+        for int k in range(0, len(p)):
+            if "0123456789".contains(p.slice(k, k + 1)) == false:
+                numerico = false
+                break
+        if not numerico:
+            return 0
+        total = total * 60 + int(p)
+    if total <= 0:
+        return 0
+    return total * 1000
+
+# "1.234.567 vistas" / "1,234,567 views" → 1234567; 0 si no hay dígitos.
+fn int vistas_de_texto(string s):
+    string digitos = ""
+    for int i in range(0, len(s)):
+        string c = s.slice(i, i + 1)
+        if "0123456789".contains(c):
+            digitos = digitos + c
+    if digitos == "":
+        return 0
+    return int(digitos)
+
+fn List<Json> yt_web_candidatos(string consulta, int limite):
+    Json? r = yt_web_buscar(consulta)
+    List<Json> out = []
+    if r == null:
+        return out
+    List<Json> nodos = buscar_todos(r, "videoRenderer")
+    for int i in range(0, len(nodos)):
+        if len(out) >= limite:
+            break
+        Json nodo = nodos[i]
+        string vid = jstr(nodo["videoId"], "")
+        string titulo = texto_de_runs(jget(nodo, "title"))
+        string canal = texto_de_runs(jget(nodo, "ownerText"))
+        if canal == "":
+            canal = texto_de_runs(jget(nodo, "longBylineText"))
+        int ms = duracion_ms_de_texto(texto_de_runs(jget(nodo, "lengthText")))
+        # sin duración no hay forma de validar que sea una canción: fuera
+        if vid == "" or titulo == "" or ms <= 0:
+            continue
+        string vistas_txt = texto_de_runs(jget(nodo, "viewCountText"))
+        if vistas_txt == "":
+            vistas_txt = texto_de_runs(jget(nodo, "shortViewCountText"))
+        out.add({
+            "video_id": vid,
+            "title": titulo,
+            "channel": canal,
+            "duration_ms": ms,
+            "view_count": vistas_de_texto(vistas_txt)
+        })
+    return out
+
+# ─── Puntuación ──────────────────────────────────────────────────────────────
+# Misma filosofía que scoring.lux pero para una consulta libre: no hay
+# DatosPista (ni artista ni duración esperada), así que la señal principal es
+# el overlap de tokens normalizados entre la consulta y (título + canal).
+
+fn double bono_web_canal_topic():
+    return 0.10
+
+fn double bono_web_oficial():
+    return 0.10
+
+fn double penaliza_web_version():
+    return 0.30
+
+fn double umbral_web():
+    return 0.75
+
+# Palabras (o frases) completas: "live" no debe saltar con "alive" ni "mix" con "mixed".
+fn bool contiene_alguno(string texto_norm, List<string> palabras):
+    string ajustado = " " + texto_norm + " "
+    for int i in range(0, len(palabras)):
+        if ajustado.contains(" " + palabras[i] + " "):
+            return true
+    return false
+
+fn double yt_web_puntuar(string consulta_norm, Json cand):
+    string texto = normalizar(jstr(cand["title"], "") + " " + jstr(cand["channel"], ""))
+    List<string> tokens = consulta_norm.split(" ")
+    int en_consulta = 0
+    int encontrados = 0
+    for int i in range(0, len(tokens)):
+        string tk = tokens[i].trim()
+        if len(tk) < 2:
+            continue
+        en_consulta = en_consulta + 1
+        if texto.contains(tk):
+            encontrados = encontrados + 1
+    if en_consulta == 0:
+        return 0.0
+    double puntos = (encontrados * 1.0) / (en_consulta * 1.0)
+    string titulo_norm = normalizar(jstr(cand["title"], ""))
+    string canal_norm = normalizar(jstr(cand["channel"], ""))
+    # señales de subida oficial: canal Topic (auto-generado por el
+    # distribuidor) o el aviso explícito de oficial
+    if canal_norm.ends_with("topic"):
+        puntos = puntos + bono_web_canal_topic()
+    if titulo_norm.contains("official video") or titulo_norm.contains("official audio") or titulo_norm.contains("video oficial") or titulo_norm.contains("topic"):
+        puntos = puntos + bono_web_oficial()
+    # versiones que casi nunca son lo que se busca: same spirit as
+    # penaliza_version/penaliza_videoclip/penaliza_recopilatorio de scoring.lux
+    List<string> malas = ["cover", "karaoke", "nightcore", "sped up", "slowed",
+                          "8d audio", "reaction", "live", "en directo", "acoustic",
+                          "remix", "mix", "full album", "compilation"]
+    if contiene_alguno(titulo_norm, malas):
+        puntos = puntos - penaliza_web_version()
+    if puntos < 0.0:
+        puntos = 0.0
+    if puntos > 1.0:
+        puntos = 1.0
+    return puntos
+
+# Puntúa, filtra por umbral y ordena (selección: el motor LuxScript no tiene
+# sort de List<Json> y scoring.lux tampoco lo necesita).
+fn List<Json> yt_web_puntuados(string consulta, int limite):
+    if consulta.trim() == "":
+        return []
+    string consulta_norm = normalizar(consulta)
+    List<Json> candidatos = yt_web_candidatos(consulta, limite * 3)
+    List<Json> puntuados = []
+    for int i in range(0, len(candidatos)):
+        double s = yt_web_puntuar(consulta_norm, candidatos[i])
+        if s < umbral_web():
+            continue
+        puntuados.add({ "cand": candidatos[i], "score": s })
+    List<Json> out = []
+    while len(out) < limite and len(puntuados) > 0:
+        int mejor = 0
+        for int i in range(1, len(puntuados)):
+            if jdbl(puntuados[i]["score"], 0.0) > jdbl(puntuados[mejor]["score"], 0.0):
+                mejor = i
+        Json c = puntuados[mejor]["cand"]
+        out.add({
+            "id": jstr(c["video_id"], ""),
+            "title": jstr(c["title"], ""),
+            "artistDisplay": jstr(c["channel"], ""),
+            "durationMs": jint(c["duration_ms"], 0),
+            "viewCount": jint(c["view_count"], 0)
+        })
+        puntuados.remove_at(mejor)
+    return out
+
+# ─── Añadir a la biblioteca ──────────────────────────────────────────────────
+# Crea la pista con id de vídeo (son ciudadanos de primera: asegurar_descarga
+# las baja directamente, sin emparejamiento) y encola la descarga ya.
+
+fn Json cmd_anadir_web(Json args):
+    string vid = arg_str(args, "videoId", "").trim()
+    string titulo = arg_str(args, "title", "").trim()
+    string canal = arg_str(args, "artistDisplay", "").trim()
+    int ms = jint(jget(args, "durationMs"), 0)
+    if vid == "" or titulo == "" or ms <= 0:
+        return error_api("INVALID", "error.invalid").status(400)
+    await sqlite.exec("""
+        insert into tracks(id, title, title_norm, duration_ms, artist_display, artist_norm, metadata_at)
+        values(?, ?, ?, ?, ?, ?, unixepoch())
+        on conflict(id) do update set
+            duration_ms = excluded.duration_ms,
+            artist_display = case when tracks.artist_display = '' then excluded.artist_display else tracks.artist_display end
+        """, vid, titulo, normalizar(titulo), ms, canal, normalizar(canal))
+    asegurar_descarga(vid, "immediate")
+    tocar_biblioteca()
+    List<Json> f = await sqlite.query(sql_pista_dto() + " where t.id = ?", vid)
+    if len(f) == 0:
+        return null
+    return track_rows_de(f)[0]

@@ -42,11 +42,19 @@ export function mountSidebar(contenedor, router) {
 			ruta: "social",
 			clave: "nav.social",
 			icono: "users"
+		},
+		// Solo en el cajón del móvil (CSS): allí la barra superior no tiene Ajustes.
+		{
+			ruta: "settings",
+			clave: "nav.settings",
+			icono: "settings",
+			soloMovil: true
 		}
 	];
 	const botones = new Map();
 	for (const entrada of entradas) {
 		const li = document.createElement("li");
+		if (entrada.soloMovil) li.className = "solo-movil";
 		const a = document.createElement("a");
 		a.className = "sidebar__item";
 		a.href = `#/${entrada.ruta}`;

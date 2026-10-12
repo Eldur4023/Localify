@@ -1,0 +1,266 @@
+/*
+ * Móvil (≤ 700 px). Va la última: gana a las reglas de escritorio.
+ *
+ * Misma interfaz, menos ruido: la navegación es un cajón (☰ o deslizar desde
+ * la izquierda), el reproductor es una barra mínima (portada, título, play,
+ * siguiente) y todo lo demás vive en la vista de la canción, a la que se
+ * llega tocando la barra o deslizando desde la derecha.
+ */
+
+/* Android pinta un destello azul en todo lo que se toca; la interfaz ya tiene
+   sus propios estados (:active, :hover), así que fuera. */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Solo móvil: oculto en escritorio. */
+.topbar__menu,
+.topbar__lupa,
+.topbar__volver,
+.tabs,
+.solo-movil {
+  display: none;
+}
+
+@media (max-width: 700px) {
+  .solo-movil { display: list-item; }
+  .topbar__menu,
+  .topbar__lupa { display: inline-flex; }
+  .topbar__volver { display: none; }
+
+  /* ── Armazón ───────────────────────────────────────────────────────────── */
+
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr auto auto;
+    grid-template-areas: "content" "player" "tabs";
+    height: 100dvh;
+    padding: var(--sp-1) var(--sp-1) 0;
+    gap: var(--sp-1);
+  }
+
+  /* Cajón de navegación */
+  .sidebar {
+    position: fixed;
+    z-index: 30;
+    inset: 0 auto 0 0;
+    width: min(300px, 85vw);
+    padding: calc(var(--sp-2) + env(safe-area-inset-top)) var(--sp-2) var(--sp-2);
+    background: var(--bg-base);
+    transform: translateX(-105%);
+    transition: transform 0.2s ease-out;
+  }
+  .app.is-drawer-abierto .sidebar { transform: none; }
+  .app::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    background: rgba(0, 0, 0, 0.6);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease-out;
+  }
+  .app.is-drawer-abierto::before { opacity: 1; pointer-events: auto; }
+  .asa-lateral { display: none; }
+
+  /* ── Pestañas inferiores ───────────────────────────────────────────────── */
+
+  .tabs {
+    grid-area: tabs;
+    display: flex;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .tabs__item {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: var(--sp-2) 0;
+    font-size: 11px;
+    color: var(--text-subdued);
+    text-decoration: none;
+  }
+  .tabs__item.is-active { color: var(--text-base); }
+  .tabs__item.is-active svg { color: var(--accent); }
+  .is-ampliada .tabs { display: none; }
+
+  /* Vistas de detalle: ← en lugar de ☰ */
+  .social__volver { display: none; }
+  .topbar--detalle .topbar__menu { display: none; }
+  .topbar--detalle .topbar__volver { display: inline-flex; }
+
+  /* ── Barra superior: ☰ · título · lupa ─────────────────────────────────── */
+
+  .topbar { height: 52px; gap: var(--sp-2); padding: 0 var(--sp-3); }
+  .topbar__nav > :not(.topbar__menu):not(.topbar__volver),
+  .topbar__ajustes,
+  .rapida { display: none; }
+  .topbar__title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* ── Carruseles: fila horizontal larga que se desliza (como Spotify) ──── */
+
+  .carrusel { margin-block: var(--sp-4) 0; }
+  .carrusel__titulo { font-size: var(--fs-xl, 22px); }
+  .carrusel__cuerpo {
+    display: flex;
+    gap: var(--sp-3);
+    overflow-x: auto;
+    /* sangra hasta los bordes de la pantalla (la vista lleva 24 px de margen) */
+    margin-inline: calc(var(--sp-5) * -1);
+    padding-inline: var(--sp-5);
+    padding-bottom: var(--sp-2);
+    scroll-snap-type: x proximity;
+    scroll-padding-inline: var(--sp-5);
+    scrollbar-width: none;
+    overscroll-behavior-x: contain;
+  }
+  .carrusel__cuerpo::-webkit-scrollbar,
+  .perfil__rejilla::-webkit-scrollbar { display: none; }
+  .perfil__rejilla {
+    display: flex;
+    margin-inline: calc(var(--sp-5) * -1);
+    padding-inline: var(--sp-5);
+    overflow-x: auto;
+    scrollbar-width: none;
+    scroll-snap-type: x proximity;
+  }
+  .perfil__rejilla > .perfil__lista { flex: 0 0 140px; scroll-snap-align: start; }
+  .carrusel__cuerpo > .tarjeta {
+    flex: 0 0 140px;
+    width: 140px;
+    padding: 0;
+    background: none;
+    scroll-snap-align: start;
+  }
+  .carrusel__cuerpo > .tarjeta .tarjeta__arte { box-shadow: none; }
+  .carrusel__cuerpo > .tarjeta .tarjeta__titulo { font-size: var(--fs-sm); }
+  .carrusel__cuerpo > .tarjeta .tarjeta__sub { font-size: var(--fs-xs); }
+
+  /* ── Buscar y fichas: filas sueltas en dos líneas, destacado compacto ─── */
+
+  .track--suelta .track__arte { width: 44px; height: 44px; }
+  .track--suelta .track__index { display: none; }
+  .fila-web .track__index { display: flex; }
+  .destacado { gap: var(--sp-3); padding: var(--sp-3); }
+  .destacado__arte { width: 72px; height: 72px; }
+  .destacado__titulo { font-size: var(--fs-xl, 22px); }
+  /* con el teclado abierto sobran las pestañas: el hueco es para lo que se escribe */
+  body:has(input:not([type=range]):focus) .tabs { display: none; }
+
+  /* ── Listas: portada, título y artista, estado ─────────────────────────── */
+
+  .lista__cabecera,
+  .track__index,
+  .track__play { display: none; }
+  .track { gap: var(--sp-3); padding-inline: var(--sp-3); }
+  .track__time { flex: 0 0 auto; font-size: var(--fs-xs); }
+  .vista__header { padding: var(--sp-2) var(--sp-3); }
+  .vista__header h2 { display: none; }
+
+  /* ── Mini-reproductor (como el de Spotify) ────────────────────────────── */
+
+  /* Tarjeta teñida con el color de la portada (--np-color, ui/color.js):
+     carátula, título y artista, corazón y play sin círculo; progreso en el
+     borde inferior. */
+  .player {
+    position: relative;
+    grid-template-columns: 1fr auto;
+    grid-template-areas: "info controls";
+    margin-inline: var(--sp-1);
+    padding: var(--sp-2) var(--sp-2) calc(var(--sp-2) + 3px);
+    background: var(--np-color, var(--bg-elevated));
+    border-radius: var(--radius-md);
+    transition: background 0.4s ease;
+  }
+  .player .pb__info { grid-area: info; min-width: 0; gap: var(--sp-3); }
+  .player .pb__cover { display: grid; width: 40px; height: 40px; flex: 0 0 40px; border-radius: 4px; }
+  .player .pb__title { font-weight: var(--fw-bold, 700); font-size: var(--fs-sm); color: #fff; }
+  .player .pb__artist { font-size: var(--fs-xs); color: rgba(255, 255, 255, 0.7); }
+  .player .pb__center { display: contents; }
+  .player .pb__controls { grid-area: controls; }
+  /* solo el corazón y play/pausa; el resto, en la vista de la canción */
+  body:not(.is-ampliada) .player .pb__controls > :not(.pb__play),
+  body:not(.is-ampliada) .player .pb__right,
+  body:not(.is-ampliada) .player .pb__time { display: none; }
+  body:not(.is-ampliada) .player .pb__info .bicono { color: #fff; }
+  body:not(.is-ampliada) .player .pb__play { width: 40px; height: 40px; background: none; color: #fff; }
+  body:not(.is-ampliada) .player .pb__play svg { width: 30px; height: 30px; }
+  /* progreso: un hilo blanco en el borde inferior, sin interacción */
+  .player .pb__progress {
+    position: absolute;
+    inset: auto var(--sp-2) 3px;
+    width: auto;
+    height: 2px;
+    overflow: hidden;
+    pointer-events: none;
+  }
+  body:not(.is-ampliada) .player .pb__seek { height: 2px; }
+  body:not(.is-ampliada) .player .pb__seek::-webkit-slider-runnable-track {
+    height: 2px;
+    background: linear-gradient(to right, #fff var(--avance, 0%), rgba(255, 255, 255, 0.3) var(--avance, 0%));
+  }
+  .player .pb__seek::-webkit-slider-thumb { display: none; }
+
+  /* ── Vista de la canción ───────────────────────────────────────────────── */
+
+  .ampliada {
+    inset: 0;
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+    grid-auto-rows: min-content;
+    align-content: start;
+    justify-items: center;
+    gap: var(--sp-5);
+    padding: calc(var(--sp-6) + env(safe-area-inset-top)) var(--sp-5) 230px;
+    overflow-y: auto;
+  }
+  /* Entra y sale deslizando desde la derecha (clase puesta por now-playing.js). */
+  .ampliada {
+    animation: none;
+    transform: translateX(100%);
+    transition: transform 0.25s ease-out;
+  }
+  .ampliada.is-visible { transform: none; }
+  .ampliada { background: linear-gradient(var(--np-color, #2a2a2a) 0%, var(--bg-base) 80%); }
+  .ampliada__cerrar { inset: calc(var(--sp-3) + env(safe-area-inset-top)) auto auto var(--sp-3); }
+  .ampliada__izquierda { align-items: center; text-align: center; width: 100%; }
+  .ampliada__arte { max-width: min(100%, 340px); }
+  .ampliada__titulo { font-size: var(--fs-xl); }
+  .ampliada__meta { margin: var(--sp-1) 0 0; font-size: var(--fs-xs); color: var(--text-muted); }
+  .ampliada__letra { width: 100%; font-size: var(--fs-lg); padding-inline-end: 0; }
+
+  /* Con la vista abierta, la barra se expande a controles completos. */
+  .is-ampliada .player {
+    position: fixed;
+    inset: auto 0 0 0;
+    z-index: calc(var(--z-modal) + 1);
+    grid-template-columns: 1fr;
+    grid-template-areas: "progress" "controls" "extra";
+    row-gap: var(--sp-3);
+    padding: var(--sp-4) var(--sp-5) calc(var(--sp-4) + env(safe-area-inset-bottom));
+    margin-inline: 0;
+    border-radius: 0;
+    /* la letra se desvanece por debajo de los controles */
+    background: linear-gradient(to bottom, transparent, var(--bg-base) 28%);
+    padding-top: var(--sp-8, 48px);
+  }
+  .is-ampliada .player { animation: barra-sube 0.25s ease-out; }
+  .is-ampliada .player .pb__cover,
+  .is-ampliada .player .pb__texts { display: none; }
+  .is-ampliada .player .pb__info { grid-area: extra; justify-self: start; }
+  .is-ampliada .player .pb__info .bicono { display: inline-flex; }
+  .is-ampliada .player .pb__right { grid-area: extra; justify-self: end; display: flex; }
+  .is-ampliada .player .pb__right > :not(:first-child) { display: none; }
+  .is-ampliada .player .pb__controls { grid-area: controls; justify-content: space-between; }
+  .is-ampliada .player .pb__controls > * { display: inline-flex; }
+  .is-ampliada .player .pb__progress { position: static; height: auto; pointer-events: auto; grid-area: progress; }
+  .is-ampliada .player .pb__time { display: inline; }
+  .is-ampliada .player .pb__seek { height: auto; }
+  .is-ampliada .player .pb__seek::-webkit-slider-thumb { display: block; }
+}
+
+@keyframes barra-sube {
+  from { transform: translateY(100%); }
+}

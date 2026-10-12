@@ -118,12 +118,13 @@ bool acquire_single_instance_lock(const fs::path& dir) {
 // the icon, even though a second click was never going to do anything
 // different. Best-effort: a missing/stale port file just means we exit
 // quietly, same as before this existed.
-void ask_running_instance_to_show(const fs::path& work_dir) {
+// Returns true if a live instance answered (the window was raised).
+bool ask_running_instance_to_show(const fs::path& work_dir) {
     std::ifstream in(work_dir / "port");
     uint16_t port = 0;
-    if (!(in >> port) || port == 0) return;
+    if (!(in >> port) || port == 0) return false;
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return;
+    if (fd < 0) return false;
     timeval tv{1, 0};
     ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -131,7 +132,9 @@ void ask_running_instance_to_show(const fs::path& work_dir) {
     addr.sin_family      = AF_INET;
     addr.sin_port        = htons(port);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    bool answered = false;
     if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+        answered = true;
         static const char req[] =
             "POST /api/window/restore HTTP/1.1\r\nHost: 127.0.0.1\r\n"
             "Content-Length: 0\r\nConnection: close\r\n\r\n";
@@ -140,6 +143,7 @@ void ask_running_instance_to_show(const fs::path& work_dir) {
         while (::recv(fd, buf, sizeof(buf), 0) > 0) {}
     }
     ::close(fd);
+    return answered;
 }
 
 fs::path xdg_data_home() {
@@ -226,9 +230,22 @@ int main(int argc, char** argv) {
     fs::path work_dir = xdg_data_home() / "lux-desktop" / LUXDESKTOP_APP_ID;
     fs::create_directories(work_dir);
     if (!acquire_single_instance_lock(work_dir)) {
-        std::cerr << "luxdesktop: already running (" << work_dir.string() << " is locked)\n";
-        ask_running_instance_to_show(work_dir);
-        return 1;
+        if (ask_running_instance_to_show(work_dir)) {
+            std::cerr << "luxdesktop: already running; asked it to show its window\n";
+            return 1;
+        }
+        // Nadie contesta: la instancia anterior se está apagando (el cierre limpio puede tardar
+        // unos segundos) o murió con el candado cogido. Antes se rendía aquí y "no abría": se
+        // espera a que lo suelte (hasta ~20 s).
+        bool got = false;
+        for (int i = 0; i < 80 && !got; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            got = acquire_single_instance_lock(work_dir);
+        }
+        if (!got) {
+            std::cerr << "luxdesktop: already running (" << work_dir.string() << " is locked)\n";
+            return 1;
+        }
     }
     extract_resources(work_dir);
     fs::current_path(work_dir); // the app's own paths (templates "./templates",
@@ -295,7 +312,7 @@ int main(int argc, char** argv) {
             g_window->terminate();
         }
     });
-    if (!wait_for_server(port, std::chrono::milliseconds(5000)))
+    if (!wait_for_server(port, std::chrono::milliseconds(20000)))
         lux::log().warn("server did not come up in time, opening the window anyway");
 
     // The port is random by design (find_free_port() above), but external
@@ -338,6 +355,14 @@ int main(int argc, char** argv) {
     // See the comment on g_shutdown_from_signal: only raise SIGTERM
     // ourselves if nothing already started the shutdown.
     if (!g_shutdown_from_signal.load()) std::raise(SIGTERM);
+    // El apagado "limpio" espera a las tareas en vuelo (una petición de red con 15-20 s de
+    // timeout lo alargaba hasta 15 s con el candado de instancia cogido: reabrir la app decía
+    // "ya está abierta"). Pasados unos segundos se sale a la fuerza; SQLite (WAL) no se corrompe.
+    // ponytail: salida dura tras 4 s; si hiciera falta, cancelar las tareas en vuelo desde Lux.
+    std::thread([] {
+        std::this_thread::sleep_for(std::chrono::seconds(4));
+        std::_Exit(0);
+    }).detach();
     server_thread.join();
 
     {

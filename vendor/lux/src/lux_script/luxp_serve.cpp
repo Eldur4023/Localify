@@ -31,8 +31,29 @@ using luxium::page::blob_plain;
 using luxium::page::PageSections;
 namespace li = luxp_internal;
 
+#ifdef __ANDROID__
+// libc++ del NDK no soporta std::atomic<shared_ptr>: un mutex (solo ahí; en el resto de
+// plataformas se mantiene la lectura sin cerrojo de siempre).
+std::mutex g_statics_mutex;
+std::shared_ptr<const std::vector<StaticMount>> g_statics{
+    std::make_shared<const std::vector<StaticMount>>()};
+
+std::shared_ptr<const std::vector<StaticMount>> g_statics_load() {
+    std::lock_guard<std::mutex> lock(g_statics_mutex);
+    return g_statics;
+}
+
+void g_statics_store(std::shared_ptr<const std::vector<StaticMount>> v) {
+    std::lock_guard<std::mutex> lock(g_statics_mutex);
+    g_statics = std::move(v);
+}
+#else
 std::atomic<std::shared_ptr<const std::vector<StaticMount>>> g_statics{
     std::make_shared<const std::vector<StaticMount>>()};
+
+std::shared_ptr<const std::vector<StaticMount>> g_statics_load() { return g_statics.load(); }
+void g_statics_store(std::shared_ptr<const std::vector<StaticMount>> v) { g_statics.store(std::move(v)); }
+#endif
 
 std::optional<std::string> read_disk(const fs::path& p) {
     std::ifstream in(p, std::ios::binary);
@@ -53,7 +74,7 @@ std::optional<std::string> fetch_static(const std::string& url, const std::strin
         abs = (slash == std::string::npos ? "/" : page_path.substr(0, slash + 1)) + abs;
     }
     abs = fs::path(abs.substr(0, abs.find_first_of("?#"))).lexically_normal().generic_string();
-    const auto mounts = g_statics.load();
+    const auto mounts = g_statics_load();
     for (const auto& m : *mounts) {
         std::string prefix = m.url_prefix;
         if (!prefix.ends_with('/')) prefix += '/';
@@ -208,7 +229,7 @@ bool wants_luxp(const lux::Request& req) {
 }
 
 void set_luxp_statics(const std::vector<StaticMount>& mounts) {
-    g_statics.store(std::make_shared<const std::vector<StaticMount>>(mounts));
+    g_statics_store(std::make_shared<const std::vector<StaticMount>>(mounts));
     std::lock_guard<std::mutex> lk(g_cache_m);   // what was built from the old mounts is stale
     g_programs.clear();
     g_sheets.clear();

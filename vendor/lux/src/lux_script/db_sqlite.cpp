@@ -235,7 +235,13 @@ public:
         // per-call mutex was pure overhead -- 8.6% of a list endpoint.
         sqlite3* db = nullptr;
         int rc = sqlite3_open_v2(file_.c_str(), &db,
-                                 SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX,
+                                 SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
+                                 /* Android/ARM: full mutex; NOMUTEX se cuelga en el writer */
+#ifdef __ANDROID__
+                                 SQLITE_OPEN_FULLMUTEX,
+#else
+                                 SQLITE_OPEN_NOMUTEX,
+#endif
                                  nullptr);
         if (rc != SQLITE_OK) {
             error = std::string("sqlite: cannot open '") + file_ + "': " +
@@ -246,8 +252,15 @@ public:
 
         // WAL: concurrent reads with a write in progress.  Without this, with
         // several workers any write would block every read.
+        // Bajo el traductor ARM del emulador, WAL+shm se cuelga o revienta
+        // (SI_KERNEL/SEGV en lux-dbwriter): allí se usa journal DELETE.
         char* msg = nullptr;
+#ifdef __ANDROID__
+        sqlite3_exec(db, "PRAGMA journal_mode=DELETE", nullptr, nullptr, &msg);
+        sqlite3_exec(db, "PRAGMA synchronous=FULL", nullptr, nullptr, &msg);
+#else
         sqlite3_exec(db, "PRAGMA journal_mode=WAL", nullptr, nullptr, &msg);
+#endif
         if (msg) sqlite3_free(msg);
         // synchronous=FULL (the default) fsyncs on every commit -- measured:
         // 2.78ms/commit, versus 0.04ms/commit with NORMAL. In WAL, NORMAL is
@@ -373,6 +386,13 @@ public:
     // write's latency), and everything that queued up while the last batch
     // ran commits as one transaction -- one WAL append instead of one each.
     DbPool::Batch batch() override {
+#ifdef __ANDROID__
+        // El hilo de batch + las cadenas de reanudación desde el writer
+        // revientan en ARM (SEGV en lux-dbwriter; ver android/README.md).
+        // Sin writer: cada escritura es autocommit en su worker — más lento
+        // y sin agrupar commits, pero sólido.
+        return {};
+#endif
         if (!shared_file_) return {};
         return [this](size_t writer, std::vector<DbPool::Write>& writes) { return run_batch(writer, writes); };
     }

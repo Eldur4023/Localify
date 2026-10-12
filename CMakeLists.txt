@@ -24,6 +24,42 @@ foreach(_m PDF POSTGRES MYSQL CRYPTO GZIP IMAGE)
 endforeach()
 add_subdirectory(vendor/lux)
 
+# ── Android: no window, no GTK -- the Kotlin Activity (android/) owns a
+# WebView and loads libluxapp.so, which only runs the Lux server. Gradle
+# drives this very file through externalNativeBuild; see android/README.md.
+if(ANDROID)
+    set(LUX_APP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/app CACHE PATH "Lux app directory to embed")
+
+    # respack runs at BUILD time on the HOST, so it can't be an ordinary
+    # target here (that would be cross-compiled for the phone).
+    find_program(LUX_HOST_CXX NAMES c++ g++ clang++ REQUIRED NO_CMAKE_FIND_ROOT_PATH)
+    set(_respack ${CMAKE_CURRENT_BINARY_DIR}/respack_host)
+    add_custom_command(
+        OUTPUT  ${_respack}
+        COMMAND ${LUX_HOST_CXX} -std=c++20 -O1 -I${CMAKE_CURRENT_SOURCE_DIR}/include
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/respack/respack.cpp -o ${_respack}
+        DEPENDS tools/respack/respack.cpp
+        VERBATIM)
+
+    file(GLOB_RECURSE _app_files CONFIGURE_DEPENDS ${LUX_APP_DIR}/*)
+    list(FILTER _app_files EXCLUDE REGEX "${LUX_APP_DIR}/data/.*")
+    set(_generated ${CMAKE_CURRENT_BINARY_DIR}/generated/luxapp_resources.cpp)
+    add_custom_command(
+        OUTPUT  ${_generated}
+        COMMAND ${_respack} ${LUX_APP_DIR} ${_generated}
+        DEPENDS ${_respack} ${_app_files}
+        VERBATIM)
+
+    add_library(luxapp SHARED src/boot.cpp src/android.cpp ${_generated})
+    target_include_directories(luxapp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    set(THREADS_PREFER_PTHREAD_FLAG ON)
+    find_package(Threads REQUIRED)
+    target_link_libraries(luxapp PRIVATE
+        -Wl,--whole-archive lux_script -Wl,--no-whole-archive
+        lux Threads::Threads log)
+    return()
+endif()
+
 # Lux's own CMakeLists.txt already finds this, but the resulting imported
 # target isn't guaranteed visible back up in this scope -- cheap and
 # idempotent to ask for it again here.

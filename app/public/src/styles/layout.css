@@ -85,7 +85,7 @@
  * los iconos se centran: el `aria-label` de cada enlace sigue ahí, así que
  * para un lector de pantalla no cambia nada.
  */
-@media (max-width: 1000px) {
+@media (min-width: 701px) and (max-width: 1000px) {
   .app {
     grid-template-columns: 72px 1fr;
   }

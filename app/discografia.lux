@@ -1,0 +1,227 @@
+# discografia.lux — Sondeo de la discografía REAL de un artista en YouTube Music.
+#
+# Una biblioteca solo conoce las canciones que alguien escuchó. Para que la ficha de un
+# artista (y Inicio) cuente lo que de verdad ha publicado, se trae de su página:
+#   - "Canciones más escuchadas" → lista completa de canciones (playlist OLAK/VL..., con
+#     continuaciones), cada una con su álbum
+#   - "Álbumes" y "Singles y EPs" → todos los lanzamientos (la rejilla completa, no solo
+#     el carrusel de la portada)
+# Los álbumes se guardan sin pistas; las pistas de cada uno se traen al abrirlo.
+
+fn Json? ytm_navegar_ext(string browse_id, string params):
+    Dict cuerpo = { "context": { "client": contexto_cliente() }, "browseId": browse_id, "params": params }
+    return innertube_post("https://music.youtube.com/youtubei/v1/browse", cuerpo)
+
+fn Json? ytm_continuar(string token):
+    Dict cuerpo = { "context": { "client": contexto_cliente() }, "continuation": token }
+    return innertube_post("https://music.youtube.com/youtubei/v1/browse", cuerpo)
+
+fn string token_de(Json? resp):
+    if resp == null:
+        return ""
+    List<Json> c = buscar_todos(resp, "continuationCommand")
+    if len(c) == 0:
+        return ""
+    return jstr(c[0]["token"], "")
+
+# Carátula grande de una miniatura de YouTube Music (vienen w60/w120/w226/w544).
+fn string cover_grande(string url):
+    return url.replace("w120-h120", "w544-h544").replace("w60-h60", "w544-h544").replace("w226-h226", "w544-h544")
+
+# Canción de una lista de YouTube Music (playlist de artista o página de álbum):
+# columnas título · artistas · reproducciones · álbum, y la duración en fixedColumns.
+fn PistaCatalogo pista_de_lista(Json el, string artista_id, string artista_nombre, string album_id, string album_titulo, string cover, int numero):
+    PistaCatalogo p = PistaCatalogo()
+    p.id = video_id_de(el)
+    List<Tramo> tt = tramos(el, 0)
+    p.title = len(tt) > 0 ? tt[0].texto.trim() : ""
+    List<Tramo> ta = tramos(el, 1)
+    for int i in range(0, len(ta)):
+        if ta[i].id.starts_with("UC") and ta[i].texto.trim() != "":
+            p.artista_ids.add(ta[i].id)
+            p.artista_nombres.add(ta[i].texto.trim())
+    if len(p.artista_ids) == 0 and artista_id != "":
+        p.artista_ids.add(artista_id)
+        p.artista_nombres.add(artista_nombre)
+    p.album_id = album_id
+    p.album_titulo = album_titulo
+    if p.album_id == "":
+        List<Tramo> tl = tramos(el, 3)
+        for int i in range(0, len(tl)):
+            if tl[i].id.starts_with("MPRE") and p.album_id == "":
+                p.album_id = tl[i].id
+                p.album_titulo = tl[i].texto.trim()
+    List<Json> fijas = jlist(jget(el, "fixedColumns"))
+    if len(fijas) > 0:
+        p.duration_ms = duracion_ms_de(texto_de(jget(jget(fijas[0], "musicResponsiveListItemFixedColumnRenderer"), "text")))
+    string mini = miniatura(el)
+    p.cover_url = cover != "" ? cover : cover_grande(mini)
+    p.track_number = numero
+    return p
+
+fn void guardar_album_catalogo(string aid, string titulo, string tipo, int anyo, string cover, string artista_id, string artista_nombre):
+    await sqlite.exec("""
+        insert into artists(id, name, name_norm, metadata_at) values(?, ?, ?, unixepoch())
+        on conflict(id) do nothing""", artista_id, artista_nombre, normalizar(artista_nombre))
+    await sqlite.exec("""
+        insert into albums(id, title, title_norm, album_type, release_date, total_tracks, cover_url, metadata_at)
+        values(?, ?, ?, ?, ?, null, ?, unixepoch())
+        on conflict(id) do update set title = excluded.title, album_type = excluded.album_type,
+            release_date = coalesce(excluded.release_date, release_date), cover_url = coalesce(excluded.cover_url, cover_url)""",
+        aid, titulo, normalizar(titulo), tipo, anyo == 0 ? null : str(anyo) + "-01-01", cover == "" ? null : cover)
+    await sqlite.exec("insert or ignore into album_artists(album_id, artist_id, position) values(?, ?, 0)", aid, artista_id)
+
+# Álbumes/singles de una lista de tarjetas (musicTwoRowItemRenderer): solo los MPRE...
+fn int guardar_tarjetas_album(Json raiz, string tipo, string artista_id, string artista_nombre):
+    List<Json> tarjetas = buscar_todos(raiz, "musicTwoRowItemRenderer")
+    int n = 0
+    for int i in range(0, len(tarjetas)):
+        Json t = tarjetas[i]
+        string aid = jstr(jget(jget(t, "navigationEndpoint"), "browseEndpoint")["browseId"], "")
+        if not aid.starts_with("MPRE"):
+            continue
+        string titulo = texto_de(jget(t, "title"))
+        int anyo = 0
+        List<Json> sub = jlist(jget(jget(t, "subtitle"), "runs"))
+        for int k in range(0, len(sub)):
+            int a = anyo_valido(jstr(sub[k]["text"], "").trim())
+            if a != 0:
+                anyo = a
+        List<Json> minis = jlist(jget(jget(jget(jget(t, "thumbnailRenderer"), "musicThumbnailRenderer"), "thumbnail"), "thumbnails"))
+        string cover = len(minis) > 0 ? cover_grande(jstr(minis[len(minis) - 1]["url"], "")) : ""
+        guardar_album_catalogo(aid, titulo, tipo, anyo, cover, artista_id, artista_nombre)
+        n = n + 1
+    return n
+
+# Un mismo artista puede existir varias veces ("srv:" del servidor, "local:" de ficheros,
+# el canal UC... de YouTube Music): se juntan en el del canal para que Inicio y las fichas
+# cuenten lo mismo.
+fn void fusionar_duplicados_de(string canal, string nombre):
+    List<Json> dups = await sqlite.query("select id from artists where id != ? and id not like 'UC%' and lower(name) = lower(?)", canal, nombre)
+    for int i in range(0, len(dups)):
+        string d = jstr(dups[i]["id"], "")
+        await sqlite.exec("update or ignore track_artists set artist_id = ? where artist_id = ?", canal, d)
+        await sqlite.exec("delete from track_artists where artist_id = ?", d)
+        await sqlite.exec("update or ignore album_artists set artist_id = ? where artist_id = ?", canal, d)
+        await sqlite.exec("delete from album_artists where artist_id = ?", d)
+        await sqlite.exec("delete from artists where id = ?", d)
+        ajuste_poner("alias:" + d, canal)   # los enlaces y vistas guardadas con el id viejo siguen funcionando
+
+# Trae de YouTube Music todas las canciones y lanzamientos de un artista (canal UC...).
+# Como mucho una vez cada 6 horas por artista.
+fn void importar_discografia(string canal):
+    if not canal.starts_with("UC") or state.get("disc:" + canal, "") != "":
+        return
+    state.set("disc:" + canal, "1", 21600000)
+    Json? principal = ytm_navegar(canal)
+    if principal == null:
+        state.remove("disc:" + canal)
+        return
+    string nombre = ""
+    List<Json> cabeceras = buscar_todos(principal, "musicImmersiveHeaderRenderer")
+    if len(cabeceras) == 0:
+        cabeceras = buscar_todos(principal, "musicVisualHeaderRenderer")
+    if len(cabeceras) > 0:
+        nombre = texto_de(jget(cabeceras[0], "title"))
+    if nombre == "":
+        List<Json> f = await sqlite.query("select name from artists where id = ?", canal)
+        nombre = len(f) > 0 ? jstr(f[0]["name"], "") : canal
+    # 1) todas las canciones
+    List<Json> estantes = buscar_todos(principal, "musicShelfRenderer")
+    if len(estantes) > 0:
+        Json destino = jget(jlist(jget(jget(estantes[0], "title"), "runs"))[0], "navigationEndpoint")
+        string lista = jstr(jget(jget(destino, "browseEndpoint"), "browseId"), "")
+        string params = jstr(jget(jget(destino, "browseEndpoint"), "params"), "")
+        if lista != "":
+            Json? pagina = ytm_navegar_ext(lista, params)
+            int vuelta = 0
+            while pagina != null and vuelta < 6:
+                List<Json> elementos = elementos_de_lista(pagina)
+                await sqlite.begin()
+                try:
+                    for int i in range(0, len(elementos)):
+                        PistaCatalogo p = pista_de_lista(elementos[i], canal, nombre, "", "", "", 0)
+                        guardar_pista(p)
+                    await sqlite.commit()
+                catch e:
+                    await sqlite.rollback()
+                    log.warn("discografia: no se pudo guardar una tanda de " + nombre + ": " + e.message)
+                string token = token_de(pagina)
+                if token == "":
+                    break
+                pagina = ytm_continuar(token)
+                vuelta = vuelta + 1
+    # 2) álbumes y singles: la rejilla completa de cada estante (el carrusel de la portada solo trae 10)
+    List<Json> carruseles = buscar_todos(principal, "musicCarouselShelfRenderer")
+    for int c in range(0, len(carruseles)):
+        Json cab = jget(jget(carruseles[c], "header"), "musicCarouselShelfBasicHeaderRenderer")
+        string titulo = texto_de(jget(cab, "title"))
+        string tipo = ""
+        if titulo.contains("ingle") or titulo.contains("EP"):
+            tipo = "single"
+        elif titulo.contains("lbum"):
+            tipo = "album"
+        if tipo == "":
+            continue
+        await sqlite.begin()
+        try:
+            guardar_tarjetas_album(carruseles[c], tipo, canal, nombre)
+            Json ver = jget(jlist(jget(jget(cab, "title"), "runs"))[0], "navigationEndpoint")
+            string grid = jstr(jget(jget(ver, "browseEndpoint"), "browseId"), "")
+            if grid != "":
+                Json? completa = ytm_navegar_ext(grid, jstr(jget(jget(ver, "browseEndpoint"), "params"), ""))
+                if completa != null:
+                    guardar_tarjetas_album(completa, tipo, canal, nombre)
+            await sqlite.commit()
+        catch e:
+            await sqlite.rollback()
+            log.warn("discografia: no se pudieron guardar los lanzamientos de " + nombre + ": " + e.message)
+    fusionar_duplicados_de(canal, nombre)
+    tocar_biblioteca()
+
+# Pistas de un álbum de catálogo (sin pistas guardadas aún).
+fn void importar_album(string album_id):
+    if not album_id.starts_with("MPRE") or state.get("disc:" + album_id, "") != "":
+        return
+    state.set("disc:" + album_id, "1", 21600000)
+    List<Json> a = await sqlite.query("""
+        select al.title, al.cover_url, aa.artist_id, ar.name from albums al
+        left join album_artists aa on aa.album_id = al.id left join artists ar on ar.id = aa.artist_id
+        where al.id = ? order by aa.position limit 1""", album_id)
+    if len(a) == 0:
+        return
+    Json? r = ytm_navegar(album_id)
+    if r == null:
+        state.remove("disc:" + album_id)
+        return
+    List<Json> elementos = elementos_de_lista(r)
+    string artista = jstr(a[0]["artist_id"], "")
+    await sqlite.begin()
+    try:
+        for int i in range(0, len(elementos)):
+            PistaCatalogo p = pista_de_lista(elementos[i], artista, jstr(a[0]["name"], ""), album_id, jstr(a[0]["title"], ""), jstr(a[0]["cover_url"], ""), i + 1)
+            guardar_pista(p)
+        await sqlite.commit()
+    catch e:
+        await sqlite.rollback()
+        log.warn("discografia: no se pudo guardar el álbum " + album_id + ": " + e.message)
+
+# Sondeo en segundo plano: los artistas que de verdad se escuchan (o están en favoritos),
+# uno por minuto, de más a menos escuchados. Así Inicio y las fichas ya traen la discografía.
+fn void sondeo_artistas_tick():
+    List<Json> candidatos = await sqlite.query("""
+        select ta.artist_id as id, count(*) as n
+        from play_history h join track_artists ta on ta.track_id = h.track_id
+        group by ta.artist_id order by n desc limit 40""")
+    for int i in range(0, len(candidatos)):
+        string id = jstr(candidatos[i]["id"], "")
+        if state.get("sin:" + id, "") != "":
+            continue
+        string canal = canal_de_artista(id)
+        if canal == "":
+            state.set("sin:" + id, "1", 86400000)
+            continue
+        if state.get("disc:" + canal, "") != "":
+            continue
+        importar_discografia(canal)
+        return

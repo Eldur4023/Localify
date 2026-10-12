@@ -16,11 +16,12 @@
 * Mientras se arrastra, la barra deja de seguir a la reproducción: si no, cada
 * foto tiraría del pulgar de vuelta y sería imposible apuntar.
 */
-import { player } from "../ipc/client.js";
+import { player, social } from "../ipc/client.js";
 import { alRecibir } from "../ipc/events.js";
 import { alCambiarIdioma, t } from "../i18n/index.js";
 import { botonIcono, cambiarIcono, icono } from "../ui/icons.js";
 import { ponerPortadaDePista } from "../ui/cards.js";
+import { colorDePortada } from "../ui/color.js";
 import { abrirMenu } from "../ui/menu.js";
 import { opcionesDePista } from "../ui/opciones-pista.js";
 /** Formatea una duración como `m:ss`. */
@@ -47,6 +48,10 @@ export function mountPlayerBar(contenedor, opciones) {
 	textos.append(titulo, artista);
 	const megusta = botonIcono("heart", "", () => {}, { tamano: 18 });
 	info.append(portada, textos, megusta);
+	// En móvil el mini-reproductor es un botón: tocarlo abre la vista de la canción.
+	info.addEventListener("click", (e) => {
+		if (matchMedia("(max-width: 700px)").matches && !e.target.closest("button")) opciones.alAmpliar();
+	});
 	/**
 	* La canción que suena acepta clic derecho, como cualquier otra fila.
 	*
@@ -154,12 +159,23 @@ export function mountPlayerBar(contenedor, opciones) {
 		repetir.setAttribute("aria-label", etiqueta);
 		repetir.title = etiqueta;
 	}
+	/** "Escuchando ahora" de Social: al cambiar lo que suena y cada minuto mientras suena. */
+	let anunciado = null;
+	function anunciar(forzar = false) {
+		const p = estado?.status === "playing" ? estado.track : null;
+		const clave = p?.id ?? "";
+		if (!forzar && clave === (anunciado?.clave ?? "")) return;
+		anunciado = clave ? { clave, title: p.title, artist: p.artistDisplay ?? "" } : null;
+		void social.presence(anunciado?.title ?? "", anunciado?.artist ?? "").catch(() => {});
+	}
+	const latido = setInterval(() => anunciado && anunciar(true), 6e4);
 	function pintar(nuevo) {
 		// Las respuestas llegan en cualquier orden (16 hebras en el servidor):
 		// una más vieja que lo pintado dejaba el botón al revés de lo que suena,
 		// y nada lo corregía hasta el siguiente cambio de estado.
 		if (estado && nuevo.revision < estado.revision) return;
 		estado = nuevo;
+		anunciar();
 		titulo.textContent = nuevo.track?.title ?? t("player.nothing");
 		artista.textContent = nuevo.track?.artistDisplay ?? "";
 		cambiarIcono(megusta, nuevo.track?.isFavorite ? "heart-filled" : "heart", 18);
@@ -172,6 +188,16 @@ export function mountPlayerBar(contenedor, opciones) {
 			portada.querySelector(".portada")?.remove();
 			if (nuevo.track) {
 				ponerPortadaDePista(portada, nuevo.track.id);
+				// el reproductor y la vista de la canción se tiñen con la portada
+				const img = portada.querySelector(".portada");
+				const teñir = () => {
+					const c = colorDePortada(img);
+					if (c) document.documentElement.style.setProperty("--np-color", c);
+				};
+				if (img?.complete && img.naturalWidth) teñir();
+				else img?.addEventListener("load", teñir, { once: true });
+			} else {
+				document.documentElement.style.removeProperty("--np-color");
 			}
 		}
 		total.textContent = duracion(nuevo.durationMs);
@@ -309,6 +335,7 @@ export function mountPlayerBar(contenedor, opciones) {
 		refrescar,
 		destroy() {
 			globalThis.removeEventListener("keydown", alEspacio);
+			clearInterval(latido);
 			dejarEventos();
 			dejarIdioma();
 			contenedor.replaceChildren();

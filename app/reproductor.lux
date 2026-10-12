@@ -194,7 +194,7 @@ fn string portada_publica(string track_id):
     if url == "":
         string yid = youtube_id_de_pista(track_id)
         if yid != "":
-            url = url_miniatura_video(yid)
+            url = url_miniatura_video(yid).replace("/maxresdefault.jpg", "/hq720.jpg")   # sin 404 posible de fallback: va a Discord/MPRIS tal cual
     state.set(k, url == "" ? "-" : url)
     return url
 
