@@ -73,7 +73,7 @@ export default {
 	"playlist.rename": "Cambiar nombre",
 	"playlist.describe": "Editar la descripción",
 	"playlist.description": "Descripción",
-	"playlist.import": "Importar de Spotify",
+	"playlist.import": "Importar playlist",
 	"playlist.import_url": "Enlace de Spotify o YouTube Music",
 	"playlist.import_failed": "No se pudo importar esa lista",
 	"playlist.delete": "Eliminar",
