@@ -41,8 +41,9 @@ import { opcionesDePista } from "./opciones-pista.js";
 import { arrastrable, reordenable } from "./dnd.js";
 import { icono } from "./icons.js";
 import { mountVirtualList } from "./virtual-list.js";
+import { nodo } from "./dom.js";
 /** Altura de fila. Debe coincidir con `.track` en el CSS. */
-export const ALTO_FILA = 56;
+const ALTO_FILA = 56;
 /**
 * Fecha de una celda: día, mes abreviado y año.
 *
@@ -123,24 +124,20 @@ export function mountTrackList(contenedor, opciones) {
 	// Caja propia: la cabecera de columnas y la lista virtual son hermanas, y
 	// `mountVirtualList` reemplaza los hijos del contenedor que recibe. Sin este
 	// envoltorio, montar la lista se llevaría la cabecera por delante.
-	const caja = document.createElement("div");
-	caja.className = "lista";
+	const caja = nodo("div", "lista");
 	caja.append(cabeceraDeColumnas());
-	const cuerpo = document.createElement("div");
-	cuerpo.className = "lista__cuerpo";
+	const cuerpo = nodo("div", "lista__cuerpo");
 	caja.append(cuerpo);
 	contenedor.replaceChildren(caja);
 	const lista = mountVirtualList(cuerpo, {
 		rowHeight: ALTO_FILA,
 		createRow() {
-			const fila = document.createElement("div");
-			fila.className = "track";
+			const fila = nodo("div", "track");
 			fila.setAttribute("role", "option");
 			// Los hijos se crean una vez; `renderRow` solo cambia su contenido.
 			// Crear nodos al pintar anularía el reciclado.
 			const trozo = (clase) => {
-				const span = document.createElement("span");
-				span.className = `track__${clase}`;
+				const span = nodo("span", `track__${clase}`);
 				return span;
 			};
 			const numero = trozo("index");
@@ -152,8 +149,7 @@ export function mountTrackList(contenedor, opciones) {
 			// Título y artista van apilados en una celda, no en dos columnas: es lo
 			// que deja sitio para álbum y fecha sin comerse el título, y lo que hace
 			// que la fila se lea de un vistazo —qué canción y de quién, juntos—.
-			const principal = document.createElement("span");
-			principal.className = "track__main";
+			const principal = nodo("span", "track__main");
 			principal.append(titulo, artista);
 			const album = opciones.conAlbum === true ? trozo("album") : null;
 			const fecha = opciones.conFecha === true ? trozo("added") : null;
@@ -238,13 +234,10 @@ export function mountTrackList(contenedor, opciones) {
 	* fila diría cinco palabras sueltas que no corresponden a nada accionable.
 	*/
 	function cabeceraDeColumnas() {
-		const fila = document.createElement("div");
-		fila.className = "lista__cabecera";
+		const fila = nodo("div", "lista__cabecera");
 		fila.setAttribute("aria-hidden", "true");
 		const celda = (clase, texto) => {
-			const span = document.createElement("span");
-			span.className = `track__${clase}`;
-			span.textContent = texto;
+			const span = nodo("span", `track__${clase}`, texto);
 			return span;
 		};
 		fila.append(

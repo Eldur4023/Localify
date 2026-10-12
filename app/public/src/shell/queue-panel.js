@@ -4,15 +4,13 @@ import { alCambiarIdioma, t } from "../i18n/index.js";
 import { botonIcono } from "../ui/icons.js";
 import { reordenable, zonaDeReordenacion } from "../ui/dnd.js";
 import { duracion } from "./player.js";
+import { nodo } from "../ui/dom.js";
 export function mountQueuePanel(contenedor) {
-	const el = document.createElement("aside");
-	el.className = "cola";
+	const el = nodo("aside", "cola");
 	el.hidden = true;
 	el.setAttribute("aria-label", t("queue.title"));
-	const cabecera = document.createElement("header");
-	cabecera.className = "cola__header";
-	const titulo = document.createElement("h2");
-	titulo.className = "cola__titulo";
+	const cabecera = nodo("header", "cola__header");
+	const titulo = nodo("h2", "cola__titulo");
 	// Vaciar la cola va con texto y no con otro icono: dos aspas seguidas en la
 	// misma cabecera no dicen cuál cierra el panel y cuál borra lo que hay
 	// dentro, y una de las dos no se deshace.
@@ -22,29 +20,20 @@ export function mountQueuePanel(contenedor) {
 	vaciar.addEventListener("click", () => void api.clearUser());
 	const cerrarBoton = botonIcono("chevron-right", "", () => cerrar(), { tamano: 18 });
 	cabecera.append(titulo, vaciar, cerrarBoton);
-	const cuerpo = document.createElement("div");
-	cuerpo.className = "cola__cuerpo";
+	const cuerpo = nodo("div", "cola__cuerpo");
 	el.append(cabecera, cuerpo);
 	contenedor.append(el);
 	let instantanea = null;
 	let revision = -1n;
 	const desmontadores = [];
 	function fila(entrada, opciones) {
-		const f = document.createElement("div");
-		f.className = "cola__fila";
+		const f = nodo("div", "cola__fila");
 		f.dataset["entryId"] = entrada.entryId;
-		const textos = document.createElement("div");
-		textos.className = "cola__textos";
-		const t1 = document.createElement("div");
-		t1.className = "cola__title";
-		t1.textContent = entrada.track.title;
-		const t2 = document.createElement("div");
-		t2.className = "cola__artist";
-		t2.textContent = entrada.track.artistDisplay;
+		const textos = nodo("div", "cola__textos");
+		const t1 = nodo("div", "cola__title", entrada.track.title);
+		const t2 = nodo("div", "cola__artist", entrada.track.artistDisplay);
 		textos.append(t1, t2);
-		const tiempo = document.createElement("span");
-		tiempo.className = "cola__time";
-		tiempo.textContent = duracion(entrada.track.durationMs);
+		const tiempo = nodo("span", "cola__time", duracion(entrada.track.durationMs));
 		f.append(textos, tiempo);
 		// Solo la cola de usuario se puede tocar. La ventana de contexto la
 		// recalcula el backend, y ofrecer un botón de quitar que no quita nada
@@ -64,12 +53,9 @@ export function mountQueuePanel(contenedor) {
 		return f;
 	}
 	function bloque(clave, entradas, usuario) {
-		const s = document.createElement("section");
-		s.className = "cola__bloque";
+		const s = nodo("section", "cola__bloque");
 		if (usuario) s.dataset["usuario"] = "1";
-		const h = document.createElement("h3");
-		h.className = "cola__subtitulo";
-		h.textContent = clave;
+		const h = nodo("h3", "cola__subtitulo", clave);
 		s.append(h);
 		for (const entrada of entradas) s.append(fila(entrada, { usuario }));
 		return s;
@@ -85,11 +71,8 @@ export function mountQueuePanel(contenedor) {
 		const q = instantanea;
 		vaciar.hidden = q.userQueue.length === 0;
 		if (q.current) {
-			const s = document.createElement("section");
-			s.className = "cola__bloque cola__bloque--actual";
-			const h = document.createElement("h3");
-			h.className = "cola__subtitulo";
-			h.textContent = t("queue.now_playing");
+			const s = nodo("section", "cola__bloque cola__bloque--actual");
+			const h = nodo("h3", "cola__subtitulo", t("queue.now_playing"));
 			s.append(h, fila(q.current, { usuario: false }));
 			cuerpo.append(s);
 		}
@@ -98,14 +81,12 @@ export function mountQueuePanel(contenedor) {
 		}
 		if (q.contextQueue.length > 0) {
 			// El backend manda la clave i18n del origen ("Siguiente desde: Álbum"),
-			// no el texto: traducir es cosa del frontend (ADR-012).
+			// no el texto: traducir es cosa del frontend.
 			const desde = q.contextLabelKey ? `${t("queue.next_from")}: ${t(q.contextLabelKey)}` : t("queue.next_up");
 			cuerpo.append(bloque(desde, q.contextQueue, false));
 		}
 		if (!q.current && q.userQueue.length === 0 && q.contextQueue.length === 0) {
-			const p = document.createElement("p");
-			p.className = "vista__empty";
-			p.textContent = t("queue.empty");
+			const p = nodo("p", "vista__empty", t("queue.empty"));
 			cuerpo.append(p);
 		}
 	}

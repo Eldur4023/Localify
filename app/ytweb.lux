@@ -30,33 +30,6 @@ fn Json? yt_web_buscar(string consulta):
 
 # ─── Parseo de videoRenderer ─────────────────────────────────────────────────
 
-fn string texto_de_runs(Json nodo):
-    List<Json> runs = jlist(jget(nodo, "runs"))
-    if len(runs) > 0:
-        return jstr(runs[0]["text"], "")
-    return jstr(jget(nodo, "simpleText"), "")
-
-# "3:45" / "1:02:03" → ms; 0 si no se puede parsear.
-fn int duracion_ms_de_texto(string s):
-    s = s.trim()
-    if s == "":
-        return 0
-    List<string> partes = s.split(":")
-    int total = 0
-    for int i in range(0, len(partes)):
-        string p = partes[i].trim()
-        bool numerico = len(p) > 0
-        for int k in range(0, len(p)):
-            if "0123456789".contains(p.slice(k, k + 1)) == false:
-                numerico = false
-                break
-        if not numerico:
-            return 0
-        total = total * 60 + int(p)
-    if total <= 0:
-        return 0
-    return total * 1000
-
 # "1.234.567 vistas" / "1,234,567 views" → 1234567; 0 si no hay dígitos.
 fn int vistas_de_texto(string s):
     string digitos = ""
@@ -79,17 +52,17 @@ fn List<Json> yt_web_candidatos(string consulta, int limite):
             break
         Json nodo = nodos[i]
         string vid = jstr(nodo["videoId"], "")
-        string titulo = texto_de_runs(jget(nodo, "title"))
-        string canal = texto_de_runs(jget(nodo, "ownerText"))
+        string titulo = texto_de(jget(nodo, "title"))
+        string canal = texto_de(jget(nodo, "ownerText"))
         if canal == "":
-            canal = texto_de_runs(jget(nodo, "longBylineText"))
-        int ms = duracion_ms_de_texto(texto_de_runs(jget(nodo, "lengthText")))
+            canal = texto_de(jget(nodo, "longBylineText"))
+        int ms = duracion_ms_de(texto_de(jget(nodo, "lengthText")))
         # sin duración no hay forma de validar que sea una canción: fuera
         if vid == "" or titulo == "" or ms <= 0:
             continue
-        string vistas_txt = texto_de_runs(jget(nodo, "viewCountText"))
+        string vistas_txt = texto_de(jget(nodo, "viewCountText"))
         if vistas_txt == "":
-            vistas_txt = texto_de_runs(jget(nodo, "shortViewCountText"))
+            vistas_txt = texto_de(jget(nodo, "shortViewCountText"))
         out.add({
             "video_id": vid,
             "title": titulo,

@@ -92,8 +92,6 @@ export const queue = {
 	jumpTo: (entryId) => invoke("queue_jump_to", { entryId })
 };
 export const library = {
-	/** Grupos de pistas que son la misma canción (título + artista + duración ±3 s). */
-	findDuplicates: () => invoke("library_find_duplicates"),
 	/** Funde cada grupo en una sola pista; no se pierde nada (listas, favoritos, historial). */
 	mergeDuplicates: () => invoke("library_merge_duplicates"),
 	tracks: (filter, sort, req = page()) => invoke("library_tracks", {
@@ -101,16 +99,11 @@ export const library = {
 		sort,
 		page: req
 	}),
-	albums: (req = page()) => invoke("library_albums", { page: req }),
-	artists: (req = page()) => invoke("library_artists", { page: req }),
 	favorites: (req = page()) => invoke("library_favorites", { page: req }),
 	setFavorite: (trackId, enabled) => invoke("library_set_favorite", {
 		trackId,
 		enabled
 	}),
-	recent: (limit) => invoke("library_recent", { limit }),
-	/** Estado de la ventana visible completa, en una sola llamada. */
-	availability: (trackIds) => invoke("library_availability", { trackIds }),
 	stats: () => invoke("library_stats"),
 	rescan: () => invoke("library_rescan"),
 	/**
@@ -316,7 +309,6 @@ export const social = {
 	/** Descarga de la nube: trae biblioteca, favoritos y playlists que no tengo; nunca baja lo que ya tengo. */
 	pull: () => invoke("server_pull"),
 	syncLibrary: (offset) => invoke("server_sync_library", { offset }),
-	me: () => invoke("social_me"),
 	updateMe: (displayName, bio) => invoke("social_update_me", {
 		displayName,
 		bio
@@ -333,14 +325,11 @@ export const social = {
 	decline: (id) => invoke("social_decline", { id }),
 	/** Asegura que la playlist vive en el servidor y devuelve su ficha (miembros, visibilidad). */
 	ensure: (playlistId) => invoke("social_ensure", { playlistId }),
-	/** Id de la playlist en el servidor, o `null` si no está publicada. */
-	playlistLink: (playlistId) => invoke("social_playlist_link", { playlistId }),
 	publish: (playlistId, visibility, collaborative) => invoke("social_publish", {
 		playlistId,
 		visibility,
 		collaborative
 	}),
-	unpublish: (playlistId) => invoke("social_unpublish", { playlistId }),
 	sync: (playlistId) => invoke("social_sync", { playlistId }),
 	importPlaylist: (id) => invoke("social_import", { id }),
 	addMember: (id, username) => invoke("social_add_member", {

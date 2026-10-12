@@ -1,16 +1,12 @@
 const CANAL_EVENTOS = "localify://event";
-const CANAL_RESYNC = "localify://resync";
 const manejadores = new Set();
-const manejadoresResync = new Set();
 let iniciado = false;
 /**
 * Arranca la escucha. Es idempotente: llamarla dos veces no duplica los
 * manejadores del puente.
 *
-* En este port no hay puente de eventos de Tauri: el backend empuja una foto
-* de su estado por SSE (`/api/events/stream`) y el transporte sintetiza los
-* MISMOS eventos con los MISMOS nombres que emitía el bus de Rust, de modo que
-* ninguna vista cambia. Ver `ipc/transport.js`.
+* El backend empuja una foto de su estado por SSE (`/api/events/stream`) y el transporte sintetiza
+* los eventos por diferencias. Ver `ipc/transport.js`.
 */
 export async function iniciar() {
 	if (iniciado) return;
@@ -24,14 +20,6 @@ export async function iniciar() {
 				m(evento);
 			} catch (e) {
 				console.error("manejador de evento falló", evento.type, e);
-			}
-		}
-	}, () => {
-		for (const m of manejadoresResync) {
-			try {
-				m();
-			} catch (e) {
-				console.error("manejador de resincronización falló", e);
 			}
 		}
 	});
@@ -50,14 +38,4 @@ export function alRecibirTipo(tipo, manejador) {
 			manejador(evento);
 		}
 	});
-}
-/**
-* Se suscribe a la señal de resincronización.
-*
-* Quien la reciba debe **recargar su estado** con los comandos de consulta, no
-* intentar reconstruirlo a partir de los eventos que sí llegaron.
-*/
-export function alResincronizar(manejador) {
-	manejadoresResync.add(manejador);
-	return () => manejadoresResync.delete(manejador);
 }

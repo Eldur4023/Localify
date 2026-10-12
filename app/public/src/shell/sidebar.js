@@ -16,11 +16,11 @@ import { ponerImagenDePlaylist } from "../ui/cards.js";
 import { abrirMenu } from "../ui/menu.js";
 import { opcionesDePlaylist } from "../ui/opciones-playlist.js";
 import { arrastrable, reordenable, zonaDeReordenacion, zonaDeSoltado, TIPO_PISTAS, TIPO_PLAYLIST } from "../ui/dnd.js";
+import { nodo } from "../ui/dom.js";
 export function mountSidebar(contenedor, router) {
 	contenedor.replaceChildren();
 	// ── Navegación principal ────────────────────────────────────────────────
-	const nav = document.createElement("ul");
-	nav.className = "sidebar__nav";
+	const nav = nodo("ul", "sidebar__nav");
 	nav.setAttribute("role", "list");
 	const entradas = [
 		{
@@ -55,8 +55,7 @@ export function mountSidebar(contenedor, router) {
 	for (const entrada of entradas) {
 		const li = document.createElement("li");
 		if (entrada.soloMovil) li.className = "solo-movil";
-		const a = document.createElement("a");
-		a.className = "sidebar__item";
+		const a = nodo("a", "sidebar__item");
 		a.href = `#/${entrada.ruta}`;
 		a.append(icono(entrada.icono, 22));
 		const texto = document.createElement("span");
@@ -74,8 +73,7 @@ export function mountSidebar(contenedor, router) {
 		a.dataset["clave"] = entrada.clave;
 	}
 	// ── Cabecera de playlists ───────────────────────────────────────────────
-	const cabecera = document.createElement("div");
-	cabecera.className = "sidebar__header";
+	const cabecera = nodo("div", "sidebar__header");
 	const titulo = document.createElement("span");
 	const nueva = document.createElement("button");
 	nueva.type = "button";
@@ -100,20 +98,17 @@ export function mountSidebar(contenedor, router) {
 	});
 	cabecera.append(titulo, nueva);
 	// ── Lista de playlists ──────────────────────────────────────────────────
-	const lista = document.createElement("ul");
-	lista.className = "sidebar__playlists";
+	const lista = nodo("ul", "sidebar__playlists");
 	lista.setAttribute("role", "list");
 	const liked = document.createElement("li");
-	const likedLink = document.createElement("a");
-	likedLink.className = "sidebar__item sidebar__item--liked";
+	const likedLink = nodo("a", "sidebar__item sidebar__item--liked");
 	likedLink.href = "#/liked";
 	likedLink.append(icono("heart-filled", 18));
 	const likedTexto = document.createElement("span");
 	likedLink.append(likedTexto);
 	liked.append(likedLink);
 	botones.set("liked", likedLink);
-	const bloque = document.createElement("div");
-	bloque.className = "sidebar__block";
+	const bloque = nodo("div", "sidebar__block");
 	bloque.append(cabecera, lista);
 	contenedor.append(nav, bloque);
 	const soltados = [];
@@ -191,15 +186,13 @@ export function mountSidebar(contenedor, router) {
 		lista.replaceChildren(liked);
 		for (const p of ordenActual) {
 			const li = document.createElement("li");
-			const a = document.createElement("a");
-			a.className = "sidebar__item";
+			const a = nodo("a", "sidebar__item");
 			a.href = `#/playlist/${p.id}`;
 			a.dataset["playlistId"] = p.id;
 			// Miniatura en vez del icono genérico: en una barra con diez playlists,
 			// diez notas musicales iguales no distinguen ninguna, y la portada de lo
 			// que hay dentro sí se reconoce de reojo.
-			const arte = document.createElement("span");
-			arte.className = "sidebar__arte";
+			const arte = nodo("span", "sidebar__arte");
 			arte.append(icono("music", 20));
 			ponerImagenDePlaylist(arte, p);
 			const nombre = document.createElement("span");
@@ -281,7 +274,7 @@ export function mountSidebar(contenedor, router) {
 			else lista.append(nodoMovido);
 		}
 		// Optimista, como el reordenamiento de canciones: solo se recarga si el
-		// backend falla de verdad (ADR-009, un único `UPDATE`).
+		// backend falla de verdad (un único `UPDATE`).
 		try {
 			await api.reorderList(playlistId, indice);
 		} catch (error) {

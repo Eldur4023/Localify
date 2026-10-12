@@ -6,23 +6,18 @@ import { cambiarFoto, opcionesDePlaylist } from "../ui/opciones-playlist.js";
 import { zonaDeReordenacion, zonaDeSoltado, TIPO_PISTAS } from "../ui/dnd.js";
 import { botonIcono, icono } from "../ui/icons.js";
 import { ponerImagenDePlaylist } from "../ui/cards.js";
+import { nodo } from "../ui/dom.js";
 /** Tope de entradas que se traen de una vez. */
 const TOPE = 5e3;
 export function mountPlaylistView(contenedor, ruta) {
 	const playlistId = ruta.params[0] ?? "";
-	const el = document.createElement("section");
-	el.className = "vista vista--lista";
-	const cabecera = document.createElement("header");
-	cabecera.className = "vista__header vista__header--ficha";
-	const arte = document.createElement("div");
-	arte.className = "ficha__arte";
+	const el = nodo("section", "vista vista--lista");
+	const cabecera = nodo("header", "vista__header vista__header--ficha");
+	const arte = nodo("div", "ficha__arte");
 	arte.append(icono("music", 48));
-	const texto = document.createElement("div");
-	texto.className = "ficha__texto";
-	const titulo = document.createElement("h2");
-	titulo.className = "vista__title";
-	const cuenta = document.createElement("span");
-	cuenta.className = "vista__count";
+	const texto = nodo("div", "ficha__texto");
+	const titulo = nodo("h2", "vista__title");
+	const cuenta = nodo("span", "vista__count");
 	// La imagen se cambia pulsándola. Es donde la gente lo intenta antes de
 	// buscar un botón, y así el gesto está donde está la cosa que modifica.
 	arte.classList.add("ficha__arte--editable");
@@ -35,8 +30,7 @@ export function mountPlaylistView(contenedor, ruta) {
 			void cambiarFoto(accionable(), reacciones);
 		}
 	});
-	const acciones = document.createElement("div");
-	acciones.className = "ficha__acciones";
+	const acciones = nodo("div", "ficha__acciones");
 	// Un solo botón que abre el mismo menú que el clic derecho. Antes había tres,
 	// dos de ellos con el icono de cerrar: uno quitaba la foto y el otro borraba
 	// la playlist entera, y distinguirlos era cuestión de acertar.
@@ -48,16 +42,13 @@ export function mountPlaylistView(contenedor, ruta) {
 	// La descripción va entre el título y el recuento. Se oculta cuando no hay
 	// ninguna —que es el caso de casi todas— en vez de dejar un hueco vacío que
 	// se lee como un fallo de pintado.
-	const descripcion = document.createElement("p");
-	descripcion.className = "ficha__descripcion";
+	const descripcion = nodo("p", "ficha__descripcion");
 	descripcion.hidden = true;
 	texto.append(titulo, descripcion, cuenta, acciones);
 	cabecera.append(arte, texto);
-	const vacio = document.createElement("p");
-	vacio.className = "vista__empty";
+	const vacio = nodo("p", "vista__empty");
 	vacio.hidden = true;
-	const cuerpo = document.createElement("div");
-	cuerpo.className = "vista__body";
+	const cuerpo = nodo("div", "vista__body");
 	el.append(cabecera, vacio, cuerpo);
 	contenedor.replaceChildren(el);
 	let detalle = null;
@@ -141,7 +132,7 @@ export function mountPlaylistView(contenedor, ruta) {
 	/** Arrastrar dentro reordena. */
 	const dejarReorden = zonaDeReordenacion(cuerpo, (destino) => destino instanceof Element ? destino.closest(".track") : null, (fila) => Number(fila.dataset["indice"] ?? "0"), async (entryId, indice) => {
 		// Movimiento optimista: la fila salta ya y la recarga confirma. Se puede
-		// porque reordenar es un solo `UPDATE` (ADR-009) y no falla salvo que la
+		// porque reordenar es un solo `UPDATE` y no falla salvo que la
 		// playlist haya desaparecido.
 		//
 		// Hay que mover las dos copias: `entries` guarda los identificadores de

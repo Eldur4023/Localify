@@ -3,16 +3,15 @@ import { alRecibir } from "../ipc/events.js";
 import { alCambiarIdioma, t } from "../i18n/index.js";
 import { botonIcono, icono } from "../ui/icons.js";
 import { ponerPortadaDePista } from "../ui/cards.js";
+import { nodo } from "../ui/dom.js";
 /** Cada cuánto se comprueba qué línea toca. El mismo ritmo que la barra. */
 const SONDEO_MS = 250;
 export function mountNowPlaying(contenedor) {
-	const el = document.createElement("section");
-	el.className = "ampliada";
+	const el = nodo("section", "ampliada");
 	el.hidden = true;
 	const cerrarBoton = botonIcono("chevron-down", "", () => cerrar(), { tamano: 22 });
 	cerrarBoton.classList.add("ampliada__cerrar");
-	const arte = document.createElement("div");
-	arte.className = "ampliada__arte";
+	const arte = nodo("div", "ampliada__arte");
 	arte.append(icono("music", 96));
 	// Canción cuya portada grande está puesta.
 	//
@@ -21,26 +20,19 @@ export function mountNowPlaying(contenedor) {
 	// esta vista no pintaba nada; y aunque la pintara, pediría una imagen
 	// distinta de la que sale en la lista y en la barra del reproductor.
 	let pistaPintada = null;
-	const titulo = document.createElement("h1");
-	titulo.className = "ampliada__titulo";
-	const artista = document.createElement("p");
-	artista.className = "ampliada__artista";
-	const album = document.createElement("p");
-	album.className = "ampliada__album";
+	const titulo = nodo("h1", "ampliada__titulo");
+	const artista = nodo("p", "ampliada__artista");
+	const album = nodo("p", "ampliada__album");
 	// El aviso de "sin letra" va con la canción, no donde iría la letra: ese
 	// panel desaparece cuando no hay nada que poner en él, y un mensaje dentro de
 	// algo que no se muestra no lo lee nadie.
 	// Datos del archivo: formato, tamaño, duración.
-	const meta = document.createElement("p");
-	meta.className = "ampliada__meta";
-	const sinLetra = document.createElement("p");
-	sinLetra.className = "ampliada__sin-letra";
+	const meta = nodo("p", "ampliada__meta");
+	const sinLetra = nodo("p", "ampliada__sin-letra");
 	sinLetra.hidden = true;
-	const izquierda = document.createElement("div");
-	izquierda.className = "ampliada__izquierda";
+	const izquierda = nodo("div", "ampliada__izquierda");
 	izquierda.append(arte, titulo, artista, album, meta, sinLetra);
-	const letra = document.createElement("div");
-	letra.className = "ampliada__letra";
+	const letra = nodo("div", "ampliada__letra");
 	el.append(cerrarBoton, izquierda, letra);
 	contenedor.append(el);
 	let pistaActual = null;
@@ -83,8 +75,7 @@ export function mountNowPlaying(contenedor) {
 		if (actual.synced && actual.synced.length > 0) {
 			lineas = [...actual.synced];
 			for (const linea of lineas) {
-				const p = document.createElement("p");
-				p.className = "ampliada__linea";
+				const p = nodo("p", "ampliada__linea");
 				// Una línea vacía en un LRC es un silencio instrumental. Se pinta
 				// igual, con un espacio duro, para que el desplazamiento siga siendo
 				// regular en vez de dar un salto.
@@ -95,9 +86,7 @@ export function mountNowPlaying(contenedor) {
 			return;
 		}
 		lineas = [];
-		const p = document.createElement("p");
-		p.className = "ampliada__plana";
-		p.textContent = actual.plain ?? t("lyrics.none");
+		const p = nodo("p", "ampliada__plana", actual.plain ?? t("lyrics.none"));
 		letra.append(p);
 	}
 	/** Índice de la línea que suena, o -1 antes de la primera. */

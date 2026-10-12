@@ -96,43 +96,6 @@ fn Json cmd_library_tracks(Json args):
     List<Json> total = await sqlite.query("select count(*) as n from tracks t where " + en_biblioteca_sql("t"))
     return { "items": track_rows_de(filas), "total": jint(total[0]["n"], 0), "nextCursor": null }
 
-fn Json cmd_library_albums(Json args):
-    int limite = limite_pagina(args)
-    int offset = offset_pagina(args)
-    List<Json> filas = await sqlite.query("""
-        select a.id, a.title, a.release_date, a.album_type,
-               coalesce((select count(*) from tracks t where t.album_id = a.id), 0) as n_tracks,
-               coalesce((select count(*) from tracks t join audio_files af on af.track_id = t.id where t.album_id = a.id), 0) as n_disponibles,
-               coalesce((select ar.name from album_artists aa join artists ar on ar.id = aa.artist_id
-                         where aa.album_id = a.id order by aa.position limit 1), '') as artist_display
-        from albums a
-        where exists (select 1 from tracks t where t.album_id = a.id and """ + en_biblioteca_sql("t") + """)
-        order by a.created_at desc limit ? offset ?
-        """, limite, offset)
-    List<Json> out = []
-    for int i in range(0, len(filas)):
-        out.add(album_row_dto(filas[i]))
-    List<Json> total = await sqlite.query("select count(*) as n from albums a where exists (select 1 from tracks t where t.album_id = a.id and " + en_biblioteca_sql("t") + ")")
-    return { "items": out, "total": jint(total[0]["n"], 0), "nextCursor": null }
-
-fn Json cmd_library_artists(Json args):
-    int limite = limite_pagina(args)
-    int offset = offset_pagina(args)
-    List<Json> filas = await sqlite.query("""
-        select ar.id, ar.name,
-               coalesce((select count(*) from track_artists ta where ta.artist_id = ar.id), 0) as n_tracks,
-               coalesce((select count(*) from track_artists ta join tracks t on t.id = ta.track_id
-                         join audio_files af on af.track_id = t.id where ta.artist_id = ar.id), 0) as n_disponibles
-        from artists ar
-        where exists (select 1 from track_artists ta join tracks t on t.id = ta.track_id where ta.artist_id = ar.id and """ + en_biblioteca_sql("t") + """)
-        order by n_tracks desc, ar.name asc limit ? offset ?
-        """, limite, offset)
-    List<Json> out = []
-    for int i in range(0, len(filas)):
-        out.add(artist_row_dto(filas[i]))
-    List<Json> total = await sqlite.query("select count(*) as n from artists ar where exists (select 1 from track_artists ta join tracks t on t.id = ta.track_id where ta.artist_id = ar.id and " + en_biblioteca_sql("t") + ")")
-    return { "items": out, "total": jint(total[0]["n"], 0), "nextCursor": null }
-
 fn Json cmd_library_stats():
     List<Json> pistas = await sqlite.query("select count(*) as n, coalesce(sum(duration_ms), 0) as ms from tracks t where " + en_biblioteca_sql("t"))
     List<Json> locales = await sqlite.query("select count(*) as n, coalesce(sum(size_bytes), 0) as bytes from audio_files")

@@ -1,8 +1,8 @@
 /**
 * Traducción.
 *
-* El backend nunca devuelve texto traducido: devuelve claves y parámetros
-* (ADR-012). Traducir es presentación, y mantenerlo aquí permite cambiar de
+* El backend nunca devuelve texto traducido: devuelve claves y parámetros.
+* Traducir es presentación, y mantenerlo aquí permite cambiar de
 * idioma sin volver a consultar nada ni reiniciar.
 *
 * ## Cambio en caliente
@@ -73,12 +73,6 @@ export function traducible(el, aplicar) {
 	});
 	return el;
 }
-/** Atajo: un elemento cuyo texto es una clave. */
-export function textoTraducible(el, clave, params) {
-	return traducible(el, (e) => {
-		e.textContent = t(clave, params);
-	});
-}
 /** Idioma en uso. */
 export function idioma() {
 	return actual;
@@ -111,9 +105,5 @@ export function cambiarIdioma(nuevo) {
 export function alCambiarIdioma(oyente) {
 	oyentes.add(oyente);
 	return () => oyentes.delete(oyente);
-}
-/** Cuántos elementos siguen registrados. Para diagnóstico. */
-export function registradosVivos() {
-	return registrados.filter((r) => r.ref.deref() !== undefined).length;
 }
 document.documentElement.lang = actual;

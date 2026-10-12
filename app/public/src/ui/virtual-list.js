@@ -1,3 +1,4 @@
+import { nodo } from "./dom.js";
 /** Margen por defecto, en filas. */
 const OVERSCAN_POR_DEFECTO = 6;
 /**
@@ -9,15 +10,12 @@ const OVERSCAN_POR_DEFECTO = 6;
 const UMBRAL_CARGA = 20;
 export function mountVirtualList(container, options) {
 	const overscan = options.overscan ?? OVERSCAN_POR_DEFECTO;
-	const el = document.createElement("div");
-	el.className = "vlist";
+	const el = nodo("div", "vlist");
 	// El espaciador solo existe para dar al contenedor la altura total y que la
 	// barra de scroll sea la de verdad. Está vacío.
-	const spacer = document.createElement("div");
-	spacer.className = "vlist__spacer";
+	const spacer = nodo("div", "vlist__spacer");
 	spacer.setAttribute("aria-hidden", "true");
-	const viewport = document.createElement("div");
-	viewport.className = "vlist__viewport";
+	const viewport = nodo("div", "vlist__viewport");
 	el.append(spacer, viewport);
 	container.replaceChildren(el);
 	const items = [];

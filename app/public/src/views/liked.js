@@ -1,20 +1,16 @@
 import { library, page } from "../ipc/client.js";
 import { alCambiarIdioma, t } from "../i18n/index.js";
 import { mountTrackList } from "../ui/track-list.js";
+import { nodo } from "../ui/dom.js";
 const POR_PAGINA = 100;
 export function mountLikedView(contenedor) {
-	const el = document.createElement("section");
-	el.className = "vista vista--lista";
-	const cabecera = document.createElement("header");
-	cabecera.className = "vista__header vista__header--destacada";
+	const el = nodo("section", "vista vista--lista");
+	const cabecera = nodo("header", "vista__header vista__header--destacada");
 	const titulo = document.createElement("h2");
-	const cuenta = document.createElement("span");
-	cuenta.className = "vista__count";
+	const cuenta = nodo("span", "vista__count");
 	cabecera.append(titulo, cuenta);
-	const cuerpo = document.createElement("div");
-	cuerpo.className = "vista__body";
-	const vacio = document.createElement("p");
-	vacio.className = "vista__empty";
+	const cuerpo = nodo("div", "vista__body");
+	const vacio = nodo("p", "vista__empty");
 	vacio.hidden = true;
 	el.append(cabecera, vacio, cuerpo);
 	contenedor.replaceChildren(el);

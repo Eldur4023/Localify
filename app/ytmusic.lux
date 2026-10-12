@@ -49,19 +49,11 @@ fn Json? ytm_buscar(string consulta, string filtro):
     }
     return innertube_post("https://music.youtube.com/youtubei/v1/search", cuerpo)
 
-fn Json? ytm_navegar(string browse_id):
-    Dict cuerpo = {
-        "context": { "client": contexto_cliente() },
-        "browseId": browse_id
-    }
+fn Json? ytm_navegar(string browse_id, string params = ""):
+    Dict cuerpo = { "context": { "client": contexto_cliente() }, "browseId": browse_id }
+    if params != "":
+        cuerpo["params"] = params
     return innertube_post("https://music.youtube.com/youtubei/v1/browse", cuerpo)
-
-fn Json? ytm_reproductor(string video_id):
-    Dict cuerpo = {
-        "context": { "client": contexto_cliente() },
-        "videoId": video_id
-    }
-    return innertube_post("https://music.youtube.com/youtubei/v1/player", cuerpo)
 
 # ─── Navegación del JSON ─────────────────────────────────────────────────────
 # buscar_todos: todos los nodos bajo la clave `nombre`, a cualquier
@@ -108,6 +100,9 @@ fn List<Json> elementos_de_lista(Json raiz):
 fn string texto_de(Json nodo):
     if nodo == null:
         return ""
+    string simple = jstr(jget(nodo, "simpleText"), "")
+    if simple != "":
+        return simple
     List<Json> runs = jlist(jget(nodo, "runs"))
     string out = ""
     for int i in range(0, len(runs)):

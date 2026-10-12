@@ -64,17 +64,13 @@ insert into audio_files(track_id,rel_path,format,source) values ('A1','audio/zz/
 insert into favorites(track_id) values ('B1');
 insert into playlists(id,name,name_norm,position) values ('PLX','x','x',1);
 insert into playlist_items(id,playlist_id,track_id,position) values ('i1','PLX','A1',1),('i2','PLX','B1',2),('i3','PLX','C1',3);"
-G=$(inv library_find_duplicates)
-ok "detecta el duplicado (mismo título+artista, ±3 s)" "$G" '"A1"'
-ok "no mezcla la versión live" "$G" '"B1"'
-[[ "$G" != *C1* && "$G" != *D1* ]] && ok "ni la live ni la de otra duración" 1 1 || ok "ni la live ni la de otra duración" "$G" "sin C1/D1"
 ok "fusiona" "$(inv library_merge_duplicates)" '"merged":'
 ok "queda una" "$(sqlite3 $DB "select count(*) from tracks where title_norm='bloody power fame' and duration_ms < 210000 and id in ('A1','B1')")" 1
 ok "la lista no repite la canción" "$(sqlite3 $DB "select count(*) from playlist_items where playlist_id='PLX' and track_id in ('A1','B1')")" 1
 ok "favorito heredado" "$(sqlite3 $DB "select count(*) from favorites where track_id in ('A1','B1')")" 1
 ok "un solo fichero de audio" "$(ls $W/home/Music/Localify/audio/zz | wc -l)" 1
 ok "sigue habiendo la live y la otra duración" "$(sqlite3 $DB "select count(*) from tracks where id in ('C1','D1')")" 2
-ok "sin duplicados después" "$(inv library_find_duplicates)" '[]'
+ok "sin duplicados después" "$(inv library_merge_duplicates)" '"merged":0'
 # ── identidad contra el servidor ──
 TA=$(curl -s -X POST -H 'content-type: application/json' -d '{"username":"ana","password":"secreto123"}' $B/login | sed 's/.*"token":"\([^"]*\)".*/\1/')
 inv server_login '{"username":"ana","password":"secreto123"}' >/dev/null

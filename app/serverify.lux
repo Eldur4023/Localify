@@ -768,9 +768,6 @@ fn Json cmd_social(string cmd, Json args):
     if cmd == "social_decline":
         Json? r = srv("DELETE", "/playlists/" + arg_str(args, "id", "") + "/invitation")
         return r != null and r["status"] < 300 ? null : srv_fallo(r)
-    if cmd == "social_me":
-        Json? r = srv("GET", "/me")
-        return r != null and r["status"] == 200 ? r["body"] : srv_fallo(r)
     if cmd == "social_update_me":
         Json? r = srv("PUT", "/me", { "displayName": arg_str(args, "displayName", ""), "bio": arg_str(args, "bio", "") })
         return r != null and r["status"] == 200 ? r["body"] : srv_fallo(r)
@@ -799,10 +796,6 @@ fn Json cmd_social(string cmd, Json args):
         Json p = r["body"]
         p["localId"] = local_de(sid)
         return p
-    if cmd == "social_playlist_link":
-        List<Json> f = await sqlite.query("select value from settings where key = ?", "srvpl:" + arg_str(args, "playlistId", ""))
-        return len(f) == 0 ? null : jstr(f[0]["value"], "")
-
     # Compartir = cambiar la visibilidad / colaboración de una playlist (que ya vive en el servidor)
     if cmd == "social_publish" or cmd == "social_unpublish":
         string plid = arg_str(args, "playlistId", "")

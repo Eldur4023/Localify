@@ -11,15 +11,10 @@
 import { LocalifyError, social } from "../ipc/client.js";
 import { t } from "../i18n/index.js";
 import { mostrarError } from "./error-overlay.js";
+import { nodo } from "./dom.js";
 /** Texto de un error del backend, traducido si es tipado. */
 export function textoDeError(e) {
 	return e instanceof LocalifyError ? t(e.api.messageKey) : String(e);
-}
-function nodo(etiqueta, clase, texto) {
-	const n = document.createElement(etiqueta);
-	if (clase) n.className = clase;
-	if (texto !== undefined) n.textContent = texto;
-	return n;
 }
 export async function publicarPlaylist(p) {
 	let ficha;

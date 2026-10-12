@@ -4,28 +4,19 @@ import { comienzoDePista } from "./cards.js";
 import { arrastrable } from "./dnd.js";
 import { abrirMenu } from "./menu.js";
 import { opcionesDePista } from "./opciones-pista.js";
+import { nodo } from "./dom.js";
 export function filaSuelta(pista, opciones) {
-	const el = document.createElement("div");
-	el.className = "track track--suelta";
+	const el = nodo("div", "track track--suelta");
 	if (opciones.indice !== undefined) {
-		const num = document.createElement("span");
-		num.className = "track__index";
-		num.textContent = String(opciones.indice + 1);
+		const num = nodo("span", "track__index", String(opciones.indice + 1));
 		el.append(num);
 	}
 	el.append(comienzoDePista(pista.albumId, pista.id));
-	const titulo = document.createElement("span");
-	titulo.className = "track__title";
-	titulo.textContent = pista.title;
-	const secundario = document.createElement("span");
-	secundario.className = "track__artist";
-	secundario.textContent = opciones.secundario;
-	const tiempo = document.createElement("span");
-	tiempo.className = "track__time";
-	tiempo.textContent = duracion(pista.durationMs);
+	const titulo = nodo("span", "track__title", pista.title);
+	const secundario = nodo("span", "track__artist", opciones.secundario);
+	const tiempo = nodo("span", "track__time", duracion(pista.durationMs));
 	// Título y artista apilados, como en la lista de canciones de la biblioteca
-	const principal = document.createElement("div");
-	principal.className = "track__main";
+	const principal = nodo("div", "track__main");
 	principal.append(titulo, secundario);
 	el.append(principal, tiempo);
 	const reproducir = () => {

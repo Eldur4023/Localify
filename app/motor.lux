@@ -2,7 +2,7 @@
 # pista, sonando o en pausa, volumen) se aplica al motor de audio nativo
 # (src/audio_engine.cpp, módulo `audio`).
 #
-# Reparto, como en el original (ADR-015):
+# Reparto, como en el original:
 #   - El motor solo MEZCLA: carga lo que se le dice, precarga la siguiente
 #     para el gapless/crossfade y avisa de lo que pasa (handoff / ended /
 #     error). No sabe de colas.

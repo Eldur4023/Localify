@@ -8,6 +8,7 @@ import { icono } from "../ui/icons.js";
 import { arrastrable } from "../ui/dnd.js";
 import { abrirMenu } from "../ui/menu.js";
 import { opcionesDePista } from "../ui/opciones-pista.js";
+import { nodo } from "../ui/dom.js";
 /** Pistas que se muestran. Pasado ese punto nadie sigue mirando. */
 const TOPE = 20;
 /**
@@ -23,18 +24,15 @@ const TOPE = 20;
 */
 let ultimaConsulta = "";
 export function mountSearchView(contenedor, ruta) {
-	const el = document.createElement("section");
-	el.className = "vista vista--scroll";
-	const caja = document.createElement("div");
-	caja.className = "buscador";
+	const el = nodo("section", "vista vista--scroll");
+	const caja = nodo("div", "buscador");
 	const entrada = document.createElement("input");
 	entrada.type = "search";
 	entrada.className = "buscador__input";
 	entrada.autocomplete = "off";
 	entrada.spellcheck = false;
 	caja.append(entrada);
-	const resultados = document.createElement("div");
-	resultados.className = "resultados";
+	const resultados = nodo("div", "resultados");
 	el.append(caja, resultados);
 	contenedor.replaceChildren(el);
 	let ultimo = 0n;
@@ -93,13 +91,11 @@ export function mountSearchView(contenedor, ruta) {
 	* cinco versiones cada uno serían cien filas en el DOM para enseñar veinte.
 	*/
 	function grupoDePistas(grupo, contexto) {
-		const bloque = document.createElement("div");
-		bloque.className = "versiones";
+		const bloque = nodo("div", "versiones");
 		const cabecera = filaDePista(grupo.principal, contexto);
 		bloque.append(cabecera);
 		if (grupo.versiones.length === 0) return bloque;
-		const lista = document.createElement("div");
-		lista.className = "versiones__lista";
+		const lista = nodo("div", "versiones__lista");
 		lista.hidden = true;
 		const boton = desplegador(grupo.versiones.length);
 		boton.addEventListener("click", (e) => {
@@ -122,11 +118,8 @@ export function mountSearchView(contenedor, ruta) {
 		return bloque;
 	}
 	function bloqueDePistas(clave, grupos) {
-		const seccion = document.createElement("section");
-		seccion.className = "resultados__bloque";
-		const h = document.createElement("h3");
-		h.className = "carrusel__titulo";
-		h.textContent = t(clave);
+		const seccion = nodo("section", "resultados__bloque");
+		const h = nodo("h3", "carrusel__titulo", t(clave));
 		seccion.append(h);
 		// El contexto de reproducción son las principales: al pulsar una fila, lo
 		// que viene después es la siguiente canción, no otra versión de la misma.
@@ -145,30 +138,18 @@ export function mountSearchView(contenedor, ruta) {
 	 * de reproducirla — a partir de ahí es una pista como cualquier otra.
 	 */
 	function bloqueWeb(candidatas) {
-		const seccion = document.createElement("section");
-		seccion.className = "resultados__bloque";
-		const h = document.createElement("h3");
-		h.className = "carrusel__titulo";
-		h.textContent = t("search.youtube");
+		const seccion = nodo("section", "resultados__bloque");
+		const h = nodo("h3", "carrusel__titulo", t("search.youtube"));
 		seccion.append(h);
 		for (const candidata of candidatas.slice(0, TOPE)) {
-			const fila = document.createElement("div");
-			fila.className = "track track--suelta fila-web";
-			const arte = document.createElement("span");
-			arte.className = "track__index";
+			const fila = nodo("div", "track track--suelta fila-web");
+			const arte = nodo("span", "track__index");
 			arte.append(icono("music", 16));
-			const titulo = document.createElement("span");
-			titulo.className = "track__title";
-			titulo.textContent = candidata.title;
-			const secundario = document.createElement("span");
-			secundario.className = "track__artist";
-			secundario.textContent = candidata.artistDisplay;
-			const tiempo = document.createElement("span");
-			tiempo.className = "track__time";
-			tiempo.textContent = duracion(candidata.durationMs);
+			const titulo = nodo("span", "track__title", candidata.title);
+			const secundario = nodo("span", "track__artist", candidata.artistDisplay);
+			const tiempo = nodo("span", "track__time", duracion(candidata.durationMs));
 			fila.title = t("search.web_add_hint");
-			const principal = document.createElement("div");
-			principal.className = "track__main";
+			const principal = nodo("div", "track__main");
 			principal.append(titulo, secundario);
 			fila.append(arte, principal, tiempo);
 			fila.addEventListener("click", async () => {
@@ -213,20 +194,13 @@ export function mountSearchView(contenedor, ruta) {
 	* (ver `primera_coincidencia`); aquí solo cambia a dónde lleva el clic.
 	*/
 	function tarjetaDestacada(top) {
-		const seccion = document.createElement("section");
-		seccion.className = "resultados__bloque";
-		const h = document.createElement("h3");
-		h.className = "carrusel__titulo";
-		h.textContent = t("search.top_result");
+		const seccion = nodo("section", "resultados__bloque");
+		const h = nodo("h3", "carrusel__titulo", t("search.top_result"));
 		seccion.append(h);
-		const caja = document.createElement("div");
-		caja.className = "destacado";
-		const arte = document.createElement("div");
-		arte.className = "destacado__arte";
-		const titulo = document.createElement("div");
-		titulo.className = "destacado__titulo";
-		const tipo = document.createElement("div");
-		tipo.className = "destacado__tipo";
+		const caja = nodo("div", "destacado");
+		const arte = nodo("div", "destacado__arte");
+		const titulo = nodo("div", "destacado__titulo");
+		const tipo = nodo("div", "destacado__tipo");
 		switch (top.kind) {
 			case "track": {
 				const pista = top.item;
@@ -289,8 +263,7 @@ export function mountSearchView(contenedor, ruta) {
 				break;
 			}
 		}
-		const textos = document.createElement("div");
-		textos.className = "destacado__textos";
+		const textos = nodo("div", "destacado__textos");
 		textos.append(titulo, tipo);
 		// Un botón de reproducir solo tiene sentido sobre algo que suena. Un
 		// artista lleva a su ficha, y poner ahí un play obligaría a decidir qué

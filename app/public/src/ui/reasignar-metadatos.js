@@ -1,6 +1,7 @@
 import { library } from "../ipc/client.js";
 import { t } from "../i18n/index.js";
 import { duracion } from "../shell/player.js";
+import { nodo } from "./dom.js";
 const LIMITE = 15;
 function artistas(c) {
 	return c.artists.map((a) => a.name).join(", ");
@@ -11,15 +12,11 @@ function artistas(c) {
 */
 export function elegirCandidato(consultaInicial) {
 	return new Promise((resolver) => {
-		const dlg = document.createElement("dialog");
-		dlg.className = "dialogo dialogo--reasignar";
+		const dlg = nodo("dialog", "dialogo dialogo--reasignar");
 		const form = document.createElement("form");
 		form.method = "dialog";
-		const h = document.createElement("h2");
-		h.className = "dialogo__titulo";
-		h.textContent = t("reassign.title");
-		const fila = document.createElement("div");
-		fila.className = "reasignar__busqueda";
+		const h = nodo("h2", "dialogo__titulo", t("reassign.title"));
+		const fila = nodo("div", "reasignar__busqueda");
 		const entrada = document.createElement("input");
 		entrada.type = "text";
 		entrada.className = "dialogo__input";
@@ -31,10 +28,8 @@ export function elegirCandidato(consultaInicial) {
 		buscar.className = "boton";
 		buscar.textContent = t("reassign.search");
 		fila.append(entrada, buscar);
-		const resultados = document.createElement("ul");
-		resultados.className = "reasignar__resultados";
-		const estado = document.createElement("p");
-		estado.className = "dialogo__mensaje";
+		const resultados = nodo("ul", "reasignar__resultados");
+		const estado = nodo("p", "dialogo__mensaje");
 		estado.hidden = true;
 		let elegido = null;
 		function cerrar() {
@@ -48,14 +43,10 @@ export function elegirCandidato(consultaInicial) {
 				return;
 			}
 			for (const c of candidatos) {
-				const li = document.createElement("li");
-				li.className = "reasignar__opcion";
+				const li = nodo("li", "reasignar__opcion");
 				li.tabIndex = 0;
-				const titulo = document.createElement("span");
-				titulo.className = "reasignar__opcion-titulo";
-				titulo.textContent = c.title;
-				const detalle = document.createElement("span");
-				detalle.className = "reasignar__opcion-detalle";
+				const titulo = nodo("span", "reasignar__opcion-titulo", c.title);
+				const detalle = nodo("span", "reasignar__opcion-detalle");
 				const partes = [
 					artistas(c),
 					c.album?.title,
@@ -96,8 +87,7 @@ export function elegirCandidato(consultaInicial) {
 				void ejecutarBusqueda();
 			}
 		});
-		const acciones = document.createElement("div");
-		acciones.className = "dialogo__acciones";
+		const acciones = nodo("div", "dialogo__acciones");
 		const cancelar = document.createElement("button");
 		cancelar.type = "button";
 		cancelar.className = "boton boton--sutil";

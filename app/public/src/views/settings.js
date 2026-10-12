@@ -5,6 +5,7 @@ import { conEspera } from "../ui/cards.js";
 import { confirmar } from "../ui/dialogo.js";
 import { mountEqualizer } from "../ui/equalizer.js";
 import { mostrarError } from "../ui/error-overlay.js";
+import { nodo } from "../ui/dom.js";
 /**
 * Navegadores cuyas cookies sabe leer yt-dlp.
 *
@@ -104,7 +105,7 @@ function tamano(bytes) {
 * Los de fábrica llevan una clave i18n (`eq.flat`); los del usuario, su nombre
 * literal. Traducir el segundo devolvería el centinela de clave ausente
 * —`[Mi curva]`— así que el prefijo decide cuál es cuál, igual que hace
-* `EqProfile::es_predefinido` en Rust.
+* el backend.
 */
 function nombrePerfil(p) {
 	return p.nameKey.startsWith("eq.") ? t(p.nameKey) : p.nameKey;
@@ -129,8 +130,7 @@ const ETIQUETA_PESTAÑA = {
 	almacenamiento: "settings.storage"
 };
 export function mountSettingsView(contenedor) {
-	const el = document.createElement("section");
-	el.className = "vista vista--scroll ajustes";
+	const el = nodo("section", "vista vista--scroll ajustes");
 	contenedor.replaceChildren(el);
 	let actual = null;
 	let dispositivos = [];
@@ -142,13 +142,9 @@ export function mountSettingsView(contenedor) {
 	let pestañaActiva = "general";
 	// ── Piezas de formulario ────────────────────────────────────────────────
 	function seccion(titulo) {
-		const s = document.createElement("section");
-		s.className = "ajustes__seccion";
-		const h = document.createElement("h3");
-		h.className = "ajustes__titulo";
-		h.textContent = titulo;
-		const cuerpo = document.createElement("div");
-		cuerpo.className = "ajustes__cuerpo";
+		const s = nodo("section", "ajustes__seccion");
+		const h = nodo("h3", "ajustes__titulo", titulo);
+		const cuerpo = nodo("div", "ajustes__cuerpo");
 		s.append(h, cuerpo);
 		return {
 			el: s,
@@ -156,11 +152,8 @@ export function mountSettingsView(contenedor) {
 		};
 	}
 	function campo(etiqueta, control) {
-		const fila = document.createElement("div");
-		fila.className = "ajustes__campo";
-		const l = document.createElement("label");
-		l.className = "ajustes__etiqueta";
-		l.textContent = etiqueta;
+		const fila = nodo("div", "ajustes__campo");
+		const l = nodo("label", "ajustes__etiqueta", etiqueta);
 		// El `for` tiene que apuntar a algo etiquetable. Algunos controles vienen
 		// envueltos en un contenedor —el deslizador trae su lectura al lado—, así
 		// que se busca dentro: apuntar al envoltorio dejaría la etiqueta muerta,
@@ -172,8 +165,7 @@ export function mountSettingsView(contenedor) {
 		return fila;
 	}
 	function selector(opciones, valor, alCambiar) {
-		const s = document.createElement("select");
-		s.className = "ajustes__select";
+		const s = nodo("select", "ajustes__select");
 		for (const o of opciones) {
 			const op = document.createElement("option");
 			op.value = o.valor;
@@ -195,8 +187,7 @@ export function mountSettingsView(contenedor) {
 	* que este helper tenga que saber nada del idioma.
 	*/
 	function pasos(claves) {
-		const ol = document.createElement("ol");
-		ol.className = "ajustes__pasos";
+		const ol = nodo("ol", "ajustes__pasos");
 		for (const clave of claves) {
 			const li = document.createElement("li");
 			li.textContent = t(`settings.${clave}`);
@@ -213,17 +204,14 @@ export function mountSettingsView(contenedor) {
 		return c;
 	}
 	function deslizador(min, max, paso, valor, alSoltar, formato) {
-		const caja = document.createElement("div");
-		caja.className = "ajustes__deslizador";
+		const caja = nodo("div", "ajustes__deslizador");
 		const r = document.createElement("input");
 		r.type = "range";
 		r.min = String(min);
 		r.max = String(max);
 		r.step = String(paso);
 		r.value = String(valor);
-		const salida = document.createElement("span");
-		salida.className = "ajustes__valor";
-		salida.textContent = formato(valor);
+		const salida = nodo("span", "ajustes__valor", formato(valor));
 		// `input` actualiza el texto —hay que ver el valor mientras se arrastra— y
 		// `change` es el que guarda: sin esa separación se enviaría un patch por
 		// cada píxel del recorrido.
@@ -260,7 +248,7 @@ export function mountSettingsView(contenedor) {
 	* Igual que `guardarAudio`, pero sin el repintado completo de `aplicar()`.
 	*
 	* La usa el ecualizador al asentarse (`alAsentarse`, con rebote de 400 ms
-	* mientras se arrastra una banda — ver `equalizer.ts`). Ese guardado puede
+	* mientras se arrastra una banda — ver `equalizer.js`). Ese guardado puede
 	* llegar con el ratón todavía sobre el deslizador si el gesto dura más de
 	* los 400 ms sin soltar, y un `pintar()` completo destruye y recrea la
 	* pestaña de Audio entera, arrancando el arrastre en marcha de debajo del
@@ -354,8 +342,7 @@ export function mountSettingsView(contenedor) {
 	* cada vez que se entra: es la única pestaña cuyos números cambian sin que
 	* el usuario haya tocado nada aquí. */
 	function barraPestañas() {
-		const nav = document.createElement("div");
-		nav.className = "ajustes__tabs";
+		const nav = nodo("div", "ajustes__tabs");
 		nav.setAttribute("role", "tablist");
 		for (const clave of PESTAÑAS) {
 			const boton = document.createElement("button");
@@ -387,8 +374,7 @@ export function mountSettingsView(contenedor) {
 			ecualizador = null;
 		}
 		el.append(barraPestañas());
-		const panel = document.createElement("div");
-		panel.className = "ajustes__panel";
+		const panel = nodo("div", "ajustes__panel");
 		el.append(panel);
 		if (pestañaActiva === "stats") {
 			pintarStats(panel);
@@ -415,39 +401,27 @@ export function mountSettingsView(contenedor) {
 			})));
 			// El backend puede no saber todavía dónde está: una fila con la etiqueta
 			// y nada al lado parece un fallo de pintado, no un dato ausente.
-			const ruta = document.createElement("code");
-			ruta.className = "ajustes__ruta";
-			ruta.textContent = s.libraryPath.length > 0 ? s.libraryPath : t("settings.folder_unknown");
+			const ruta = nodo("code", "ajustes__ruta", s.libraryPath.length > 0 ? s.libraryPath : t("settings.folder_unknown"));
 			const cambiar = document.createElement("button");
 			cambiar.type = "button";
 			cambiar.className = "boton boton--sutil";
 			cambiar.textContent = t("settings.change_folder");
 			cambiar.disabled = migrando !== null;
 			cambiar.addEventListener("click", () => void pedirCarpeta());
-			const caja = document.createElement("div");
-			caja.className = "ajustes__carpeta";
+			const caja = nodo("div", "ajustes__carpeta");
 			caja.append(ruta, cambiar);
 			cuerpo.append(campo(t("settings.library_folder"), caja));
 			// Una canción que llega con otro id (otro vídeo, una lista importada) acaba
 			// dos veces en la biblioteca: esto las funde sin perder listas ni favoritos.
 			cuerpo.append(campo(t("settings.duplicates"), boton(t("settings.duplicates_find"), async () => {
-				const grupos = await library.findDuplicates();
-				if (grupos.length === 0) {
-					await confirmar(t("settings.duplicates_none"), t("common.confirm"), undefined, false);
-					return;
-				}
-				const ejemplos = grupos.slice(0, 5).map((g) => `${g.title} — ${g.artist}`).join("\n");
-				if (!await confirmar(t("settings.duplicates_found", { count: grupos.length }), t("settings.duplicates_merge"), ejemplos, false)) return;
 				const r = await library.mergeDuplicates();
-				await confirmar(t("settings.duplicates_done", { count: r.merged }), t("common.confirm"), undefined, false);
+				await confirmar(t(r.merged ? "settings.duplicates_done" : "settings.duplicates_none", { count: r.merged }), t("common.confirm"), undefined, false);
 			}), t("settings.duplicates_help")));
 			// Mientras la copia corre se dice cuánto lleva. Cambiar de carpeta es la
 			// única operación de la aplicación que puede durar minutos y bloquear
 			// otra igual, así que es la única que muestra progreso explícito.
 			if (migrando) {
-				const aviso = document.createElement("p");
-				aviso.className = "ajustes__ayuda";
-				aviso.textContent = t("settings.moving");
+				const aviso = nodo("p", "ajustes__ayuda", t("settings.moving"));
 				cuerpo.append(aviso);
 			}
 			panel.append(bloque);
@@ -566,21 +540,16 @@ export function mountSettingsView(contenedor) {
 			});
 			cuerpo.append(campo(t("settings.cookies"), selectorCookies));
 			if (s.download.cookiesFile) {
-				const ruta = document.createElement("p");
-				ruta.className = "ajustes__ayuda";
-				ruta.textContent = s.download.cookiesFile;
+				const ruta = nodo("p", "ajustes__ayuda", s.download.cookiesFile);
 				cuerpo.append(ruta);
 			}
 			// El aviso solo aparece con el navegador elegido, que es cuando aplica:
 			// `--cookies-from-browser` lee el almacén entero, no solo YouTube.
 			if (s.download.cookiesBrowser) {
-				const aviso = document.createElement("p");
-				aviso.className = "ajustes__ayuda ajustes__ayuda--aviso";
-				aviso.textContent = t("settings.cookies_warning");
+				const aviso = nodo("p", "ajustes__ayuda ajustes__ayuda--aviso", t("settings.cookies_warning"));
 				cuerpo.append(aviso);
 			}
-			const resultado = document.createElement("p");
-			resultado.className = "ajustes__ayuda";
+			const resultado = nodo("p", "ajustes__ayuda");
 			const comprobar = boton(t("settings.cookies_test"), async () => {
 				const r = await api.testCookies();
 				resultado.textContent = r.detail ? `${t(r.messageKey)} — ${r.detail}` : t(r.messageKey);
@@ -591,8 +560,7 @@ export function mountSettingsView(contenedor) {
 				resultado.textContent = r.detail ? `${t(r.messageKey)} — ${r.detail}` : t(r.messageKey);
 				resultado.classList.toggle("ajustes__ayuda--aviso", !r.ok);
 			});
-			const acciones = document.createElement("div");
-			acciones.className = "ajustes__acciones";
+			const acciones = nodo("div", "ajustes__acciones");
 			acciones.append(comprobar, actualizar);
 			cuerpo.append(acciones, resultado);
 			panel.append(bloque);
@@ -618,8 +586,7 @@ export function mountSettingsView(contenedor) {
 					mostrarError(t("error.internal"), String(e));
 				});
 			});
-			const irADiscord = document.createElement("div");
-			irADiscord.className = "ajustes__acciones";
+			const irADiscord = nodo("div", "ajustes__acciones");
 			irADiscord.append(abrirDiscord);
 			cuerpo.append(irADiscord);
 			const discordId = document.createElement("input");
@@ -725,8 +692,7 @@ export function mountSettingsView(contenedor) {
 					}
 				})();
 			});
-			const uso = document.createElement("p");
-			uso.className = "ajustes__ayuda";
+			const uso = nodo("p", "ajustes__ayuda");
 			// ── Descargas fallidas ────────────────────────────────────────────
 			//
 			// Este es el único sitio de la aplicación donde un fallo de descarga se
@@ -736,8 +702,7 @@ export function mountSettingsView(contenedor) {
 			//
 			// Solo aparece si hay alguna. Un "0 canciones fallidas" permanente sería
 			// invitar a preocuparse por algo que no pasa.
-			const fallidas = document.createElement("p");
-			fallidas.className = "ajustes__ayuda";
+			const fallidas = nodo("p", "ajustes__ayuda");
 			fallidas.hidden = true;
 			const reintentar = document.createElement("button");
 			reintentar.type = "button";
@@ -777,13 +742,11 @@ export function mountSettingsView(contenedor) {
 				}
 			}
 			void refrescarUso();
-			const acciones = document.createElement("div");
-			acciones.className = "ajustes__acciones";
+			const acciones = nodo("div", "ajustes__acciones");
 			acciones.append(revisar, importar, reintentar);
 			// El destructivo va en su propia fila, separado del de revisar: pegados,
 			// el rojo se convierte en "el botón de al lado" y se pulsa por inercia.
-			const peligro = document.createElement("div");
-			peligro.className = "ajustes__acciones ajustes__acciones--peligro";
+			const peligro = nodo("div", "ajustes__acciones ajustes__acciones--peligro");
 			peligro.append(vaciar);
 			cuerpo.append(acciones, uso, fallidas, peligro);
 			panel.append(bloque);
@@ -794,25 +757,17 @@ export function mountSettingsView(contenedor) {
 	* detalle a la derecha con el tiempo y, si aplica, las reproducciones.
 	*/
 	function filaRanking(puesto, nombre, subtitulo, detalle) {
-		const fila = document.createElement("div");
-		fila.className = "stats__fila";
-		const n = document.createElement("span");
-		n.className = "stats__puesto";
-		n.textContent = String(puesto);
-		const centro = document.createElement("div");
-		centro.className = "stats__nombre";
+		const fila = nodo("div", "stats__fila");
+		const n = nodo("span", "stats__puesto", String(puesto));
+		const centro = nodo("div", "stats__nombre");
 		const titulo = document.createElement("span");
 		titulo.textContent = nombre;
 		centro.append(titulo);
 		if (subtitulo) {
-			const sub = document.createElement("span");
-			sub.className = "stats__subtitulo";
-			sub.textContent = subtitulo;
+			const sub = nodo("span", "stats__subtitulo", subtitulo);
 			centro.append(sub);
 		}
-		const d = document.createElement("span");
-		d.className = "stats__detalle";
-		d.textContent = detalle;
+		const d = nodo("span", "stats__detalle", detalle);
 		fila.append(n, centro, d);
 		return fila;
 	}
@@ -853,24 +808,16 @@ export function mountSettingsView(contenedor) {
 	}
 	function pintarContenidoStats(cuerpo, r) {
 		if (r.totalPlays === 0n) {
-			const vacio = document.createElement("p");
-			vacio.className = "ajustes__ayuda";
-			vacio.textContent = t("stats.empty");
+			const vacio = nodo("p", "ajustes__ayuda", t("stats.empty"));
 			cuerpo.append(vacio);
 			return;
 		}
 		// ── Resumen ─────────────────────────────────────────────────────────
-		const resumen = document.createElement("div");
-		resumen.className = "stats__resumen";
+		const resumen = nodo("div", "stats__resumen");
 		const destacar = (numero, etiqueta) => {
-			const caja = document.createElement("div");
-			caja.className = "stats__destacado";
-			const n = document.createElement("span");
-			n.className = "stats__numero";
-			n.textContent = numero;
-			const e = document.createElement("span");
-			e.className = "stats__etiqueta";
-			e.textContent = etiqueta;
+			const caja = nodo("div", "stats__destacado");
+			const n = nodo("span", "stats__numero", numero);
+			const e = nodo("span", "stats__etiqueta", etiqueta);
 			caja.append(n, e);
 			return caja;
 		};
@@ -878,11 +825,8 @@ export function mountSettingsView(contenedor) {
 		cuerpo.append(resumen);
 		// ── Canciones más escuchadas ────────────────────────────────────────
 		if (r.topTracks.length > 0) {
-			const titulo = document.createElement("h4");
-			titulo.className = "ajustes__titulo";
-			titulo.textContent = t("stats.top_tracks");
-			const lista = document.createElement("div");
-			lista.className = "stats__lista";
+			const titulo = nodo("h4", "ajustes__titulo", t("stats.top_tracks"));
+			const lista = nodo("div", "stats__lista");
 			r.topTracks.forEach((fila, i) => {
 				lista.append(filaRanking(i + 1, fila.track.title, fila.track.artistDisplay, duracionEscucha(fila.msPlayed)));
 			});
@@ -890,11 +834,8 @@ export function mountSettingsView(contenedor) {
 		}
 		// ── Artistas más escuchados ─────────────────────────────────────────
 		if (r.topArtists.length > 0) {
-			const titulo = document.createElement("h4");
-			titulo.className = "ajustes__titulo";
-			titulo.textContent = t("stats.top_artists");
-			const lista = document.createElement("div");
-			lista.className = "stats__lista";
+			const titulo = nodo("h4", "ajustes__titulo", t("stats.top_artists"));
+			const lista = nodo("div", "stats__lista");
 			r.topArtists.forEach((fila, i) => {
 				lista.append(filaRanking(i + 1, fila.artist.name, "", duracionEscucha(fila.msPlayed)));
 			});

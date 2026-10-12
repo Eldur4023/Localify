@@ -2,9 +2,9 @@ import { home, player } from "../ipc/client.js";
 import { alCambiarIdioma, t } from "../i18n/index.js";
 import { carrusel, conEspera, tarjeta, vacio } from "../ui/cards.js";
 import { arrastrable } from "../ui/dnd.js";
+import { nodo } from "../ui/dom.js";
 export function mountHomeView(contenedor) {
-	const el = document.createElement("section");
-	el.className = "vista vista--scroll";
+	const el = nodo("section", "vista vista--scroll");
 	contenedor.replaceChildren(el);
 	let secciones = [];
 	const desmontadores = [];

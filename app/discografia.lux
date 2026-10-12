@@ -8,10 +8,6 @@
 #     el carrusel de la portada)
 # Los álbumes se guardan sin pistas; las pistas de cada uno se traen al abrirlo.
 
-fn Json? ytm_navegar_ext(string browse_id, string params):
-    Dict cuerpo = { "context": { "client": contexto_cliente() }, "browseId": browse_id, "params": params }
-    return innertube_post("https://music.youtube.com/youtubei/v1/browse", cuerpo)
-
 fn Json? ytm_continuar(string token):
     Dict cuerpo = { "context": { "client": contexto_cliente() }, "continuation": token }
     return innertube_post("https://music.youtube.com/youtubei/v1/browse", cuerpo)
@@ -133,7 +129,7 @@ fn void importar_discografia(string canal):
         string lista = jstr(jget(jget(destino, "browseEndpoint"), "browseId"), "")
         string params = jstr(jget(jget(destino, "browseEndpoint"), "params"), "")
         if lista != "":
-            Json? pagina = ytm_navegar_ext(lista, params)
+            Json? pagina = ytm_navegar(lista, params)
             int vuelta = 0
             while pagina != null and vuelta < 6:
                 List<Json> elementos = elementos_de_lista(pagina)
@@ -169,7 +165,7 @@ fn void importar_discografia(string canal):
             Json ver = jget(jlist(jget(jget(cab, "title"), "runs"))[0], "navigationEndpoint")
             string grid = jstr(jget(jget(ver, "browseEndpoint"), "browseId"), "")
             if grid != "":
-                Json? completa = ytm_navegar_ext(grid, jstr(jget(jget(ver, "browseEndpoint"), "params"), ""))
+                Json? completa = ytm_navegar(grid, jstr(jget(jget(ver, "browseEndpoint"), "params"), ""))
                 if completa != null:
                     guardar_tarjetas_album(completa, tipo, canal, nombre)
             await sqlite.commit()

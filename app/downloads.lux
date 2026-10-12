@@ -12,7 +12,7 @@
 #                    │  una consulta por tick  │  progreso por proc.read
 #                    ▼                         ▼
 #                  failed (confianza baja,   reintento con backoff
-#                  ADR-017: nunca se baja)   o vídeo rechazado
+#                  nunca se baja)   o vídeo rechazado
 #
 # Los procesos viven en el registro de `proc` (handles persistentes entre
 # peticiones — exactamente el caso de uso para el que el módulo existe); sus

@@ -1,5 +1,6 @@
 import { t } from "../i18n/index.js";
-/** Frecuencias de las bandas. Deben coincidir con `BANDAS_EQ_HZ` en Rust. */
+import { nodo } from "./dom.js";
+/** Frecuencias de las bandas. Deben coincidir con las bandas que acepta el motor de audio. */
 const BANDAS_HZ = [
 	31,
 	62,
@@ -26,8 +27,7 @@ function etiqueta(hz) {
 	return hz >= 1e3 ? `${hz / 1e3}k` : String(hz);
 }
 export function mountEqualizer(contenedor, opciones) {
-	const el = document.createElement("div");
-	el.className = "eq";
+	const el = nodo("div", "eq");
 	// ── Curva ────────────────────────────────────────────────────────────────
 	const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
 	svg.setAttribute("class", "eq__curva");
@@ -46,8 +46,7 @@ export function mountEqualizer(contenedor, opciones) {
 	curva.setAttribute("class", "eq__linea");
 	svg.append(cero, curva);
 	// ── Deslizadores ─────────────────────────────────────────────────────────
-	const bandas = document.createElement("div");
-	bandas.className = "eq__bandas";
+	const bandas = nodo("div", "eq__bandas");
 	let perfil = {
 		...opciones.inicial,
 		gainsDb: [...opciones.inicial.gainsDb]
@@ -106,10 +105,8 @@ export function mountEqualizer(contenedor, opciones) {
 		}, PERIODO_GUARDADO_MS);
 	}
 	BANDAS_HZ.forEach((hz, i) => {
-		const banda = document.createElement("div");
-		banda.className = "eq__banda";
-		const salida = document.createElement("span");
-		salida.className = "eq__db";
+		const banda = nodo("div", "eq__banda");
+		const salida = nodo("span", "eq__db");
 		const control = document.createElement("input");
 		control.type = "range";
 		control.className = "eq__slider";
@@ -121,9 +118,7 @@ export function mountEqualizer(contenedor, opciones) {
 		// Vertical de verdad, no un `transform`: rotar un `range` con CSS deja el
 		// ratón y el teclado invertidos respecto a lo que se ve.
 		control.setAttribute("orient", "vertical");
-		const nombre = document.createElement("span");
-		nombre.className = "eq__hz";
-		nombre.textContent = etiqueta(hz);
+		const nombre = nodo("span", "eq__hz", etiqueta(hz));
 		control.addEventListener("input", () => {
 			const gains = [...perfil.gainsDb];
 			gains[i] = Number(control.value);

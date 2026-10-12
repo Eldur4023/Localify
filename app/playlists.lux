@@ -5,7 +5,7 @@
 # enteramente por /api/invoke (api_comandos.lux tiene su propia
 # implementación de cada comando playlist_*, con los mismos DTOs). Lo que
 # queda aquí son las funciones que SÍ reutiliza ese código vivo: reordenar
-# (el mismo truco de claves fraccionarias, ADR-009) e importar desde
+# (el mismo truco de claves fraccionarias) e importar desde
 # YouTube Music o Spotify.
 
 # List no tiene inserción por índice: reconstruir.

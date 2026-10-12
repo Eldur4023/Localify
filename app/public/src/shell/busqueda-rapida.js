@@ -5,6 +5,7 @@ import { comienzoDePista } from "../ui/cards.js";
 import { abrirMenu } from "../ui/menu.js";
 import { opcionesDePista } from "../ui/opciones-pista.js";
 import { duracion } from "./player.js";
+import { nodo } from "../ui/dom.js";
 /** Resultados del desplegable. Ver la cabecera del módulo. */
 const CUANTOS = 4;
 /**
@@ -27,8 +28,7 @@ const PEDIDAS = 20;
 */
 const REBOTE = 160;
 export function mountBusquedaRapida(contenedor, router) {
-	const caja = document.createElement("div");
-	caja.className = "rapida";
+	const caja = nodo("div", "rapida");
 	const entrada = document.createElement("input");
 	entrada.type = "search";
 	entrada.className = "rapida__input";
@@ -37,8 +37,7 @@ export function mountBusquedaRapida(contenedor, router) {
 	entrada.setAttribute("role", "combobox");
 	entrada.setAttribute("aria-expanded", "false");
 	entrada.setAttribute("aria-autocomplete", "list");
-	const panel = document.createElement("div");
-	panel.className = "rapida__panel";
+	const panel = nodo("div", "rapida__panel");
 	panel.setAttribute("role", "listbox");
 	panel.hidden = true;
 	caja.append(entrada, panel);
@@ -87,13 +86,9 @@ export function mountBusquedaRapida(contenedor, router) {
 	}
 	/** Una fila de texto (sin carátula ni duración): estado o "ver todos". */
 	function filaDeTexto(texto, indice) {
-		const fila = document.createElement("div");
-		fila.className = "rapida__fila rapida__fila--texto";
-		const textos = document.createElement("div");
-		textos.className = "rapida__textos";
-		const titulo = document.createElement("div");
-		titulo.className = "rapida__artista";
-		titulo.textContent = texto;
+		const fila = nodo("div", "rapida__fila rapida__fila--texto");
+		const textos = nodo("div", "rapida__textos");
+		const titulo = nodo("div", "rapida__artista", texto);
 		textos.append(titulo);
 		fila.append(textos);
 		if (indice !== undefined) {
@@ -121,24 +116,16 @@ export function mountBusquedaRapida(contenedor, router) {
 			panel.append(filaDeTexto(esperandoRemoto !== null ? t("search.searching") : t("search.no_results", { query: q })));
 		}
 		for (const [i, pista] of resultados.entries()) {
-			const fila = document.createElement("div");
-			fila.className = "rapida__fila";
+			const fila = nodo("div", "rapida__fila");
 			fila.id = `rapida-${i}`;
 			fila.dataset.indice = String(i);
 			fila.setAttribute("role", "option");
 			fila.setAttribute("aria-selected", "false");
-			const textos = document.createElement("div");
-			textos.className = "rapida__textos";
-			const titulo = document.createElement("div");
-			titulo.className = "rapida__titulo";
-			titulo.textContent = pista.title;
-			const artista = document.createElement("div");
-			artista.className = "rapida__artista";
-			artista.textContent = pista.artistDisplay;
+			const textos = nodo("div", "rapida__textos");
+			const titulo = nodo("div", "rapida__titulo", pista.title);
+			const artista = nodo("div", "rapida__artista", pista.artistDisplay);
 			textos.append(titulo, artista);
-			const tiempo = document.createElement("span");
-			tiempo.className = "rapida__tiempo";
-			tiempo.textContent = duracion(pista.durationMs);
+			const tiempo = nodo("span", "rapida__tiempo", duracion(pista.durationMs));
 			fila.append(comienzoDePista(pista.albumId, pista.id), textos, tiempo);
 			// `mousedown` y no `click`: el `blur` del campo cierra el panel, y con
 			// `click` la fila desaparecería antes de que el navegador lo entregara.

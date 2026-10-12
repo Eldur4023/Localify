@@ -24,6 +24,7 @@ import { ponerPortadaDePista } from "../ui/cards.js";
 import { colorDePortada } from "../ui/color.js";
 import { abrirMenu } from "../ui/menu.js";
 import { opcionesDePista } from "../ui/opciones-pista.js";
+import { nodo } from "../ui/dom.js";
 /** Formatea una duración como `m:ss`. */
 export function duracion(ms) {
 	const total = Math.max(0, Math.floor(ms / 1e3));
@@ -34,17 +35,12 @@ export function duracion(ms) {
 export function mountPlayerBar(contenedor, opciones) {
 	contenedor.replaceChildren();
 	// ── Izquierda: qué suena ────────────────────────────────────────────────
-	const info = document.createElement("div");
-	info.className = "pb__info";
-	const portada = document.createElement("div");
-	portada.className = "pb__cover";
+	const info = nodo("div", "pb__info");
+	const portada = nodo("div", "pb__cover");
 	portada.append(icono("music", 22));
-	const textos = document.createElement("div");
-	textos.className = "pb__texts";
-	const titulo = document.createElement("div");
-	titulo.className = "pb__title";
-	const artista = document.createElement("div");
-	artista.className = "pb__artist";
+	const textos = nodo("div", "pb__texts");
+	const titulo = nodo("div", "pb__title");
+	const artista = nodo("div", "pb__artist");
 	textos.append(titulo, artista);
 	const megusta = botonIcono("heart", "", () => {}, { tamano: 18 });
 	info.append(portada, textos, megusta);
@@ -73,10 +69,8 @@ export function mountPlayerBar(contenedor, opciones) {
 	};
 	info.addEventListener("contextmenu", alMenuDeLaActual);
 	// ── Centro: controles y progreso ────────────────────────────────────────
-	const centro = document.createElement("div");
-	centro.className = "pb__center";
-	const controles = document.createElement("div");
-	controles.className = "pb__controls";
+	const centro = nodo("div", "pb__center");
+	const controles = nodo("div", "pb__controls");
 	const aleatorio = botonIcono("shuffle", "", () => void alternarAleatorio(), { tamano: 18 });
 	const anterior = botonIcono("previous", "", () => void player.previous().then(pintar), { tamano: 20 });
 	const tocar = botonIcono("play", "", () => void player.toggle().then(pintar), {
@@ -86,12 +80,9 @@ export function mountPlayerBar(contenedor, opciones) {
 	const siguiente = botonIcono("next", "", () => void player.next().then(pintar), { tamano: 20 });
 	const repetir = botonIcono("repeat", "", () => void rotarRepeticion(), { tamano: 18 });
 	controles.append(aleatorio, anterior, tocar, siguiente, repetir);
-	const barra = document.createElement("div");
-	barra.className = "pb__progress";
-	const transcurrido = document.createElement("span");
-	transcurrido.className = "pb__time";
-	const total = document.createElement("span");
-	total.className = "pb__time";
+	const barra = nodo("div", "pb__progress");
+	const transcurrido = nodo("span", "pb__time");
+	const total = nodo("span", "pb__time");
 	const rango = document.createElement("input");
 	rango.type = "range";
 	rango.min = "0";
@@ -101,8 +92,7 @@ export function mountPlayerBar(contenedor, opciones) {
 	barra.append(transcurrido, rango, total);
 	centro.append(controles, barra);
 	// ── Derecha: cola, letra, volumen ───────────────────────────────────────
-	const derecha = document.createElement("div");
-	derecha.className = "pb__right";
+	const derecha = nodo("div", "pb__right");
 	const cola = botonIcono("queue", "", opciones.alAbrirCola, { tamano: 18 });
 	const ampliar = botonIcono("expand", "", opciones.alAmpliar, { tamano: 18 });
 	const silencio = botonIcono("volume", "", () => void alternarSilencio(), { tamano: 18 });

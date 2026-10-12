@@ -16,7 +16,7 @@
 *
 * Aunque funcione, arrastrar exige mantener el botón pulsado y cruzar la
 * ventana. Toda acción que se pueda hacer arrastrando tiene que poder hacerse
-* también desde el menú contextual: ver `opciones-pista.ts`.
+* también desde el menú contextual: ver `opciones-pista.js`.
 *
 * ## Por qué un tipo MIME propio
 *
@@ -42,7 +42,7 @@
 /** Tipo MIME de un arrastre de pistas. El contenido es JSON con sus IDs. */
 export const TIPO_PISTAS = "application/x-localify-tracks";
 /** Tipo MIME de un arrastre de entradas de playlist, para reordenar. */
-export const TIPO_ENTRADA = "application/x-localify-entry";
+const TIPO_ENTRADA = "application/x-localify-entry";
 /** Tipo MIME de un arrastre de una playlist entera, para reordenarlas entre sí. */
 export const TIPO_PLAYLIST = "application/x-localify-playlist";
 /** Marca un elemento como origen de arrastre de pistas. */
@@ -128,7 +128,7 @@ export function zonaDeSoltado(el, tipo, manejar) {
 	};
 }
 /** Mitad de la fila sobre la que está el cursor. */
-export function ladoDeSoltado(fila, e) {
+function ladoDeSoltado(fila, e) {
 	const caja = fila.getBoundingClientRect();
 	return e.clientY < caja.top + caja.height / 2 ? "antes" : "despues";
 }

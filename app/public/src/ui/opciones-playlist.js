@@ -41,7 +41,7 @@ export async function renombrar(p, reacciones) {
 * Vaciar el campo **quita** la descripción: es lo que espera quien la borra, y
 * evita tener que ofrecer un "quitar descripción" aparte.
 */
-export async function describir(p, reacciones) {
+async function describir(p, reacciones) {
 	const nueva = await pedirTexto({
 		titulo: t("playlist.describe"),
 		etiqueta: t("playlist.description"),
@@ -77,7 +77,7 @@ export async function cambiarFoto(p, reacciones) {
 	}
 }
 /** Quita la foto propia y devuelve la playlist al mosaico. */
-export async function quitarFoto(p, reacciones) {
+async function quitarFoto(p, reacciones) {
 	await playlists.clearCover(p.id);
 	reacciones.alCambiar?.();
 }

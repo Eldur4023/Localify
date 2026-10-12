@@ -236,10 +236,10 @@ fn void migracion_1():
     if not player_state_tiene("cue"):
         await sqlite.exec("alter table player_state add column cue integer not null default 0")
 
-# Migración 3: normalizar() cortaba la cola de los textos con caracteres no
-# ASCII (text.lux, largo_bytes), así que los *_norm guardados de esas filas
-# están mal. Se recalculan; las ASCII ya estaban bien.
-fn void migracion_3():
+# Migración 3 y 4: normalizar() cortaba por la mitad los caracteres no latinos (el japonés
+# quedaba como `平沢��`), así que los *_norm guardados de esas filas están mal. Se recalculan;
+# las ASCII ya estaban bien.
+fn void recalcular_normalizados():
     List<Json> pistas = await sqlite.query("select id, title, artist_display from tracks where title glob '*[^ -~]*' or artist_display glob '*[^ -~]*'")
     for int i in range(0, len(pistas)):
         await sqlite.exec("update tracks set title_norm = ?, artist_norm = ? where id = ?",
@@ -267,9 +267,9 @@ fn void db_init():
         # completa de la base de datos, por si acaso.
         await sqlite.exec("vacuum into ?", "data/localify.antes-de-fusionar.db")
         ajuste_poner("schema_version", "2")
-    if v < 3:
-        migracion_3()
-        ajuste_poner("schema_version", "3")
+    if v < 4:
+        recalcular_normalizados()
+        ajuste_poner("schema_version", "4")
     # Al abrir la app no se sigue sonando: se restaura EN PAUSA en la última
     # posición conocida, como el original.
     await sqlite.exec("update player_state set status = 'paused' where id = 1 and status = 'playing'")

@@ -12,12 +12,7 @@ import { mostrarError } from "../ui/error-overlay.js";
 import { botonIcono, icono } from "../ui/icons.js";
 import { ponerPortadaDePista } from "../ui/cards.js";
 import { colorDePortada } from "../ui/color.js";
-function nodo(etiqueta, clase, texto) {
-	const n = document.createElement(etiqueta);
-	if (clase) n.className = clase;
-	if (texto !== undefined) n.textContent = texto;
-	return n;
-}
+import { nodo } from "../ui/dom.js";
 /** Tiempo escuchado: "2 h 05 min" o "12 min". */
 function tiempo(ms) {
 	const min = Math.round((ms || 0) / 6e4);

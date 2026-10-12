@@ -21,6 +21,7 @@
 * que llama se lee en el mismo orden en que pasan las cosas.
 */
 import { t } from "../i18n/index.js";
+import { nodo } from "./dom.js";
 /**
 * Pide un texto. Resuelve a `null` si se cancela.
 *
@@ -42,18 +43,14 @@ export function pedirTexto(opciones) {
 */
 export function pedirTextoConImagen(opciones) {
 	return new Promise((resolver) => {
-		const dlg = document.createElement("dialog");
-		dlg.className = "dialogo";
+		const dlg = nodo("dialog", "dialogo");
 		const form = document.createElement("form");
 		// `method="dialog"` hace que enviar cierre el diálogo y guarde el botón
 		// pulsado en `returnValue`. Sin esto habría que interceptar el submit para
 		// que Enter no recargara la página.
 		form.method = "dialog";
-		const h = document.createElement("h2");
-		h.className = "dialogo__titulo";
-		h.textContent = opciones.titulo;
-		const etiqueta = document.createElement("label");
-		etiqueta.className = "dialogo__campo";
+		const h = nodo("h2", "dialogo__titulo", opciones.titulo);
+		const etiqueta = nodo("label", "dialogo__campo");
 		const texto = document.createElement("span");
 		texto.textContent = opciones.etiqueta;
 		// `<textarea>` o `<input>` según haga falta. Los dos comparten `value`,
@@ -72,10 +69,8 @@ export function pedirTextoConImagen(opciones) {
 		let previsualizacion = null;
 		if (opciones.imagen) {
 			const { etiqueta: rotulo, elegir } = opciones.imagen;
-			const fila = document.createElement("div");
-			fila.className = "dialogo__imagen";
-			const muestra = document.createElement("div");
-			muestra.className = "dialogo__muestra";
+			const fila = nodo("div", "dialogo__imagen");
+			const muestra = nodo("div", "dialogo__muestra");
 			previsualizacion = muestra;
 			const boton = document.createElement("button");
 			boton.type = "button";
@@ -95,8 +90,7 @@ export function pedirTextoConImagen(opciones) {
 			fila.append(boton, muestra);
 			form.append(h, etiqueta, fila);
 		}
-		const acciones = document.createElement("div");
-		acciones.className = "dialogo__acciones";
+		const acciones = nodo("div", "dialogo__acciones");
 		const cancelar = document.createElement("button");
 		cancelar.type = "button";
 		cancelar.className = "boton boton--sutil";
@@ -149,15 +143,11 @@ export function pedirTextoConImagen(opciones) {
 */
 export function confirmar(titulo, aceptar, mensaje, destructivo = true) {
 	return new Promise((resolver) => {
-		const dlg = document.createElement("dialog");
-		dlg.className = "dialogo";
+		const dlg = nodo("dialog", "dialogo");
 		const form = document.createElement("form");
 		form.method = "dialog";
-		const h = document.createElement("h2");
-		h.className = "dialogo__titulo";
-		h.textContent = titulo;
-		const acciones = document.createElement("div");
-		acciones.className = "dialogo__acciones";
+		const h = nodo("h2", "dialogo__titulo", titulo);
+		const acciones = nodo("div", "dialogo__acciones");
 		const no = document.createElement("button");
 		no.type = "button";
 		no.className = "boton boton--sutil";
@@ -168,9 +158,7 @@ export function confirmar(titulo, aceptar, mensaje, destructivo = true) {
 		si.textContent = aceptar ?? t("common.confirm");
 		acciones.append(no, si);
 		if (mensaje) {
-			const p = document.createElement("p");
-			p.className = "dialogo__mensaje";
-			p.textContent = mensaje;
+			const p = nodo("p", "dialogo__mensaje", mensaje);
 			form.append(h, p, acciones);
 		} else {
 			form.append(h, acciones);

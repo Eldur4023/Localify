@@ -8,10 +8,10 @@
 import { alCambiarIdioma, t } from "../i18n/index.js";
 import { botonIcono } from "../ui/icons.js";
 import { mountBusquedaRapida } from "./busqueda-rapida.js";
+import { nodo } from "../ui/dom.js";
 export function mountTopBar(contenedor, router) {
 	contenedor.replaceChildren();
-	const nav = document.createElement("div");
-	nav.className = "topbar__nav";
+	const nav = nodo("div", "topbar__nav");
 	const atras = botonIcono("chevron-left", "", () => router.atras(), { tamano: 20 });
 	const adelante = botonIcono("chevron-right", "", () => router.adelante(), { tamano: 20 });
 	// Solo en móvil (CSS): abre el cajón con la barra lateral.
@@ -26,8 +26,7 @@ export function mountTopBar(contenedor, router) {
 		clase: "topbar__volver"
 	});
 	nav.append(menu, volver, atras, adelante);
-	const titulo = document.createElement("h1");
-	titulo.className = "topbar__title";
+	const titulo = nodo("h1", "topbar__title");
 	// Ajustes vive aquí y no en la barra lateral: esa lista es de sitios donde
 	// hay música, y meter la configuración entre las playlists la convierte en un
 	// cajón de sastre.

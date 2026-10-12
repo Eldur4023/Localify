@@ -1,11 +1,8 @@
 # api_invoke.lux — Despachador de comandos con el dialecto EXACTO de Localify.
 #
-# El frontend original habla con `invoke(comando, args)` (comandos Tauri) y
-# espera DTOs con formas concretas (TrackRowDto, PlayerStateDto,
-# QueueSnapshotDto…, ver crates/localify-app/src/dto/*.rs). Esta ruta es la
-# frontera: recibe {cmd, args}, ejecuta la misma lógica que mis rutas REST y
-# responde con las formas del original. Así la UI es una copia 1:1 y la
-# única diferencia sigue siendo el transporte.
+# El frontend habla con `invoke(comando, args)` y espera DTOs con formas concretas
+# (TrackRowDto, PlayerStateDto, QueueSnapshotDto…). Esta ruta recibe {cmd, args} y
+# responde con esas formas.
 
 # ─── DTOs del catálogo ───────────────────────────────────────────────────────
 
@@ -326,10 +323,6 @@ fn Json despachar_base(string cmd, Json args):
     # ── biblioteca ──
     if cmd == "library_tracks":
         return await cmd_library_tracks(args)
-    if cmd == "library_albums":
-        return await cmd_library_albums(args)
-    if cmd == "library_artists":
-        return await cmd_library_artists(args)
     if cmd == "library_favorites":
         int limite = limite_pagina(args)
         List<Json> filas = await sqlite.query(sql_pista_dto() + " where f.track_id is not null order by f.added_at desc limit ? offset ?", limite, offset_pagina(args))
@@ -343,27 +336,6 @@ fn Json despachar_base(string cmd, Json args):
             await sqlite.exec("delete from favorites where track_id = ?", tid)
         srv_favorito(tid, jint(jget(args, "enabled"), 0) == 1)
         return null
-    if cmd == "library_recent":
-        List<Json> ids = await sqlite.query("""
-            select h.track_id as id, max(h.played_at) as ultima
-            from play_history h group by h.track_id
-            order by ultima desc limit ?
-            """, jint(jget(args, "limit"), 20))
-        List<Json> out = []
-        for int i in range(0, len(ids)):
-            Json? p = track_row_por_id(jstr(ids[i]["id"], ""))
-            if p != null:
-                out.add(p)
-        return out
-    if cmd == "library_availability":
-        List<Json> out = []
-        List<string> ids = arg_ids(args, "trackIds")
-        for int i in range(0, len(ids)):
-            Json? p = track_row_por_id(ids[i])
-            Json disp = p == null ? { "kind": "absent" } : p["availability"]
-            List<Json> par = [ids[i], disp]
-            out.add(par)
-        return out
     if cmd == "library_stats":
         return await cmd_library_stats()
     if cmd == "library_rescan":
@@ -414,8 +386,6 @@ fn Json despachar_base(string cmd, Json args):
         string tid = arg_str(args, "trackId", "")
         await sqlite.exec("update tracks set metadata_locked = 0, metadata_at = null where id = ?", tid)
         return null
-    if cmd == "library_find_duplicates":
-        return grupos_duplicados()
     if cmd == "library_merge_duplicates":
         return await cmd_fusionar_duplicados()
     if cmd == "library_search_candidates":

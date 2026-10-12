@@ -1,6 +1,6 @@
 # app.lux — Localify para Lux.
 #
-# Puerto de la app de escritorio Localify (Rust/Tauri) al stack Lux:
+# Localify sobre el stack Lux:
 # LuxScript + ventana nativa GTK/WebKit + HTTP loopback. La lógica de
 # resolución (YouTube Music + MusicBrainz + yt-dlp) está reescrita en
 # LuxScript; la reproducción de audio la hace un motor nativo (miniaudio +

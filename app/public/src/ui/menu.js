@@ -28,6 +28,7 @@
 * un clic derecho cerca del borde abre un menú cuyas opciones son inalcanzables.
 */
 import { icono } from "./icons.js";
+import { nodo } from "./dom.js";
 /** Milisegundos de permanencia antes de abrir un submenú. */
 const RETARDO_SUBMENU = 180;
 /** Margen mínimo hasta el borde de la ventana. */
@@ -36,8 +37,7 @@ let panel = null;
 let hijo = null;
 let cerrarActual = null;
 function crearPanel(clase) {
-	const el = document.createElement("div");
-	el.className = clase;
+	const el = nodo("div", clase);
 	el.setAttribute("role", "menu");
 	el.hidden = true;
 	document.body.append(el);
@@ -52,7 +52,7 @@ function panelHijo() {
 	return hijo;
 }
 /** Cierra el menú abierto, si lo hay. */
-export function cerrarMenu() {
+function cerrarMenu() {
 	cerrarActual?.();
 }
 /** Cierra solo el submenú. */
@@ -79,8 +79,7 @@ function rellenar(el, opciones) {
 	el.replaceChildren();
 	for (const opcion of opciones) {
 		if (opcion.separar) {
-			const hr = document.createElement("div");
-			hr.className = "menu__sep";
+			const hr = nodo("div", "menu__sep");
 			hr.setAttribute("role", "separator");
 			el.append(hr);
 		}
@@ -90,9 +89,7 @@ function rellenar(el, opciones) {
 		boton.setAttribute("role", "menuitem");
 		if (opcion.peligrosa) boton.classList.add("is-danger");
 		if (opcion.icono) boton.append(icono(opcion.icono, 16));
-		const texto = document.createElement("span");
-		texto.className = "menu__texto";
-		texto.textContent = opcion.etiqueta;
+		const texto = nodo("span", "menu__texto", opcion.etiqueta);
 		boton.append(texto);
 		if (opcion.submenu) {
 			boton.classList.add("menu__item--padre");

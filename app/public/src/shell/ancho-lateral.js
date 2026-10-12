@@ -1,3 +1,4 @@
+import { nodo } from "../ui/dom.js";
 /**
 * Ancho ajustable de la barra lateral, con colapso a solo iconos.
 *
@@ -74,8 +75,7 @@ export function mountAnchoLateral(contenedor) {
 		const px = Number(crudo);
 		if (Number.isFinite(px) && px > 0) anchoAbierta = acotar(px);
 	}
-	const asa = document.createElement("div");
-	asa.className = "asa-lateral";
+	const asa = nodo("div", "asa-lateral");
 	asa.setAttribute("role", "separator");
 	asa.setAttribute("aria-orientation", "vertical");
 	asa.setAttribute("aria-valuemin", String(ANCHO_COLAPSADA));

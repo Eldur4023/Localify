@@ -4,6 +4,7 @@
 */
 import { alCambiarIdioma, t } from "../i18n/index.js";
 import { icono } from "../ui/icons.js";
+import { nodo } from "../ui/dom.js";
 const PESTAÑAS = [
 	["home", "nav.home", "home"],
 	["search", "nav.search", "search"],
@@ -11,12 +12,10 @@ const PESTAÑAS = [
 	["social", "nav.social", "users"]
 ];
 export function mountTabs(armazon, router) {
-	const nav = document.createElement("nav");
-	nav.className = "tabs";
+	const nav = nodo("nav", "tabs");
 	const enlaces = new Map();
 	for (const [ruta, clave, ic] of PESTAÑAS) {
-		const a = document.createElement("a");
-		a.className = "tabs__item";
+		const a = nodo("a", "tabs__item");
 		a.href = `#/${ruta}`;
 		const texto = document.createElement("span");
 		a.append(icono(ic, 24), texto);

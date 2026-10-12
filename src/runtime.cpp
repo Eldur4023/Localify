@@ -24,6 +24,7 @@
 #include <cstring>
 #include <csignal>
 #include <fcntl.h>
+#include <sched.h>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -300,11 +301,18 @@ int main(int argc, char** argv) {
     // Before the server starts: `on start:` blocks and the first `every` ticks already call audio.*.
     install_audio_hooks();
 
-    // Before the server starts: `on start:` blocks and the first `every` ticks already call audio.*.
-    install_audio_hooks();
-
     // Server stopped by itself (SIGTERM from systemd, CTRL+C...): close the window too.
     std::thread server_thread([&lux_argv] {
+        // Lux levanta un bucle y un pool por cada CPU que ve; para un solo usuario sobran 4.
+        // Los hilos heredan la afinidad del que los crea, así que basta fijarla aquí.
+        cpu_set_t mask;
+        if (::sched_getaffinity(0, sizeof(mask), &mask) == 0 && CPU_COUNT(&mask) > 4) {
+            cpu_set_t four;
+            CPU_ZERO(&four);
+            for (int c = 0, n = 0; c < CPU_SETSIZE && n < 4; ++c)
+                if (CPU_ISSET(c, &mask)) { CPU_SET(c, &four); ++n; }
+            ::sched_setaffinity(0, sizeof(four), &four);
+        }
         lux_main(5, lux_argv);
         std::lock_guard<std::mutex> lk(g_window_mutex);
         if (g_window) {

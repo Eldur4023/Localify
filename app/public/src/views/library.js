@@ -2,6 +2,7 @@ import { library, page } from "../ipc/client.js";
 import { alCambiarIdioma, t } from "../i18n/index.js";
 import { alRecibirTipo } from "../ipc/events.js";
 import { mountTrackList } from "../ui/track-list.js";
+import { nodo } from "../ui/dom.js";
 const POR_PAGINA = 100;
 /** Ordenaciones ofrecidas, con su clave de traducción. */
 const ORDENES = [
@@ -27,17 +28,12 @@ const ORDENES = [
 	}
 ];
 export function mountLibraryView(contenedor) {
-	const el = document.createElement("section");
-	el.className = "vista vista--lista";
-	const cabecera = document.createElement("header");
-	cabecera.className = "vista__header";
+	const el = nodo("section", "vista vista--lista");
+	const cabecera = nodo("header", "vista__header");
 	const titulo = document.createElement("h2");
-	const cuenta = document.createElement("span");
-	cuenta.className = "vista__count";
-	const controles = document.createElement("div");
-	controles.className = "vista__controls";
-	const orden = document.createElement("select");
-	orden.className = "select";
+	const cuenta = nodo("span", "vista__count");
+	const controles = nodo("div", "vista__controls");
+	const orden = nodo("select", "select");
 	for (const o of ORDENES) {
 		const opt = document.createElement("option");
 		opt.value = o.valor;
@@ -45,14 +41,12 @@ export function mountLibraryView(contenedor) {
 	}
 	controles.append(orden);
 	cabecera.append(titulo, cuenta, controles);
-	const cuerpo = document.createElement("div");
-	cuerpo.className = "vista__body";
+	const cuerpo = nodo("div", "vista__body");
 	// Recién instalada, esta es la primera pantalla que se ve, y era una lista
 	// vacía con un "0 canciones" encima: indistinguible de un fallo de carga. Que
 	// el texto diga qué hacer —buscar algo— importa más aquí que en ningún otro
 	// sitio, porque es donde alguien decide si la aplicación funciona.
-	const vacio = document.createElement("p");
-	vacio.className = "vista__empty";
+	const vacio = nodo("p", "vista__empty");
 	vacio.hidden = true;
 	el.append(cabecera, vacio, cuerpo);
 	contenedor.replaceChildren(el);

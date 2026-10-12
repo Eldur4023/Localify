@@ -5,6 +5,7 @@ import { ponerPortada } from "../ui/cards.js";
 import { mountTrackList } from "../ui/track-list.js";
 import { botonIcono, icono } from "../ui/icons.js";
 import { duracion } from "../shell/player.js";
+import { nodo } from "../ui/dom.js";
 /**
 * Tipos de álbum que sabemos traducir.
 *
@@ -19,32 +20,23 @@ const TIPOS = new Set([
 ]);
 export function mountAlbumView(contenedor, ruta) {
 	const albumId = ruta.params[0] ?? "";
-	const el = document.createElement("section");
-	el.className = "vista vista--lista";
-	const cabecera = document.createElement("header");
-	cabecera.className = "vista__header vista__header--ficha";
-	const arte = document.createElement("div");
-	arte.className = "ficha__arte";
+	const el = nodo("section", "vista vista--lista");
+	const cabecera = nodo("header", "vista__header vista__header--ficha");
+	const arte = nodo("div", "ficha__arte");
 	arte.append(icono("music", 48));
-	const texto = document.createElement("div");
-	texto.className = "ficha__texto";
-	const tipo = document.createElement("span");
-	tipo.className = "ficha__tipo";
-	const titulo = document.createElement("h2");
-	titulo.className = "vista__title";
-	const meta = document.createElement("p");
-	meta.className = "ficha__meta";
+	const texto = nodo("div", "ficha__texto");
+	const tipo = nodo("span", "ficha__tipo");
+	const titulo = nodo("h2", "vista__title");
+	const meta = nodo("p", "ficha__meta");
 	texto.append(tipo, titulo, meta);
-	const acciones = document.createElement("div");
-	acciones.className = "ficha__acciones";
+	const acciones = nodo("div", "ficha__acciones");
 	const reproducir = botonIcono("play", "", () => void reproducirTodo(), { tamano: 22 });
 	reproducir.classList.add("bicono--primario");
 	const guardar = botonIcono("plus", "", () => void guardarComoPlaylist(), { tamano: 20 });
 	acciones.append(reproducir, guardar);
 	texto.append(acciones);
 	cabecera.append(arte, texto);
-	const cuerpo = document.createElement("div");
-	cuerpo.className = "vista__body";
+	const cuerpo = nodo("div", "vista__body");
 	el.append(cabecera, cuerpo);
 	contenedor.replaceChildren(el);
 	let detalle = null;

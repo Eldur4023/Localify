@@ -1,3 +1,4 @@
+import { nodo } from "./dom.js";
 /**
 * Errores no capturados, visibles.
 *
@@ -16,8 +17,7 @@
 let capa = null;
 function contenedor() {
 	if (capa) return capa;
-	const el = document.createElement("div");
-	el.className = "errores";
+	const el = nodo("div", "errores");
 	el.setAttribute("role", "alert");
 	document.body.append(el);
 	capa = el;
@@ -26,8 +26,7 @@ function contenedor() {
 /** Muestra un error en pantalla. */
 export function mostrarError(titulo, detalle) {
 	const el = contenedor();
-	const linea = document.createElement("div");
-	linea.className = "errores__linea";
+	const linea = nodo("div", "errores__linea");
 	const t = document.createElement("strong");
 	t.textContent = titulo;
 	const d = document.createElement("span");

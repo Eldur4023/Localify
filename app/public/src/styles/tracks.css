@@ -2,7 +2,7 @@
  * Lista de pistas.
  *
  * La altura de `.track` tiene que coincidir exactamente con `ALTO_FILA` en
- * `views/tracks.ts`: la virtualización calcula posiciones con ese número, y
+ * `ui/track-list.js`: la virtualización calcula posiciones con ese número, y
  * cualquier diferencia acumula un desfase que crece con el scroll.
  */
 

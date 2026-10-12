@@ -18,7 +18,6 @@
 // ── Bombeo de eventos ───────────────────────────────────────────────────────
 
 let alEvento = null;
-let alResync = null;
 let bombear = false;
 
 function emitir(type, extra = {}) {
@@ -97,28 +96,19 @@ function aplicarFoto(snap) {
 	moduleState.set("prev", snap);
 }
 
-export function arrancarEventos(alEventoCb, alResyncCb) {
+export function arrancarEventos(alEventoCb) {
 	alEvento = alEventoCb;
-	alResync = alResyncCb;
 	if (bombear) return;
 	bombear = true;
 	const fuente = new EventSource("/api/events/stream");
-	let cayo = false;
 	fuente.addEventListener("snapshot", (m) => {
 		try {
 			aplicarFoto(JSON.parse(m.data));
 		} catch (e) {
 			reportar("eventos", e && e.stack ? e.stack : String(e));
 		}
-		// Tras una caída (reinicio del servidor) se pudo perder cualquier cosa:
-		// quien escuche recarga su estado en vez de fiarse de los eventos.
-		if (cayo) {
-			cayo = false;
-			if (alResync) alResync();
-		}
 	});
 	// EventSource reconecta solo; al volver, el servidor manda la foto actual.
-	fuente.onerror = () => { cayo = true; };
 }
 
 // ── Invocación ──────────────────────────────────────────────────────────────

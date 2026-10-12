@@ -11,6 +11,7 @@
 * el mismo espacio, no un hueco vacío.
 */
 import { icono } from "./icons.js";
+import { nodo } from "./dom.js";
 /**
 * Pone `ruta` como fuente de una portada. `siFallaDelTodo` solo se llama si
 * no hay portada de verdad (404: ni el álbum la tiene, ni hay nada que
@@ -25,13 +26,9 @@ function asignarSrcConRespaldo(img, ruta, siFallaDelTodo) {
 }
 /** Filas de tarjetas, con desplazamiento horizontal. */
 export function carrusel(titulo) {
-	const el = document.createElement("section");
-	el.className = "carrusel";
-	const h = document.createElement("h3");
-	h.className = "carrusel__titulo";
-	h.textContent = titulo;
-	const cuerpo = document.createElement("div");
-	cuerpo.className = "carrusel__cuerpo";
+	const el = nodo("section", "carrusel");
+	const h = nodo("h3", "carrusel__titulo", titulo);
+	const cuerpo = nodo("div", "carrusel__cuerpo");
 	cuerpo.setAttribute("role", "list");
 	el.append(h, cuerpo);
 	return {
@@ -47,8 +44,7 @@ export function carrusel(titulo) {
 * vacío parpadeando en cada tarjeta.
 */
 function ponerImagen(hueco, ruta) {
-	const img = document.createElement("img");
-	img.className = "portada";
+	const img = nodo("img", "portada");
 	img.alt = "";
 	img.decoding = "async";
 	// Antes llevaba `loading = "lazy"` para no pedir de golpe las tarjetas
@@ -129,12 +125,10 @@ export function ponerFotoDeArtista(hueco, artistId) {
 */
 export function comienzoDePista(albumId, trackId) {
 	const frag = document.createDocumentFragment();
-	const play = document.createElement("span");
-	play.className = "track__play";
+	const play = nodo("span", "track__play");
 	play.setAttribute("aria-hidden", "true");
 	play.append(icono("play", 14));
-	const arte = document.createElement("span");
-	arte.className = "track__arte";
+	const arte = nodo("span", "track__arte");
 	arte.append(icono("music", 16));
 	// Con identificador de pista, la portada la resuelve el backend por la
 	// canción. Sin él —los sitios que aún no lo pasan— se cae al álbum.
@@ -163,18 +157,16 @@ export function comienzoDePista(albumId, trackId) {
 * Una playlist recién creada no tiene canciones, así que no tiene portadas.
 * Queda el icono del hueco, que es la respuesta correcta: todavía no hay nada.
 */
-export function ponerMosaico(hueco, albumes) {
+function ponerMosaico(hueco, albumes) {
 	if (albumes.length === 0) return;
 	if (albumes.length === 1) {
 		ponerPortada(hueco, albumes[0]);
 		return;
 	}
-	const rejilla = document.createElement("div");
-	rejilla.className = "mosaico";
+	const rejilla = nodo("div", "mosaico");
 	const cuatro = albumes.length === 3 ? [...albumes, albumes[0] ?? ""] : albumes.slice(0, 4);
 	for (const album of cuatro) {
-		const celda = document.createElement("span");
-		celda.className = "mosaico__celda";
+		const celda = nodo("span", "mosaico__celda");
 		ponerPortada(celda, album);
 		rejilla.append(celda);
 	}
@@ -196,8 +188,7 @@ export function ponerMosaico(hueco, albumes) {
 */
 export function ponerImagenDePlaylist(hueco, p) {
 	if (p.hasOwnCover) {
-		const img = document.createElement("img");
-		img.className = "portada";
+		const img = nodo("img", "portada");
 		img.alt = "";
 		img.decoding = "async";
 		img.addEventListener("load", () => img.classList.add("is-lista"));
@@ -227,15 +218,12 @@ export function ponerImagenDePlaylist(hueco, p) {
 * correcto.
 */
 export function comienzoReciclable() {
-	const play = document.createElement("span");
-	play.className = "track__play";
+	const play = nodo("span", "track__play");
 	play.setAttribute("aria-hidden", "true");
 	play.append(icono("play", 14));
-	const arte = document.createElement("span");
-	arte.className = "track__arte";
+	const arte = nodo("span", "track__arte");
 	arte.append(icono("music", 16));
-	const img = document.createElement("img");
-	img.className = "portada";
+	const img = nodo("img", "portada");
 	img.alt = "";
 	img.decoding = "async";
 	img.addEventListener("load", () => img.classList.add("is-lista"));
@@ -267,32 +255,24 @@ export function comienzoReciclable() {
 }
 /** Una tarjeta con portada, título y subtítulo. */
 export function tarjeta(datos) {
-	const a = document.createElement("a");
-	a.className = "tarjeta";
+	const a = nodo("a", "tarjeta");
 	a.href = datos.destino;
 	a.setAttribute("role", "listitem");
-	const arte = document.createElement("div");
-	arte.className = "tarjeta__arte";
+	const arte = nodo("div", "tarjeta__arte");
 	if (datos.redonda) arte.classList.add("tarjeta__arte--redonda");
 	arte.append(icono(datos.marcador ?? "music", 32));
 	if (datos.playlist) ponerImagenDePlaylist(arte, datos.playlist);
 	else if (datos.artistId) ponerFotoDeArtista(arte, datos.artistId);
 	else if (datos.trackId) ponerPortadaDePista(arte, datos.trackId);
 	else ponerPortada(arte, datos.albumId);
-	const t = document.createElement("div");
-	t.className = "tarjeta__titulo";
-	t.textContent = datos.titulo;
-	const s = document.createElement("div");
-	s.className = "tarjeta__sub";
-	s.textContent = datos.subtitulo;
+	const t = nodo("div", "tarjeta__titulo", datos.titulo);
+	const s = nodo("div", "tarjeta__sub", datos.subtitulo);
 	a.append(arte, t, s);
 	return a;
 }
 /** Bloque de texto para cuando una vista no tiene nada que mostrar. */
 export function vacio(texto) {
-	const p = document.createElement("p");
-	p.className = "vista__empty";
-	p.textContent = texto;
+	const p = nodo("p", "vista__empty", texto);
 	return p;
 }
 /**
@@ -301,12 +281,10 @@ export function vacio(texto) {
 * Aparece solo si la espera pasa de 150 ms: por debajo, un destello gris es
 * más molesto que la propia espera.
 */
-export function esqueleto(filas) {
-	const el = document.createElement("div");
-	el.className = "esqueleto";
+function esqueleto(filas) {
+	const el = nodo("div", "esqueleto");
 	for (let i = 0; i < filas; i += 1) {
-		const linea = document.createElement("div");
-		linea.className = "esqueleto__linea";
+		const linea = nodo("div", "esqueleto__linea");
 		el.append(linea);
 	}
 	return el;

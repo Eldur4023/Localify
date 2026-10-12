@@ -413,11 +413,6 @@
   color: var(--text-muted);
 }
 
-.ajustes__estado {
-  font-size: var(--fs-sm);
-  color: var(--text-subdued);
-}
-
 /*
  * Pestañas de Ajustes.
  *
@@ -1435,12 +1430,6 @@ a.social__fila:hover {
   color: var(--texto-tenue, #b3b3b3);
   text-decoration: none;
 }
-.social__check {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 8px 0;
-}
 
 /* ── Perfil: portada con degradado, cifras, escaparate ─────────────────── */
 
@@ -1683,16 +1672,6 @@ a.social__fila:hover {
 }
 
 .perfil__pista .social__texto { flex: 1; min-width: 0; }
-
-.perfil__plegable {
-  margin-top: var(--sp-4);
-}
-
-.perfil__plegable > summary {
-  cursor: pointer;
-  padding: var(--sp-3) 0;
-  font-weight: var(--fw-bold);
-}
 
 .social__fila .perfil__avatar {
   margin-inline-end: var(--sp-3);

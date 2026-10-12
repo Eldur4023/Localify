@@ -1,20 +1,11 @@
 /**
-* Punto de entrada del frontend.
+* Punto de entrada del frontend: monta el armazón —barra lateral, barra superior y
+* reproductor— y cede el contenido al router. Pinta datos y emite comandos; las
+* decisiones viven en el backend. Módulos ES nativos, sin bundler.
 *
-* El frontend de Localify pinta datos y emite comandos. No toma decisiones de
-* negocio: eso vive en Rust. Este archivo monta el armazón —barra lateral,
-* barra superior y reproductor— y cede el contenido al router.
-*
-* Los `import` llevan extensión `.js` aunque el fuente sea `.ts`: es un
-* requisito de los módulos ES nativos, que es lo que carga el WebView
-* directamente, sin bundler (ADR-019).
-*
-* ## El armazón no se desmonta
-*
-* Solo el contenido cambia al navegar. La barra de reproducción vive fuera del
-* router porque desmontarla al cambiar de vista cortaría la música, y la barra
-* lateral porque volver a pedir las playlists en cada navegación sería una
-* consulta por clic para datos que casi nunca cambian.
+* El armazón no se desmonta: solo cambia el contenido. La barra de reproducción vive
+* fuera del router (desmontarla cortaría la música) y la lateral para no pedir las
+* playlists en cada navegación.
 */
 import { iniciar } from "./ipc/events.js";
 import { arrancarAudioWeb } from "./shell/web-audio.js";

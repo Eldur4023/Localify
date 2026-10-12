@@ -22,6 +22,11 @@ set(LUX_FUZZ     OFF CACHE BOOL "" FORCE)
 foreach(_m PDF POSTGRES MYSQL CRYPTO GZIP IMAGE)
     set(LUX_${_m} OFF CACHE BOOL "" FORCE)
 endforeach()
+# Módulos nativos de Lux que ninguna parte de app/ importa (correo, claves, OTP, zip, csv).
+set(LUX_MODULE_EXCLUDE "" CACHE STRING "" FORCE)
+foreach(_m imap mailparse keyring otp zip csv)
+    list(APPEND LUX_MODULE_EXCLUDE "src/lux_script/modules/base_modules/${_m}.cpp")
+endforeach()
 add_subdirectory(vendor/lux)
 
 # ── Android: no window, no GTK -- the Kotlin Activity (android/) owns a

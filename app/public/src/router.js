@@ -1,5 +1,5 @@
 /** Analiza un fragmento como `#/album/abc?x=1`. */
-export function analizar(fragmento) {
+function analizar(fragmento) {
 	const limpio = fragmento.replace(/^#\/?/, "");
 	const [camino = "", consulta = ""] = limpio.split("?", 2);
 	const partes = camino.split("/").filter((p) => p.length > 0).map(decodeURIComponent);
