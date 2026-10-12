@@ -19,15 +19,21 @@ fn List<string> insertar_en(List<string> base, int idx, string valor):
         out.add(valor)
     return out
 
+# Id de lista de YouTube Music en un enlace (`list=`, `/browse/VL...`) o pegado a pelo (PL..., OLAK5uy_...).
 fn string extraer_id_lista(string url):
-    int p = url.index_of("list=")
-    if p < 0:
-        return ""
-    string resto = url.slice(p + 5)
+    string u = url.trim()
+    int p = u.index_of("list=")
+    string resto = ""
+    if p >= 0:
+        resto = u.slice(p + 5)
+    elif u.contains("youtube.com/browse/VL"):
+        resto = u.slice(u.index_of("browse/VL") + 9)
+    elif not u.contains("/") and not u.contains(" ") and (u.starts_with("PL") or u.starts_with("OLAK5uy_") or u.starts_with("RDCLAK") or u.starts_with("LM")):
+        resto = u
     string id = ""
     for int i in range(0, len(resto)):
         string c = resto.slice(i, i + 1)
-        if c == "&" or c == "#" or c == "?":
+        if c == "&" or c == "#" or c == "?" or c == "/":
             break
         id = id + c
     return id
@@ -45,37 +51,64 @@ fn string extraer_id_spotify(string url):
         id = id + c
     return id
 
-# Importar una lista de YouTube Music: browse VL+id, guarda las pistas (sus
-# ids SON videos) y crea la playlist. Nada se descarga al importar.
+# Importar una lista de YouTube Music: browse VL+id (con todas sus páginas), guarda las pistas
+# (sus ids SON videos) y crea la playlist. Nada se descarga al importar. La playlist se crea al
+# final: si algo falla por el camino no queda una lista a medias.
 fn Json importar_lista_ytm(string id_lista):
     Json? r = ytm_navegar("VL" + id_lista)
     if r == null:
         return { "error": "no se pudo leer la lista" }
     List<Json> elementos = elementos_de_lista(r)
-    Json? titulo_nodo = buscar_uno(r, "musicResponsiveHeaderRenderer")
-    string titulo = titulo_nodo == null ? "Importada" : texto_de(jget(titulo_nodo, "title"))
+    Json? cab = buscar_uno(r, "musicResponsiveHeaderRenderer")
+    if cab == null:
+        cab = buscar_uno(r, "musicEditablePlaylistDetailHeaderRenderer")
+    if cab == null:
+        cab = buscar_uno(r, "musicDetailHeaderRenderer")
+    string titulo = cab == null ? "" : texto_de(jget(cab, "title"))
     if titulo == "":
         titulo = "Importada " + id_lista
+    # las listas largas llegan por páginas (unas 100 pistas cada una)
+    string token = token_de(r)
+    for int pag in range(0, 40):
+        if token == "":
+            break
+        Json? mas = ytm_continuar(token)
+        if mas == null:
+            break
+        List<Json> nuevos = elementos_de_lista(mas)
+        if len(nuevos) == 0:
+            break
+        elementos = elementos + nuevos
+        token = token_de(mas)
     if len(elementos) == 0:
         return { "error": "la lista está vacía o es privada" }
+    List<string> tids = []
+    for int i in range(0, len(elementos)):
+        # (la duración va en fixedColumns y el álbum en la 3.ª columna: pista_de_lista, discografia.lux)
+        PistaCatalogo p = pista_de_lista(elementos[i], "", "", "", "", "", 0)
+        # sin id o sin duración = vídeo borrado o privado: no se puede reproducir
+        if p.id == "" or p.title == "" or p.duration_ms <= 0:
+            continue
+        if p.album_id == "":
+            List<Tramo> tl = tramos(elementos[i], 2)
+            for int k in range(0, len(tl)):
+                if tl[k].id.starts_with("MPRE") and p.album_id == "":
+                    p.album_id = tl[k].id
+                    p.album_titulo = tl[k].texto.trim()
+        string tid = guardar_pista(p)
+        if tid != "":
+            tids.add(tid)
+    if len(tids) == 0:
+        return { "error": "la lista no tiene canciones reproducibles" }
     string pid = nuevo_id()
+    await sqlite.begin()
     await sqlite.exec("insert into playlists(id, name, name_norm, source, source_id, created_at, updated_at) values(?, ?, ?, 'ytmusic_import', ?, unixepoch(), unixepoch())",
         pid, titulo, normalizar(titulo), id_lista)
-    double pos = 0.0
-    int n = 0
-    for int i in range(0, len(elementos)):
-        PistaCatalogo p = ytm_cancion(elementos[i])
-        if p.id == "" or p.title == "":
-            continue
-        p.track_number = 0
-        string tid = guardar_pista(p)
-        if tid == "":
-            continue
-        pos = pos + 1.0
+    for int i in range(0, len(tids)):
         await sqlite.exec("insert into playlist_items(id, playlist_id, track_id, position, added_at) values(?, ?, ?, ?, unixepoch())",
-            nuevo_id(), pid, tid, pos)
-        n = n + 1
-    return { "id": pid, "imported": n }
+            nuevo_id(), pid, tids[i], i + 1.0)
+    await sqlite.commit()
+    return { "id": pid, "imported": len(tids), "skipped": len(elementos) - len(tids) }
 
 # Importar una playlist pública de Spotify por su página embed (sin
 # credenciales): el HTML lleva un <script id="__NEXT_DATA__"> con el JSON.
