@@ -79,6 +79,10 @@ function diferir(antes, ahora) {
 	if (ahora.playlistStamp !== antes.playlistStamp) emitir("playlistChanged", { kind: ahora.playlistChangeKind ?? "" });
 	if (ahora.settingsStamp !== antes.settingsStamp) emitir("settingsChanged", {});
 	if (ahora.statsStamp !== antes.statsStamp) emitir("statsChanged", {});
+	// salto pedido por otro equipo (reproducción sincronizada): el `<audio>` del móvil no tiene motor
+	if (ahora.syncSeek && ahora.syncSeek !== antes.syncSeek) {
+		emitir("remoteSeek", { positionMs: Number(ahora.syncSeek.split(":")[1]) || 0 });
+	}
 	if (ahora.libraryPath !== antes.libraryPath) emitir("libraryPathChanged", { path: ahora.libraryPath });
 	for (const r of ahora.remoteReady ?? []) {
 		emitir("searchRemoteReady", { queryId: r.queryId });

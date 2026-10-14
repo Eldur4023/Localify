@@ -339,7 +339,7 @@ fn Json despachar_base(string cmd, Json args):
     if cmd == "library_stats":
         return await cmd_library_stats()
     if cmd == "library_rescan":
-        int recuperados = await cmd_rescan()
+        await cmd_rescan()
         tocar_biblioteca()
         return "rescan-" + str(ahora())
     if cmd == "library_delete_download":
@@ -369,6 +369,15 @@ fn Json despachar_base(string cmd, Json args):
     if cmd == "library_retry_failed":
         int tocado = await sqlite.exec("update download_jobs set state = 'queued', attempts = 0, last_error = null, updated_at = unixepoch() where state = 'failed'")
         return tocado
+    # Re-descargar UNA pista (botón de la fila cuando la descarga falló): vuelve a la cola, o se
+    # encarga si no había trabajo. Prioridad inmediata: la pidió el usuario.
+    if cmd == "library_retry_track":
+        string tid = arg_str(args, "trackId", "")
+        if tid == "":
+            return error_api("INVALID", "error.invalid").status(400)
+        await sqlite.exec("update download_jobs set state = 'queued', priority = 'immediate', attempts = 0, last_error = null, updated_at = unixepoch() where track_id = ? and state = 'failed'", tid)
+        asegurar_descarga(tid, "immediate")
+        return null
     if cmd == "album_detail":
         return await cmd_album_detail(arg_str(args, "albumId", ""))
     if cmd == "artist_detail":

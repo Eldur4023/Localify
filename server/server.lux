@@ -16,6 +16,7 @@ import sqlite
 import hash
 import os
 import json
+import time
 
 app:
     name     "Serverify"
@@ -47,6 +48,26 @@ on start:
             user_id integer primary key references users(id) on delete cascade,
             title text not null default '', artist text not null default '',
             updated_at integer not null default (unixepoch())
+        )""")
+    # Reproducción sincronizada entre equipos del mismo usuario: una sola fila (el último que
+    # escribe gana). `at` es la hora del SERVIDOR (ms) a la que `position_ms` era cierta, así
+    # el receptor extrapola sin depender de que los relojes de los equipos coincidan.
+    await sqlite.exec("""
+        create table if not exists playback(
+            user_id integer primary key references users(id) on delete cascade,
+            rev integer not null default 0,
+            device_id text not null default '',
+            track_key text not null default '',
+            state text not null default '{}',
+            at integer not null default 0
+        )""")
+    await sqlite.exec("""
+        create table if not exists devices(
+            user_id integer not null references users(id) on delete cascade,
+            device_id text not null,
+            name text not null default '', platform text not null default '',
+            last_seen integer not null default 0,
+            primary key(user_id, device_id)
         )""")
     await sqlite.exec("""
         create table if not exists plays(
@@ -221,14 +242,10 @@ fn string acceso(int pid, int uid):
         return "member"
     return p[0]["visibility"] == "public" ? "reader" : ""
 
-fn bool puede_editar_pistas(int pid, string nivel):
-    if nivel == "owner":
-        return true
-    if nivel != "member":
-        return false
-    # Una playlist es conjunta cuando su dueña invita a alguien: quien está en la lista de
-    # miembros puede tocar las canciones. Nadie más (los lectores de una pública, tampoco).
-    return true
+# Una playlist es conjunta cuando su dueña invita a alguien: quien está en la lista de
+# miembros puede tocar las canciones. Nadie más (los lectores de una pública, tampoco).
+fn bool puede_editar_pistas(string nivel):
+    return nivel == "owner" or nivel == "member"
 
 fn Json playlist_resumen(Json p):
     return {
@@ -287,7 +304,7 @@ post endpoint("/api/register", Json b):
     string pass = s_of(b, "password", "")
     if len(user) < 3 or len(user) > 32 or len(pass) < 8 or user.contains(" ") or user.contains("/"):
         return { "error": "invalid" }.status(400)
-    string nombre = s_of(b, "displayName", user).trim()
+    string nombre = s_of(b, "displayName", user).trim().slice(0, 40)
     if nombre == "":
         nombre = user
     string h = await hash.password(pass)
@@ -320,7 +337,7 @@ group("/api"):
 
     put endpoint("/me", Json b):
         await sqlite.exec("update users set display_name = coalesce(nullif(?, ''), display_name), bio = ? where id = ?",
-            s_of(b, "displayName", "").trim(), s_of(b, "bio", ""), yo())
+            s_of(b, "displayName", "").trim().slice(0, 40), s_of(b, "bio", "").slice(0, 160), yo())
         List<Json> r = await sqlite.query("select * from users where id = ?", yo())
         return user_dto(r[0])
 
@@ -329,6 +346,8 @@ group("/api"):
         if avatar.size < 100:
             return { "error": "invalid" }.status(400)
         os.make_dir("data/avatars")
+        # save() NO sobrescribe: si ya hay foto crea "<id>-xxxx.jpg" y se seguía sirviendo la vieja
+        os.remove_file("./data/avatars/" + str(yo()) + ".jpg")
         avatar.save("./data/avatars", str(yo()) + ".jpg")
         return status(204)
 
@@ -345,6 +364,61 @@ group("/api"):
         await sqlite.exec("""insert into presence(user_id, title, artist, updated_at) values(?, ?, ?, unixepoch())
             on conflict(user_id) do update set title = excluded.title, artist = excluded.artist, updated_at = unixepoch()""",
             yo(), s_of(b, "title", "").slice(0, 200), s_of(b, "artist", "").slice(0, 200))
+        return status(204)
+
+    # ── reproducción sincronizada ──
+    # PUT: un equipo publica lo que suena (pista + ventana de cola + posición + play/pausa).
+    # kind "auto" = avance por fin de canción: lo mandan TODOS los equipos a la vez, y solo vale
+    # el primero (`after` es la pista que acabó; si el estado ya pasó de ella, se ignora).
+    put endpoint("/playback", Json b):
+        string dev = s_of(b, "deviceId", "")
+        if not id_valido(dev):
+            return { "error": "invalid" }.status(400)
+        string clave = s_of(b, "trackKey", "").slice(0, 200)
+        if len(str(b["state"])) > 20000:
+            return { "error": "too_large" }.status(413)
+        List<Json> r = await sqlite.query("select rev, track_key from playback where user_id = ?", yo())
+        if len(r) > 0 and s_of(b, "kind", "set") == "auto" and str(r[0]["track_key"]) != s_of(b, "after", ""):
+            return { "rev": r[0]["rev"], "ignored": true }
+        int ahora = int(time.now())
+        await sqlite.exec("""insert into playback(user_id, rev, device_id, track_key, state, at) values(?, 1, ?, ?, ?, ?)
+            on conflict(user_id) do update set rev = rev + 1, device_id = excluded.device_id,
+                track_key = excluded.track_key, state = excluded.state, at = excluded.at""",
+            yo(), dev, clave, str(b["state"]), ahora)
+        r = await sqlite.query("select rev from playback where user_id = ?", yo())
+        return { "rev": r[0]["rev"], "now": ahora }
+
+    # GET: 204 si no hay nada nuevo desde `since` (barato: se llama cada segundo)
+    get endpoint("/playback", int since = 0):
+        List<Json> r = await sqlite.query("select rev, device_id, state, at from playback where user_id = ?", yo())
+        if len(r) == 0 or int(r[0]["rev"]) == since:
+            return status(204)
+        Json st = parse_json(str(r[0]["state"]))
+        return { "rev": r[0]["rev"], "deviceId": r[0]["device_id"], "at": r[0]["at"],
+                 "now": int(time.now()), "state": st == null ? {} : st }
+
+    # los equipos se anuncian (nombre + plataforma) y se listan en el perfil
+    put endpoint("/devices", Json b):
+        string dev = s_of(b, "deviceId", "")
+        if not id_valido(dev):
+            return { "error": "invalid" }.status(400)
+        await sqlite.exec("""insert into devices(user_id, device_id, name, platform, last_seen) values(?, ?, ?, ?, unixepoch())
+            on conflict(user_id, device_id) do update set name = excluded.name, platform = excluded.platform, last_seen = unixepoch()""",
+            yo(), dev, s_of(b, "name", "").slice(0, 60), s_of(b, "platform", "").slice(0, 20))
+        return status(204)
+
+    get endpoint("/devices"):
+        List<Json> r = await sqlite.query("""select device_id, name, platform, last_seen,
+            (unixepoch() - last_seen) as ago from devices where user_id = ? order by last_seen desc limit 20""", yo())
+        List<Json> out = []
+        for int i in range(0, len(r)):
+            out.add({ "deviceId": r[i]["device_id"], "name": r[i]["name"], "platform": r[i]["platform"],
+                      "agoS": r[i]["ago"] })
+        return out
+
+    # equipo dado de baja a mano desde el perfil
+    delete endpoint("/devices/:id", string id):
+        await sqlite.exec("delete from devices where user_id = ? and device_id = ?", yo(), id)
         return status(204)
 
     # ── usuarios (Social) ──
@@ -473,6 +547,7 @@ group("/api"):
         string igual = id_por_identidad(title_norm, artist_norm, duration_ms)
         if igual != "":
             return { "stored": false, "id": igual, "duplicate": true }
+        os.remove_file("./data/audio/" + id + "." + ext)   # save() no sobrescribe (resto de un intento fallido)
         audio.save("./data/audio", id + "." + ext)
         await sqlite.exec("""
             insert or ignore into tracks(id, title, artist, album, duration_ms, search_norm, title_norm, artist_norm, ext, size, uploaded_by)
@@ -505,6 +580,8 @@ group("/api"):
 
         os.make_dir("data/relay")
         string raw = "./data/relay/" + id + ".raw"
+        # sin esto, reintentar tras un fallo transcodificaba el .raw VIEJO (save() no sobrescribe)
+        os.remove_file(raw)
         audio.save("./data/relay", id + ".raw")
 
         # ¿qué es lo que ha traído? (ffprobe; si falla, se asume webm)
@@ -546,8 +623,8 @@ group("/api"):
             ok = jint(fr["status"], 1) == 0 and os.is_file(destino) and os.file_size(destino) >= 16384
         os.remove_file(portada)
         if not ok:
-            if os.is_file(destino):
-                os.remove_file(destino)
+            os.remove_file(destino)
+            os.remove_file(raw)
             return { "error": "transcode_failed" }.status(502)
         os.remove_file(raw)
 
@@ -564,6 +641,7 @@ group("/api"):
         if not id_valido(id) or cover.size < 100:
             return { "error": "invalid" }.status(400)
         os.make_dir("data/relay")
+        os.remove_file("./data/relay/" + id + ".jpg")   # save() no sobrescribe (ver /me/avatar)
         cover.save("./data/relay", id + ".jpg")
         return { "ok": true }
 
@@ -741,10 +819,8 @@ group("/api"):
                 update playlists set name = coalesce(nullif(?, ''), name), description = ?, visibility = ?, collaborative = ?,
                        updated_at = unixepoch() where id = ?""",
                 s_of(b, "name", "").trim(), s_of(b, "description", ""), vis, b["collaborative"] == true ? 1 : 0, id)
-        elif b["tracks"] != null and not puede_editar_pistas(id, nivel):
-            return status(403)
         if b["tracks"] != null:
-            if not puede_editar_pistas(id, nivel):
+            if not puede_editar_pistas(nivel):
                 return status(403)
             escribir_pistas(id, b["tracks"], yo())
         return status(204)
@@ -754,6 +830,7 @@ group("/api"):
         if acceso(id, yo()) != "owner" or cover.size < 100:
             return status(404)
         os.make_dir("data/pcovers")
+        os.remove_file("./data/pcovers/" + str(id) + ".jpg")   # save() no sobrescribe (ver /me/avatar)
         cover.save("./data/pcovers", str(id) + ".jpg")
         return status(204)
 
@@ -772,7 +849,7 @@ group("/api"):
 
     # añadir pistas sin reescribir la lista (varios miembros a la vez)
     post endpoint("/playlists/:id/tracks", int id, Json b):
-        if not puede_editar_pistas(id, acceso(id, yo())):
+        if not puede_editar_pistas(acceso(id, yo())):
             return status(403)
         List<Json> nuevas = b["tracks"] == null ? [] : b["tracks"]
         for int i in range(0, len(nuevas)):
@@ -781,7 +858,7 @@ group("/api"):
         return status(204)
 
     delete endpoint("/playlists/:id/tracks/:tid", int id, string tid):
-        if not puede_editar_pistas(id, acceso(id, yo())):
+        if not puede_editar_pistas(acceso(id, yo())):
             return status(403)
         await sqlite.exec("delete from playlist_tracks where playlist_id = ? and track_id = ?", id, tid)
         await sqlite.exec("update playlists set updated_at = unixepoch() where id = ?", id)

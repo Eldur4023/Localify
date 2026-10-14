@@ -122,6 +122,8 @@ export const library = {
 	* no se pudo bajar se quedaba así para siempre.
 	*/
 	retryFailed: () => invoke("library_retry_failed"),
+	/** Vuelve a descargar una sola pista cuya descarga falló. */
+	retryTrack: (trackId) => invoke("library_retry_track", { trackId }),
 	albumDetail: (albumId) => invoke("album_detail", { albumId }),
 	artistDetail: (artistId) => invoke("artist_detail", { artistId }),
 	/** Abre el selector nativo de audio. Vacío si el usuario cancela. */
@@ -303,6 +305,10 @@ export const social = {
 	logout: () => invoke("server_logout"),
 	setUpload: (enabled) => invoke("server_set_upload", { enabled }),
 	setPresence: (enabled) => invoke("server_set_presence", { enabled }),
+	/** Reproducción sincronizada entre mis equipos: ajustes de este equipo + lista de equipos. */
+	syncStatus: () => invoke("social_sync_status"),
+	setSync: (patch) => invoke("social_sync_set", patch),
+	removeDevice: (deviceId) => invoke("social_device_remove", { deviceId }),
 	/** Avisa de lo que suena (título vacío = nada); el servidor lo muestra en Social. */
 	presence: (title, artist) => invoke("social_presence", { title, artist }),
 	/** Sube un lote de la biblioteca descargada; repetir con `next` hasta `done`. */

@@ -92,7 +92,8 @@ ok "importar reutiliza mi pista" "$(sqlite3 $DB "select track_id from playlist_i
 ok "importar no crea duplicados" "$(sqlite3 $DB "select count(*) from tracks where title_norm='faint'")" 1
 
 # ── la nube: playlists automáticas, segundo equipo, y nada de descargar lo que ya hay ──
-poll() { curl -s -X POST -H 'content-type: application/json' -d '{}' localhost:${1:-8795}/api/events/poll >/dev/null; }
+# la reconciliación con el servidor corre en el every "1s" del backend: se le da tiempo a un tick
+poll() { curl -s -X POST -H 'content-type: application/json' -d '{}' localhost:${1:-8795}/api/events/poll >/dev/null; sleep 2.5; }
 TA=$(curl -s -X POST -H 'content-type: application/json' -d '{"username":"ana","password":"secreto123"}' $B/login | sed 's/.*"token":"\([^"]*\)".*/\1/')
 PA=$(inv playlist_create '{"name":"Auto"}' | tr -d '"')
 inv playlist_add_tracks "{\"playlistId\":\"$PA\",\"trackIds\":[\"dQw4w9WgXcQ\"]}" >/dev/null

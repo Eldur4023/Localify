@@ -118,6 +118,13 @@ fn Json reproductor_orden(string orden, Json args):
         Json ctx = contexto_desde_args(args, track_id)
         set_contexto(str(ctx), pistas_de_contexto_dto(ctx, track_id), track_id)
         mutar_estado("set_track", track_id, "", 0)
+        # Arranque ya colocado (lo usa la reproducción sincronizada, sync.lux): sin pasar por
+        # la posición 0 ni por un instante sonando si el otro equipo estaba en pausa.
+        int inicio = jint(jget(args, "__posicion"), 0)
+        if inicio > 0:
+            mutar_estado("seek", "", "", inicio)
+        if jget(args, "__pausado") == true:
+            mutar_estado("pause", "", "", inicio)
     elif orden == "toggle":
         mutar_estado("toggle", "", "", -1)
     elif orden == "pause":
@@ -173,6 +180,9 @@ fn Json reproductor_orden(string orden, Json args):
     motor_sincronizar(despues)
     if despues.revision != antes.revision:
         publicar_integraciones()
+    # lo aplicado desde otro equipo (__remote) no se vuelve a publicar
+    if jget(args, "__remote") != true:
+        sync_publicar(orden, antes, despues)
     return estado_dto()
 
 # ─── Hacia fuera ─────────────────────────────────────────────────────────────

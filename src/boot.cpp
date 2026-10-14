@@ -85,6 +85,9 @@ bool wait_for_server(uint16_t port, std::chrono::milliseconds timeout) {
 } // namespace
 
 LuxServer::LuxServer(const fs::path& work_dir) {
+    // Antes que el bundle de certificados: en una instalación limpia la carpeta aún no
+    // existe, el PEM no se podía escribir y TODO https fallaba hasta el segundo arranque.
+    fs::create_directories(work_dir);
 #ifdef __ANDROID__
     // Android no trae un cacert.pem y su almacén (un fichero por CA, con el
     // hash antiguo de OpenSSL 1.0) no sirve de CAPATH a OpenSSL 3: se junta en

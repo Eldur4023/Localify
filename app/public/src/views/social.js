@@ -9,34 +9,10 @@ import { player, social } from "../ipc/client.js";
 import { alCambiarIdioma, t } from "../i18n/index.js";
 import { textoDeError } from "../ui/publicar-playlist.js";
 import { mostrarError } from "../ui/error-overlay.js";
-import { botonIcono, icono } from "../ui/icons.js";
-import { ponerPortadaDePista } from "../ui/cards.js";
-import { colorDePortada } from "../ui/color.js";
+import { botonIcono } from "../ui/icons.js";
 import { nodo } from "../ui/dom.js";
-/** Tiempo escuchado: "2 h 05 min" o "12 min". */
-function tiempo(ms) {
-	const min = Math.round((ms || 0) / 6e4);
-	return min >= 60 ? `${Math.floor(min / 60)} h ${String(min % 60).padStart(2, "0")} min` : `${min} min`;
-}
-function duracion(ms) {
-	const s = Math.round((ms || 0) / 1e3);
-	return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-}
-const PREFIJO_CACHE = "localify.social.";
-const SIN_CACHE = new Error("sin caché");
-function leerCache(clave) {
-	try {
-		const v = localStorage.getItem(PREFIJO_CACHE + clave);
-		return v === null ? undefined : JSON.parse(v);
-	} catch {
-		return undefined;
-	}
-}
-function guardarCache(clave, valor) {
-	try {
-		localStorage.setItem(PREFIJO_CACHE + clave, JSON.stringify(valor));
-	} catch {}
-}
+import { crearPerfil } from "./social-perfil.js";
+import { duracion, guardarCache, leerCache, SIN_CACHE } from "./social-cache.js";
 export function mountSocialView(contenedor, ruta) {
 	const el = nodo("section", "vista vista--scroll ajustes social");
 	contenedor.replaceChildren(el);
@@ -156,6 +132,7 @@ export function mountSocialView(contenedor, ruta) {
 	}
 	// ── Acceso: servidor, usuario y contraseña en un solo paso ──────────────
 	function panelAcceso(panel) {
+		panel.classList.add("social__acceso");
 		const { s, cuerpo } = seccion(t("social.connect_title"));
 		const servidor = campoTexto(t("social.server"), estado.host ? `${estado.host}:${estado.port}` : "");
 		servidor.input.placeholder = "192.168.1.10:8787";
@@ -194,14 +171,13 @@ export function mountSocialView(contenedor, ruta) {
 		panel.append(s);
 	}
 	// ── Pestañas con sesión ─────────────────────────────────────────────────
-	function pestañas(panel, pendientes = 0) {
+	function pestañas(panel) {
 		const nav = nodo("div", "ajustes__tabs");
 		nav.setAttribute("role", "tablist");
 		for (const [clave, texto] of [
-			["users", t("social.users")],
+			["users", t("social.people")],
 			["playlists", t("social.playlists")],
-			["invitations", pendientes > 0 ? `${t("social.invitations")} (${pendientes})` : t("social.invitations")],
-			["me", t("social.me")]
+			["me", t("social.profile")]
 		]) {
 			const b = nodo("button", `ajustes__tab${clave === pestaña ? " is-activa" : ""}`, texto);
 			b.type = "button";
@@ -213,112 +189,50 @@ export function mountSocialView(contenedor, ruta) {
 		}
 		panel.append(nav);
 	}
-	// ── Perfil: cabecera con foto y escaparate (playlists + lo más escuchado) ──
-	const version = Date.now();
-	function avatar(u, grande, alCargar) {
-		const a = nodo("span", `perfil__avatar${grande ? " perfil__avatar--grande" : ""}`, (u.displayName || u.username || "?").slice(0, 1).toUpperCase());
-		if (u.hasAvatar) {
-			const img = nodo("img");
-			img.alt = "";
-			img.src = `/api/social/img/avatar/${encodeURIComponent(u.username)}?v=${avatarV || version}`;
-			img.addEventListener("load", () => {
-				a.replaceChildren(img);
-				alCargar?.(img);
-			});
-			img.addEventListener("error", () => img.remove());
-		}
-		return a;
-	}
-	let avatarV = 0;
-	function cifra(n, etiqueta) {
-		const c = nodo("div", "perfil__cifra");
-		c.append(nodo("strong", "", String(n)), nodo("span", "", etiqueta));
-		return c;
-	}
-	function cabeceraPerfil(panel, u, acciones) {
-		const c = nodo("header", "perfil__cabecera");
-		// el degradado se tiñe con el color dominante de la foto, como el reproductor
-		const av = avatar(u, true, (img) => {
-			const col = colorDePortada(img);
-			if (col) c.style.setProperty("--perfil-color", col);
-		});
-		const datos = nodo("div", "perfil__datos");
-		datos.append(nodo("h2", "perfil__nombre", u.displayName), nodo("span", "perfil__usuario", `@${u.username}`));
-		if (u.bio) datos.append(nodo("p", "perfil__bio", u.bio));
-		c.append(av, datos);
-		if (acciones) {
-			const b = nodo("button", "boton boton--sutil perfil__editar", t("social.edit_profile"));
-			b.type = "button";
-			b.addEventListener("click", acciones.alEditar);
-			c.append(b);
-			const cuenta = botonIcono("settings", t("social.account"), acciones.alCuenta, { tamano: 20 });
-			cuenta.classList.add("perfil__cuenta");
-			c.append(cuenta);
-		}
-		const cifras = nodo("div", "perfil__cifras");
-		cifras.append(cifra(u.playlists?.length ?? 0, t("social.playlists")), cifra(tiempo(u.listenedMs ?? 0), t("social.plays_90")), cifra(u.topTracks?.length ?? 0, t("social.top_short")));
-		c.append(cifras);
-		if (u.nowPlaying) {
-			const ahora = nodo("div", "perfil__ahora");
-			const barras = nodo("span", "perfil__barras");
-			barras.append(nodo("i"), nodo("i"), nodo("i"));
-			const texto = nodo("span", "perfil__ahora-texto");
-			texto.append(nodo("small", "", t("social.now_playing")), nodo("strong", "", u.nowPlaying.title), nodo("span", "", u.nowPlaying.artist ?? ""));
-			ahora.append(barras, texto);
-			c.append(ahora);
-		}
-		panel.append(c);
-	}
-	function escaparate(panel, u) {
-		const listas = u.playlists ?? [];
-		if (listas.length > 0) {
-			const { s: sp, cuerpo: cp } = seccion(t("social.public_playlists"));
-			const rejilla = nodo("div", "perfil__rejilla");
-			for (const p of listas) {
-				const a = nodo("a", "perfil__lista");
-				a.href = `#/social/playlist/${p.id}`;
-				const arte = nodo("span", "perfil__arte");
-				arte.append(icono("music", 32));
-				if (p.hasCover) {
-					const img = nodo("img");
-					img.alt = "";
-					img.src = `/api/social/img/playlist/${p.id}?v=${version}`;
-					img.addEventListener("load", () => arte.replaceChildren(img));
-				}
-				a.append(arte, nodo("strong", "", p.name), nodo("span", "social__sub", t("social.n_tracks", { count: p.nTracks })));
-				rejilla.append(a);
-			}
-			cp.append(rejilla);
-			panel.append(sp);
-		}
-		const top = u.topTracks ?? [];
-		if (top.length > 0) {
-			const { s: st, cuerpo: ct } = seccion(t("social.top_tracks"));
-			const maximo = Math.max(...top.map((x) => x.ms), 1);
-			top.forEach((x, i) => {
-				const f = nodo("div", "perfil__pista");
-				const arte = nodo("span", "perfil__miniatura");
-				arte.append(icono("music", 20));
-				ponerPortadaDePista(arte, x.id);
-				const texto = nodo("div", "social__texto");
-				const barra = nodo("span", "perfil__barra");
-				barra.style.setProperty("--ancho", `${Math.round(x.ms / maximo * 100)}%`);
-				texto.append(nodo("strong", "", x.title), nodo("span", "social__sub", x.artist), barra);
-				f.append(nodo("span", "perfil__puesto", String(i + 1)), arte, texto, nodo("span", "social__etiqueta", tiempo(x.ms)));
-				ct.append(f);
-			});
-			panel.append(st);
-		}
-	}
+	const claveDato = (clave) => `${estado.host}:${estado.port}.${estado.username}.${clave}`;
+	const { avatar, tarjetaLista, cabeceraPerfil, escaparate, pintarPerfil } = crearPerfil({
+		get estado() {
+			return estado;
+		},
+		get avisoNube() {
+			return avisoNube;
+		},
+		dato,
+		boton,
+		seccion,
+		pintar,
+		cargar,
+		claveDato,
+		textoNube
+	});
+	// ── Personas y playlists: rejillas a todo el ancho ──────────────────────
 	async function pintarUsuarios(panel) {
 		const lista = await dato("users", () => social.users());
-		const { s, cuerpo } = seccion(t("social.users"));
+		const { s, cuerpo } = seccion(t("social.people"));
+		const rejilla = nodo("div", "social__rejilla");
 		for (const u of lista) {
-			const escucha = u.nowPlaying ? `♪ ${u.nowPlaying.title}${u.nowPlaying.artist ? ` — ${u.nowPlaying.artist}` : ""}` : "";
-			const f = fila(u.displayName, escucha || `@${u.username}${u.bio ? ` · ${u.bio}` : ""}`, `social/user/${encodeURIComponent(u.username)}`, [t("social.n_playlists", { count: u.nPlaylists }), t("social.n_tracks", { count: u.nTracks })]);
-			f.prepend(avatar(u, false));
-			cuerpo.append(f);
+			const a = nodo("a", "social__tarjeta");
+			// mi propia tarjeta lleva a Mi perfil (editable), no a la vista de cualquier usuario
+			a.href = u.username === estado.username ? "#/social/me" : `#/social/user/${encodeURIComponent(u.username)}`;
+			const cab = nodo("div", "social__tarjeta-cab");
+			const quien = nodo("div", "social__texto");
+			quien.append(nodo("strong", "", u.username === estado.username ? `${u.displayName} · ${t("social.you")}` : u.displayName), nodo("span", "social__sub", `@${u.username}`));
+			cab.append(avatar(u, "media"), quien);
+			a.append(cab);
+			if (u.bio) a.append(nodo("p", "social__bio", u.bio));
+			if (u.nowPlaying) {
+				const ahora = nodo("div", "social__escucha");
+				const barras = nodo("span", "perfil__barras");
+				barras.append(nodo("i"), nodo("i"), nodo("i"));
+				ahora.append(barras, nodo("span", "", `${u.nowPlaying.title}${u.nowPlaying.artist ? ` — ${u.nowPlaying.artist}` : ""}`));
+				a.append(ahora);
+			}
+			const pie = nodo("div", "social__etiquetas");
+			pie.append(nodo("span", "social__etiqueta", t("social.n_playlists", { count: u.nPlaylists })), nodo("span", "social__etiqueta", t("social.n_tracks", { count: u.nTracks })));
+			a.append(pie);
+			rejilla.append(a);
 		}
+		cuerpo.append(rejilla);
 		panel.append(s);
 	}
 	function etiquetasDe(p) {
@@ -331,15 +245,16 @@ export function mountSocialView(contenedor, ruta) {
 		const lista = await dato("playlists", () => social.playlists());
 		const { s, cuerpo } = seccion(t("social.playlists"));
 		if (lista.length === 0) cuerpo.append(nodo("p", "vista__empty", t("social.no_playlists")));
-		for (const p of lista) {
-			cuerpo.append(fila(p.name, `${p.ownerName} · ${t("social.n_tracks", { count: p.nTracks })}`, `social/playlist/${p.id}`, etiquetasDe(p)));
-		}
+		const rejilla = nodo("div", "perfil__rejilla perfil__rejilla--ancha");
+		for (const p of lista) rejilla.append(tarjetaLista(p, `${p.ownerName} · ${t("social.n_tracks", { count: p.nTracks })}`, etiquetasDe(p)));
+		cuerpo.append(rejilla);
 		panel.append(s);
 	}
-	/** Invitaciones: aceptar entra en la playlist; rechazar la quita de la lista. */
+	/** Invitaciones: un aviso arriba, en cualquier pestaña, mientras haya alguna. */
 	function pintarInvitaciones(panel, lista) {
-		const { s, cuerpo } = seccion(t("social.invitations"));
-		if (lista.length === 0) cuerpo.append(nodo("p", "vista__empty", t("social.no_invitations")));
+		if (lista.length === 0) return;
+		const caja = nodo("section", "social__aviso");
+		caja.append(nodo("h3", "social__aviso-titulo", t("social.invitations_banner", { count: lista.length })));
 		const aviso = nodo("p", "ajustes__ayuda ajustes__ayuda--aviso");
 		for (const p of lista) {
 			const f = nodo("div", "social__fila social__fila--plana");
@@ -354,137 +269,10 @@ export function mountSocialView(contenedor, ruta) {
 				await social.decline(p.id);
 				await pintar();
 			}, aviso));
-			cuerpo.append(f);
+			caja.append(f);
 		}
-		cuerpo.append(aviso);
-		panel.append(s);
-	}
-	/** Ventana modal sencilla: título, contenido y cerrar. */
-	function abrirDialogo(titulo, contenido) {
-		const dlg = nodo("dialog", "dialogo perfil__dialogo");
-		const form = nodo("form");
-		form.method = "dialog";
-		const cerrar = boton(t("common.close"), "boton--sutil", async () => dlg.close());
-		const acciones = nodo("div", "dialogo__acciones");
-		acciones.append(cerrar);
-		form.append(nodo("h2", "dialogo__titulo", titulo), contenido, acciones);
-		dlg.append(form);
-		document.body.append(dlg);
-		dlg.addEventListener("close", () => dlg.remove());
-		dlg.showModal();
-		return dlg;
-	}
-	/** Editar perfil: foto, nombre y bio. */
-	function dialogoEditar(u) {
-		const cuerpo = nodo("div", "ajustes__cuerpo perfil__editar-form");
-		const foto = nodo("input");
-		foto.type = "file";
-		foto.accept = "image/*";
-		foto.hidden = true;
-		const aviso = nodo("p", "ajustes__ayuda ajustes__ayuda--aviso");
-		const vistaFoto = nodo("button", "perfil__cambiar-foto");
-		vistaFoto.type = "button";
-		vistaFoto.setAttribute("aria-label", t("social.change_photo"));
-		vistaFoto.append(avatar(u, true), nodo("span", "perfil__camara", t("social.change_photo")));
-		vistaFoto.addEventListener("click", () => foto.click());
-		let dlg;
-		foto.addEventListener("change", () => void (async () => {
-			if (!foto.files?.[0]) return;
-			const fd = new FormData();
-			fd.append("imagen", foto.files[0]);
-			aviso.textContent = "…";
-			try {
-				const r = await fetch("/api/social/avatar", { method: "POST", body: fd });
-				if (!r.ok) throw new Error(String(r.status));
-				avatarV = Date.now();
-				dlg.close();
-				await pintar();
-			} catch (e) {
-				aviso.textContent = String(e);
-			}
-		})());
-		const nombre = campoTexto(t("social.display_name"), u.displayName);
-		const bio = campoTexto(t("social.bio"), u.bio);
-		cuerpo.append(foto, vistaFoto, nombre.fila, bio.fila, aviso, boton(t("common.save"), "", async () => {
-			await social.updateMe(nombre.input.value.trim(), bio.input.value);
-			dlg.close();
-			await pintar();
-		}, aviso));
-		dlg = abrirDialogo(t("social.edit_profile"), cuerpo);
-	}
-	/** Cuenta y nube: sincronización, privacidad y sesión. */
-	function dialogoCuenta(u) {
-		let dlg;
-		const cuerpo2 = nodo("div", "ajustes__cuerpo");
-		cuerpo2.append(nodo("p", "ajustes__ayuda", `@${u.username} · ${estado.host}:${estado.port}`));
-		const filaNube = nodo("div", "ajustes__campo");
-		const avisoPull = nodo("p", "ajustes__ayuda", avisoNube);
-		filaNube.append(nodo("label", "ajustes__etiqueta", t("social.cloud")), boton(t("social.cloud_pull"), "boton--sutil", async () => {
-			avisoPull.textContent = t("social.pulling");
-			avisoPull.textContent = textoNube(await social.pull());
-		}, avisoPull), avisoPull);
-		cuerpo2.append(filaNube);
-		const subida = nodo("input", "ajustes__check");
-		subida.type = "checkbox";
-		subida.checked = estado.upload;
-		subida.addEventListener("change", () => void social.setUpload(subida.checked));
-		const presencia = nodo("input", "ajustes__check");
-		presencia.type = "checkbox";
-		presencia.checked = estado.presence !== false;
-		presencia.id = "so-presence";
-		presencia.addEventListener("change", () => void social.setPresence(presencia.checked));
-		const filaPresencia = nodo("div", "ajustes__campo");
-		const etiquetaP = nodo("label", "ajustes__etiqueta", t("social.presence"));
-		etiquetaP.htmlFor = "so-presence";
-		filaPresencia.append(etiquetaP, presencia);
-		cuerpo2.append(filaPresencia);
-		const filaSubida = nodo("div", "ajustes__campo");
-		const etiqueta = nodo("label", "ajustes__etiqueta", t("social.upload"));
-		subida.id = "so-upload";
-		etiqueta.htmlFor = "so-upload";
-		filaSubida.append(etiqueta, subida);
-		cuerpo2.append(filaSubida);
-		// Aportar lo que ya tengo descargado: lo que el servidor ya tenga (misma
-		// canción por título + artista + duración) no se vuelve a subir.
-		const progreso = nodo("p", "ajustes__ayuda");
-		const filaBiblioteca = nodo("div", "ajustes__campo");
-		filaBiblioteca.append(nodo("label", "ajustes__etiqueta", t("social.contribute_library")), boton(t("social.contribute_library_run"), "boton--sutil", async () => {
-			let desde = 0;
-			let subidas = 0;
-			let existentes = 0;
-			for (;;) {
-				const r = await social.syncLibrary(desde);
-				subidas += r.uploaded;
-				existentes += r.alreadyThere;
-				progreso.textContent = t("social.contribute_progress", {
-					uploaded: subidas,
-					existing: existentes
-				});
-				if (r.done) break;
-				desde = r.next;
-			}
-		}, progreso), progreso);
-		cuerpo2.append(filaBiblioteca);
-		const acciones = nodo("div", "ajustes__acciones");
-		acciones.append(boton(t("social.logout"), "boton--sutil", async () => {
-			await social.logout();
-			dlg.close();
-			await cargar();
-		}), boton(t("social.disconnect"), "boton--peligro", async () => {
-			await social.disconnect();
-			dlg.close();
-			await cargar();
-		}));
-		cuerpo2.append(acciones);
-		dlg = abrirDialogo(t("social.account"), cuerpo2);
-	}
-	async function pintarPerfil(panel) {
-		const u = await dato(`user.${estado.username}`, () => social.user(estado.username));
-		cabeceraPerfil(panel, u, {
-			alEditar: () => dialogoEditar(u),
-			alCuenta: () => dialogoCuenta(u)
-		});
-		escaparate(panel, u);
+		caja.append(aviso);
+		panel.append(caja);
 	}
 	// ── Perfil de otro usuario ──────────────────────────────────────────────
 	async function pintarUsuario(panel, nombre) {
@@ -603,16 +391,18 @@ export function mountSocialView(contenedor, ruta) {
 		const panel = nodo("div", "ajustes__panel");
 		try {
 			if (!estado.host || !estado.reachable || !estado.loggedIn) panelAcceso(panel);
-			else if (ruta.params[0] === "user" && ruta.params[1]) await pintarUsuario(panel, ruta.params[1]);
+			else if (ruta.params[0] === "user" && ruta.params[1] && decodeURIComponent(ruta.params[1]) !== estado.username) await pintarUsuario(panel, ruta.params[1]);
 			else if (ruta.params[0] === "playlist" && ruta.params[1]) await pintarPlaylist(panel, ruta.params[1]);
 			else {
-				if (ruta.params[0] === "playlists") pestaña = "playlists";
+				// entrar en mi propio usuario (desde cualquier enlace) abre Mi perfil
+				if (ruta.params[0] === "playlists" || ruta.params[0] === "me") pestaña = ruta.params[0];
+				else if (ruta.params[0] === "user") pestaña = "me";
 				if (avisoNube) panel.append(nodo("p", "ajustes__ayuda", avisoNube));
 				const invitaciones = await dato("invitations", () => social.invitations());
-				pestañas(panel, invitaciones.length);
+				pintarInvitaciones(panel, invitaciones);
+				pestañas(panel);
 				if (pestaña === "users") await pintarUsuarios(panel);
 				else if (pestaña === "playlists") await pintarPlaylists(panel);
-				else if (pestaña === "invitations") pintarInvitaciones(panel, invitaciones);
 				else await pintarPerfil(panel);
 			}
 		} catch (e) {

@@ -132,6 +132,64 @@ function ladoDeSoltado(fila, e) {
 	const caja = fila.getBoundingClientRect();
 	return e.clientY < caja.top + caja.height / 2 ? "antes" : "despues";
 }
+/** Primer ascendiente (o el propio nodo) que desplaza en vertical. */
+function desplazableDe(nodo) {
+	for (let n = nodo instanceof Element ? nodo : nodo?.parentElement; n; n = n.parentElement) {
+		const oy = getComputedStyle(n).overflowY;
+		if ((oy === "auto" || oy === "scroll" || oy === "overlay") && n.scrollHeight > n.clientHeight) return n;
+	}
+	return null;
+}
+/** Franja, en px, junto a cada borde de la lista donde el arrastre la desplaza. */
+const BORDE_AUTOSCROLL = 64;
+/** Velocidad máxima, en px por fotograma, cuando el cursor está justo en el borde (o fuera). */
+const VELOCIDAD_AUTOSCROLL = 22;
+/**
+* Desplazamiento automático durante un arrastre: mientras el cursor esté cerca del borde de
+* arriba o de abajo de la lista (o más allá), la lista se mueve hacia ese lado, más deprisa cuanto
+* más cerca del borde, para poder llegar a cualquier posición sin soltar. `dragover` sigue
+* disparándose con el ratón quieto, y cada aviso rearma un vigilante: si dejan de llegar, para.
+*/
+function autodesplazamiento() {
+	let lista = null;
+	let y = 0;
+	let cuadro = 0;
+	let ultimoAviso = 0;
+	const paso = () => {
+		cuadro = 0;
+		if (!lista?.isConnected || performance.now() - ultimoAviso > 300) {
+			lista = null;
+			return;
+		}
+		const caja = lista.getBoundingClientRect();
+		const dentroArriba = y - caja.top;
+		const dentroAbajo = caja.bottom - y;
+		let v = 0;
+		if (dentroArriba < BORDE_AUTOSCROLL) v = -Math.min(1, (BORDE_AUTOSCROLL - dentroArriba) / BORDE_AUTOSCROLL);
+		else if (dentroAbajo < BORDE_AUTOSCROLL) v = Math.min(1, (BORDE_AUTOSCROLL - dentroAbajo) / BORDE_AUTOSCROLL);
+		if (v !== 0) lista.scrollTop += Math.round(v * VELOCIDAD_AUTOSCROLL) || Math.sign(v);
+		cuadro = requestAnimationFrame(paso);
+	};
+	return {
+		/** Llamar en cada `dragover`. */
+		avisar(e) {
+			const encontrada = desplazableDe(e.target);
+			if (encontrada) lista = encontrada;
+			y = e.clientY;
+			ultimoAviso = performance.now();
+			if (lista && !cuadro) cuadro = requestAnimationFrame(paso);
+		},
+		/** La lista que se está desplazando (para conservar su posición al soltar). */
+		get lista() {
+			return lista;
+		},
+		parar() {
+			lista = null;
+			if (cuadro) cancelAnimationFrame(cuadro);
+			cuadro = 0;
+		}
+	};
+}
 /**
 * Zona de reordenación sobre una lista.
 *
@@ -140,6 +198,7 @@ function ladoDeSoltado(fila, e) {
 */
 export function zonaDeReordenacion(contenedor, filaDe, indiceDe, manejar, tipo = TIPO_ENTRADA) {
 	let marcada = null;
+	const desplazamiento = autodesplazamiento();
 	const limpiar = () => {
 		marcada?.classList.remove("is-drop-before", "is-drop-after");
 		marcada = null;
@@ -148,6 +207,7 @@ export function zonaDeReordenacion(contenedor, filaDe, indiceDe, manejar, tipo =
 		if (!e.dataTransfer?.types.includes(tipo)) return;
 		e.preventDefault();
 		e.dataTransfer.dropEffect = "move";
+		desplazamiento.avisar(e);
 		const fila = filaDe(e.target);
 		if (!fila) return;
 		if (marcada !== fila) limpiar();
@@ -160,19 +220,34 @@ export function zonaDeReordenacion(contenedor, filaDe, indiceDe, manejar, tipo =
 		const entryId = e.dataTransfer?.getData(tipo);
 		const fila = filaDe(e.target);
 		const lado = fila ? ladoDeSoltado(fila, e) : "despues";
+		// La lista que se estaba desplazando: se anota dónde estaba para dejarla ahí
+		const lista = desplazamiento.lista ?? desplazableDe(e.target);
+		const posicion = lista?.scrollTop ?? 0;
+		desplazamiento.parar();
 		limpiar();
 		if (!entryId || !fila) return;
 		e.preventDefault();
 		const base = indiceDe(fila);
-		void manejar(entryId, lado === "antes" ? base : base + 1);
+		const hecho = Promise.resolve(manejar(entryId, lado === "antes" ? base : base + 1));
+		// Reordenar repinta (o recarga) la lista y eso la devolvía arriba del todo: se repone la
+		// posición cuando el repintado ha acabado, y una vez más tras el siguiente fotograma
+		const reponer = () => {
+			if (lista?.isConnected && Math.abs(lista.scrollTop - posicion) > 1) lista.scrollTop = posicion;
+		};
+		requestAnimationFrame(reponer);
+		void hecho.then(() => requestAnimationFrame(reponer), () => requestAnimationFrame(reponer));
 	};
+	const alTerminarArrastre = () => desplazamiento.parar();
 	contenedor.addEventListener("dragover", alPasar);
 	contenedor.addEventListener("dragleave", limpiar);
 	contenedor.addEventListener("drop", alSoltar);
+	document.addEventListener("dragend", alTerminarArrastre);
 	return () => {
 		contenedor.removeEventListener("dragover", alPasar);
 		contenedor.removeEventListener("dragleave", limpiar);
 		contenedor.removeEventListener("drop", alSoltar);
+		document.removeEventListener("dragend", alTerminarArrastre);
+		desplazamiento.parar();
 		limpiar();
 	};
 }

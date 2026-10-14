@@ -102,7 +102,7 @@ export function mountPlaylistView(contenedor, ruta) {
 		}
 	}
 	function recargar() {
-		trackList.refrescar();
+		trackList.refrescar(true);
 	}
 	/** Lo que las acciones necesitan saber de esta playlist. */
 	function accionable() {

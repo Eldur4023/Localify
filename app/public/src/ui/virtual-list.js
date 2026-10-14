@@ -92,6 +92,21 @@ export function mountVirtualList(container, options) {
 			void cargar();
 		}
 	}
+	/**
+	* Posición a recuperar tras un `reset(true)`: la lista se vacía, así que el navegador la
+	* manda arriba; se vuelve a la posición en cuanto hay filas suficientes para alcanzarla.
+	*/
+	let posicionPendiente = null;
+	function recuperarPosicion() {
+		if (posicionPendiente === null) return;
+		if (agotada || items.length * options.rowHeight >= posicionPendiente + el.clientHeight) {
+			el.scrollTop = posicionPendiente;
+			posicionPendiente = null;
+			pintar();
+		} else {
+			void cargar();
+		}
+	}
 	async function cargar() {
 		if (cargando || agotada || destruida) return;
 		cargando = true;
@@ -107,10 +122,15 @@ export function mountVirtualList(container, options) {
 				spacer.style.height = `${items.length * options.rowHeight}px`;
 				pintar();
 			}
-		} catch {} finally {
+		} catch {
+			posicionPendiente = null;
+		} finally {
 			// Si ya hubo un reset(), `cargando` pertenece a la carga *nueva* que ese
 			// reset lanzó: tocarlo aquí la dejaría creyéndose libre a mitad de vuelo.
-			if (miGeneracion === generacion) cargando = false;
+			if (miGeneracion === generacion) {
+				cargando = false;
+				if (!destruida) recuperarPosicion();
+			}
 		}
 	}
 	// `passive` porque nunca se llama a `preventDefault`: sin él, el navegador
@@ -138,7 +158,8 @@ export function mountVirtualList(container, options) {
 			items.splice(Math.max(0, Math.min(items.length, destino)), 0, movido);
 			pintar();
 		},
-		reset() {
+		reset(conservarPosicion = false) {
+			posicionPendiente = conservarPosicion && el.scrollTop > 0 ? el.scrollTop : null;
 			generacion += 1;
 			items.length = 0;
 			agotada = false;

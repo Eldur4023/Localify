@@ -1,0 +1,429 @@
+# serverify_playlists.lux — Playlists locales <-> servidor, historial y "descargar de la nube".
+# (Cliente de Serverify: la conexión y los atajos de descarga viven en serverify.lux.)
+
+# ─── Playlists locales <-> servidor ──────────────────────────────────────────
+
+fn List<Json> pistas_locales_de(string plid):
+    List<Json> f = await sqlite.query("""
+        select t.id, t.title, t.artist_display as artist, coalesce(al.title, '') as album, t.duration_ms as durationMs,
+               t.title_norm as titleNorm, t.artist_norm as artistNorm
+        from playlist_items pi join tracks t on t.id = pi.track_id
+        left join albums al on al.id = t.album_id
+        where pi.playlist_id = ? order by pi.position""", plid)
+    return f
+
+# Añade a la playlist local la pista de una referencia del servidor, reutilizando
+# la que ya tengo si es la misma canción (por id o por identidad) en vez de crear otra.
+fn void anadir_local(string plid, Json it):
+    PistaCatalogo p = srv_pista(it)
+    string tid = p.id
+    List<Json> ya = await sqlite.query("select 1 from tracks where id = ?", tid)
+    if len(ya) == 0:
+        string igual = equivalente_local(normalizar(p.title), normalizar(jstr(it["artist"], "")), jint(it["durationMs"], 0), "", false)
+        if igual != "":
+            tid = igual
+        else:
+            guardar_pista(p)
+    List<Json> ahi = await sqlite.query("select 1 from playlist_items where playlist_id = ? and track_id = ?", plid, tid)
+    if len(ahi) > 0:
+        return
+    List<Json> m = await sqlite.query("select coalesce(max(position), 0) as p from playlist_items where playlist_id = ?", plid)
+    await sqlite.exec("insert into playlist_items(id, playlist_id, track_id, position, added_at) values(?, ?, ?, ?, unixepoch())",
+        nuevo_id(), plid, tid, jdbl(m[0]["p"], 0.0) + 1.0)
+
+# Clave de identidad de una referencia del servidor o de una pista local
+fn string clave_ref(Json it):
+    string tn = jstr(it["titleNorm"], "")
+    if tn == "":
+        tn = normalizar(jstr(it["title"], ""))
+    string an = jstr(it["artistNorm"], "")
+    if an == "":
+        an = normalizar(jstr(it["artist"], ""))
+    return tn + "|" + an
+
+# id local de la playlist enlazada a una del servidor ("" si no hay)
+fn string local_de(string sid):
+    List<Json> f = await sqlite.query("select key from settings where key like 'srvpl:%' and value = ?", sid)
+    if len(f) == 0:
+        return ""
+    return jstr(f[0]["key"], "").slice(6)
+
+fn Json srv_fallo(Json? r):
+    if r == null:
+        return error_api("SERVER_UNREACHABLE", "error.server_unreachable").status(502)
+    if r["status"] == 401:
+        return error_api("SERVER_AUTH", "error.server_auth").status(401)
+    return error_api("SERVER_ERROR", "error.server_error").status(jint(r["status"], 500))
+
+# ─── Playlists: el servidor las gestiona ─────────────────────────────────────
+#
+# Todas mis playlists locales se reflejan en el servidor (privadas por defecto) y
+# los cambios viajan en los dos sentidos (altas, nombres, canciones, orden y
+# borrados). Cada playlist enlazada guarda en `settings` la última versión
+# sincronizada (srvph = canciones, srvpm = nombre+descripción, srvpu = updatedAt del
+# servidor), así se sabe quién cambió desde entonces:
+#   solo yo -> empujo · solo el servidor -> traigo · los dos -> unión sin perder nada.
+# srv_reconciliar() lo hace con todas; corre cada ~30 s desde el sondeo de eventos y
+# enseguida tras cualquier cambio en una playlist (ver despachar).
+
+fn string hash_claves(List<Json> pistas):
+    List<string> vistas = []
+    for int i in range(0, len(pistas)):
+        string k = clave_ref(pistas[i])
+        if not vistas.contains(k):
+            vistas.add(k)
+    return hash.sha256(vistas.join("\n"))
+
+fn string meta_local(string plid):
+    List<Json> f = await sqlite.query("select name, coalesce(description, '') as d from playlists where id = ?", plid)
+    if len(f) == 0:
+        return ""
+    return jstr(f[0]["name"], "") + "\n" + jstr(f[0]["d"], "")
+
+fn Json refs_de(List<Json> pistas):
+    List<Json> out = []
+    for int i in range(0, len(pistas)):
+        out.add({ "id": pistas[i]["id"], "title": pistas[i]["title"], "artist": pistas[i]["artist"],
+                  "album": pistas[i]["album"], "durationMs": pistas[i]["durationMs"],
+                  "titleNorm": pistas[i]["titleNorm"], "artistNorm": pistas[i]["artistNorm"] })
+    return out
+
+fn void marcar_sincronizada(string plid, string sid, int actualizada):
+    ajuste_poner("srvph:" + plid, hash_claves(pistas_locales_de(plid)))
+    ajuste_poner("srvpm:" + plid, meta_local(plid))
+    ajuste_poner("srvpu:" + plid, str(actualizada))
+
+# Otro usuario u otro servidor en este equipo: los enlaces con la nube anterior no valen.
+fn void olvidar_enlaces():
+    await sqlite.exec("delete from settings where key like 'srvp%'")
+
+fn void olvidar_playlist(string plid):
+    await sqlite.exec("delete from settings where key in (?, ?, ?, ?)", "srvpl:" + plid, "srvph:" + plid, "srvpm:" + plid, "srvpu:" + plid)
+
+# Sustituye las canciones y el nombre de la playlist local por los del servidor.
+fn void traer_a_local(string plid, Json pl):
+    await sqlite.exec("delete from playlist_items where playlist_id = ?", plid)
+    List<Json> remotas = jlist(pl["tracks"])
+    for int i in range(0, len(remotas)):
+        anadir_local(plid, remotas[i])
+    string nombre = jstr(pl["name"], "")
+    if nombre != "":
+        await sqlite.exec("update playlists set name = ?, name_norm = ?, description = ?, updated_at = unixepoch() where id = ?",
+            nombre, normalizar(nombre), jstr(pl["description"], ""), plid)
+    tocar_playlists()
+
+# Crea en el servidor una copia de una playlist local y la enlaza. Devuelve su id ("" si falla).
+fn string crear_en_servidor(string plid, string visibilidad = "private", bool colaborativa = false):
+    List<Json> f = await sqlite.query("select name, coalesce(description, '') as d from playlists where id = ?", plid)
+    if len(f) == 0:
+        return ""
+    Json? r = srv("POST", "/playlists", { "name": jstr(f[0]["name"], ""), "description": jstr(f[0]["d"], ""),
+        "visibility": visibilidad, "collaborative": colaborativa, "tracks": refs_de(pistas_locales_de(plid)) }, 15000)
+    if r == null or r["status"] != 201:
+        return ""
+    string sid = str(r["body"]["id"])
+    ajuste_poner("srvpl:" + plid, sid)
+    marcar_sincronizada(plid, sid, 0)
+    return sid
+
+# Sincroniza una playlist local con su par del servidor (ver la regla arriba).
+fn Json sync_una(string plid, string sid):
+    Json? r = srv("GET", "/playlists/" + sid, null, 10000)
+    if r == null or r["status"] != 200:
+        return srv_fallo(r)
+    Json pl = r["body"]
+    List<Json> remotas = jlist(pl["tracks"])
+    List<Json> locales = pistas_locales_de(plid)
+    string lh = hash_claves(locales)
+    string sh = hash_claves(remotas)
+    string ml = meta_local(plid)
+    string ms = jstr(pl["name"], "") + "\n" + jstr(pl["description"], "")
+    string ultimo_h = ajuste("srvph:" + plid, "")
+    string ultimo_m = ajuste("srvpm:" + plid, "")
+    int actualizada = jint(pl["updatedAt"], 0)
+    if lh == sh and ml == ms:
+        marcar_sincronizada(plid, sid, actualizada)
+        return { "localId": plid, "serverId": sid }
+    bool local_cambio = lh != ultimo_h or ml != ultimo_m
+    bool server_cambio = sh != ultimo_h or ms != ultimo_m
+    bool puede_pistas = pl["access"] == "owner" or pl["access"] == "member"
+    bool puede_meta = pl["access"] == "owner"
+    if local_cambio and not server_cambio and puede_pistas:
+        # empujo mis cambios
+        Dict<string, Json> cuerpo = { "tracks": refs_de(locales) }
+        if puede_meta:
+            List<Json> d = await sqlite.query("select name, coalesce(description, '') as d from playlists where id = ?", plid)
+            cuerpo["name"] = jstr(d[0]["name"], "")
+            cuerpo["description"] = jstr(d[0]["d"], "")
+            cuerpo["visibility"] = jstr(pl["visibility"], "private")
+            cuerpo["collaborative"] = pl["collaborative"] == true
+        Json? p = srv("PUT", "/playlists/" + sid, cuerpo, 15000)
+        if p == null or p["status"] >= 300:
+            return srv_fallo(p)
+    elif local_cambio and server_cambio and puede_pistas:
+        # cambiaron los dos: unión (lo mío primero, luego lo que solo tiene el servidor)
+        List<string> mias = []
+        for int i in range(0, len(locales)):
+            mias.add(clave_ref(locales[i]))
+        List<Json> union = refs_de(locales)
+        for int i in range(0, len(remotas)):
+            if not mias.contains(clave_ref(remotas[i])):
+                union.add(remotas[i])
+        Dict<string, Json> cuerpo = { "tracks": union }
+        if puede_meta:
+            cuerpo["name"] = jstr(pl["name"], "")
+            cuerpo["description"] = jstr(pl["description"], "")
+            cuerpo["visibility"] = jstr(pl["visibility"], "private")
+            cuerpo["collaborative"] = pl["collaborative"] == true
+        Json? p = srv("PUT", "/playlists/" + sid, cuerpo, 15000)
+        if p == null or p["status"] >= 300:
+            return srv_fallo(p)
+        Json fusion = { "tracks": union, "name": jstr(pl["name"], ""), "description": jstr(pl["description"], "") }
+        traer_a_local(plid, fusion)
+    else:
+        # cambió el servidor (u otra persona, o yo sin permiso): manda el servidor
+        traer_a_local(plid, pl)
+    Json? nuevo = srv("GET", "/playlists/" + sid, null, 10000)
+    marcar_sincronizada(plid, sid, nuevo != null and nuevo["status"] == 200 ? jint(nuevo["body"]["updatedAt"], 0) : actualizada)
+    tocar_playlists()
+    return { "localId": plid, "serverId": sid }
+
+# Crea (si hace falta) la playlist local enlazada a una del servidor y las sincroniza.
+fn Json importar_playlist(string sid):
+    Json? r = srv("GET", "/playlists/" + sid, null, 10000)
+    if r == null or r["status"] != 200:
+        return srv_fallo(r)
+    string plid = local_de(sid)
+    if plid == "":
+        plid = nuevo_id()
+        string nombre = jstr(r["body"]["name"], "")
+        List<Json> f = await sqlite.query("select coalesce(max(position), 0) as p from playlists")
+        await sqlite.exec("insert into playlists(id, name, name_norm, position, created_at, updated_at) values(?, ?, ?, ?, unixepoch(), unixepoch())",
+            plid, nombre, normalizar(nombre), jdbl(f[0]["p"], 0.0) + 1.0)
+        ajuste_poner("srvpl:" + plid, sid)
+        # vacía y sin cambios míos: la primera sincronización trae lo del servidor
+        ajuste_poner("srvph:" + plid, hash_claves([]))
+        ajuste_poner("srvpm:" + plid, meta_local(plid))
+    return sync_una(plid, sid)
+
+# Portada propia de una playlist. `srvpc:<id>` recuerda el tamaño de la última portada
+# sincronizada: si la mía difiere y soy la dueña, subo la mía; si la del servidor difiere, la
+# bajo (así un cambio en otro equipo llega también a quien ya tenía una). Si cambiaron las dos
+# gana la de la dueña. `remota` es el resumen del servidor (hasCover, coverSize, owner).
+fn void sync_portada(string plid, string sid, Json remota):
+    if plid == "" or remota == null:
+        return
+    List<Json> f = await sqlite.query("select cover_path from playlists where id = ?", plid)
+    if len(f) == 0:
+        return
+    string rel = jstr(f[0]["cover_path"], "")
+    string abs = rel == "" ? "" : os.path_join(biblioteca_raiz(), rel)
+    bool tengo = abs != "" and os.is_file(abs)
+    bool hay = remota["hasCover"] == true
+    string marca = ajuste("srvpc:" + plid, "")
+    bool cambio_local = tengo and str(os.file_size(abs)) != marca
+    bool cambio_remoto = hay and str(jint(remota["coverSize"], 0)) != marca
+    bool duena = jstr(remota["owner"], "") == ajuste("server_user", "")
+    Dict<string, string> cab = { "Authorization": "Bearer " + ajuste("server_token", "") }
+    try:
+        if cambio_local and duena:
+            Json u = await http.put(srv_base() + "/playlists/" + sid + "/cover", { "k": "1" }, cab, { "files": { "cover": abs }, "timeout_ms": 60000 })
+            if jint(u["status"], 0) < 300:
+                ajuste_poner("srvpc:" + plid, str(os.file_size(abs)))
+        elif cambio_remoto:
+            string destino = os.path_join(covers_dir(), "playlist-" + plid + ".jpg")
+            Json d = await http.get(srv_base() + "/playlists/" + sid + "/cover", cab, { "save_to": destino, "timeout_ms": 60000 })
+            if jint(d["status"], 0) == 200 and os.file_size(destino) > 100:
+                await sqlite.exec("update playlists set cover_path = ?, updated_at = unixepoch() where id = ?", "covers/playlist-" + plid + ".jpg", plid)
+                ajuste_poner("srvpc:" + plid, str(os.file_size(destino)))
+                tocar_playlists()
+            elif os.is_file(destino):
+                os.remove_file(destino)
+    catch e:
+        state.set("srv_caido", "1", 30000)
+
+# Historial de escucha compartido entre mis equipos (es lo que alimenta Inicio): subo lo
+# nuevo mío y bajo lo nuevo de los demás equipos, casando las pistas por identidad.
+fn void sync_historial():
+    if not srv_activo():
+        return
+    # srvplays_up2: con el tiempo escuchado; se reenvían las últimas 6 h porque una escucha
+    # en curso sigue sumando ms después de subirla
+    string subido = ajuste("srvplays_up2", "0")
+    int desde = int(subido) - 21600
+    if desde < 0:
+        desde = 0
+    List<Json> mias = await sqlite.query("""
+        select t.id, t.title_norm, t.artist_norm, t.duration_ms, h.played_at, h.completed, h.ms_played
+        from play_history h join tracks t on t.id = h.track_id
+        where h.played_at > ? and h.id not like 'srv:%' order by h.played_at limit 500""", desde)
+    if len(mias) > 0:
+        List<Json> items = []
+        for int i in range(0, len(mias)):
+            items.add({ "id": mias[i]["id"], "titleNorm": mias[i]["title_norm"], "artistNorm": mias[i]["artist_norm"],
+                        "durationMs": mias[i]["duration_ms"], "playedAt": mias[i]["played_at"], "completed": jint(mias[i]["completed"], 0) == 1,
+                        "msPlayed": jint(mias[i]["ms_played"], 0) })
+        Json? u = srv("POST", "/plays", { "items": items }, 20000)
+        if u != null and u["status"] == 200:
+            ajuste_poner("srvplays_up2", str(jint(mias[len(mias) - 1]["played_at"], 0)))
+    string bajado = ajuste("srvplays_down2", "0")
+    Json? r = srv("GET", "/plays?since=" + bajado, null, 20000)
+    if r == null or r["status"] != 200:
+        return
+    List<Json> filas = jlist(r["body"])
+    int ultimo = int(bajado)
+    for int i in range(0, len(filas)):
+        int cuando = jint(filas[i]["playedAt"], 0)
+        if cuando > ultimo:
+            ultimo = cuando
+        string tid = ""
+        if len(await sqlite.query("select 1 from tracks where id = ?", jstr(filas[i]["id"], ""))) > 0:
+            tid = jstr(filas[i]["id"], "")
+        else:
+            tid = equivalente_local(jstr(filas[i]["titleNorm"], ""), jstr(filas[i]["artistNorm"], ""), jint(filas[i]["durationMs"], 0), "", false)
+        if tid == "":
+            continue
+        if len(await sqlite.query("select 1 from play_history where track_id = ? and played_at = ?", tid, cuando)) > 0:
+            await sqlite.exec("update play_history set ms_played = max(ms_played, ?) where track_id = ? and played_at = ?", jint(filas[i]["msPlayed"], 0), tid, cuando)
+            continue
+        await sqlite.exec("insert or ignore into play_history(id, track_id, played_at, ms_played, completed) values(?, ?, ?, ?, ?)",
+            "srv:" + tid + ":" + str(cuando), tid, cuando, jint(filas[i]["msPlayed"], 0), filas[i]["completed"] == true ? 1 : 0)
+    ajuste_poner("srvplays_down2", str(ultimo))
+
+# Pasa por todas mis playlists. Barato cuando no hay cambios (sin peticiones por playlist).
+fn void srv_reconciliar():
+    if not srv_activo():
+        return
+    string yo = ajuste("server_user", "")
+    Json? tl = srv("GET", "/playlist-tombstones")
+    Json? ps = srv("GET", "/playlists")
+    if tl == null or ps == null or tl["status"] != 200 or ps["status"] != 200:
+        return
+    List<Json> borradas = jlist(tl["body"])
+    Dict<string, Json> remotas = {}
+    List<Json> lista = jlist(ps["body"])
+    for int i in range(0, len(lista)):
+        remotas[str(lista[i]["id"])] = lista[i]
+    # 1) mis playlists locales
+    List<Json> locales = await sqlite.query("select id, name from playlists")
+    List<string> enlazadas = []
+    for int i in range(0, len(locales)):
+        string plid = jstr(locales[i]["id"], "")
+        string sid = ajuste("srvpl:" + plid, "")
+        if sid == "":
+            # ¿ya hay una mía con el mismo nombre sin enlazar (de otro equipo)? se enlaza, no se duplica
+            for int j in range(0, len(lista)):
+                if sid == "" and jstr(lista[j]["owner"], "") == yo and local_de(str(lista[j]["id"])) == "" and normalizar(jstr(lista[j]["name"], "")) == normalizar(jstr(locales[i]["name"], "")) and not enlazadas.contains(str(lista[j]["id"])):
+                    sid = str(lista[j]["id"])
+                    ajuste_poner("srvpl:" + plid, sid)
+            if sid == "":
+                sid = crear_en_servidor(plid)
+                if sid == "":
+                    continue
+                enlazadas.add(sid)
+                sync_portada(plid, sid, { "hasCover": false, "owner": yo })
+                continue
+            enlazadas.add(sid)
+            sync_una(plid, sid)
+            sync_portada(plid, sid, remotas[sid])
+            continue
+        enlazadas.add(sid)
+        if borradas.contains(int(sid)):
+            # borrada en otro equipo (o por su dueña): se borra aquí también
+            await sqlite.exec("delete from playlists where id = ?", plid)
+            olvidar_playlist(plid)
+            tocar_playlists()
+            continue
+        if remotas[sid] == null:
+            # el servidor la perdió sin haberla borrado nadie: se vuelve a subir
+            ajuste_poner("srvpl:" + plid, "")
+            string nuevo = crear_en_servidor(plid)
+            if nuevo == "":
+                olvidar_playlist(plid)
+            continue
+        # ¿algo cambió? (yo: canciones o nombre; el servidor: updatedAt)
+        bool cambio = hash_claves(pistas_locales_de(plid)) != ajuste("srvph:" + plid, "") or meta_local(plid) != ajuste("srvpm:" + plid, "") or str(jint(remotas[sid]["updatedAt"], 0)) != ajuste("srvpu:" + plid, "")
+        if cambio:
+            sync_una(plid, sid)
+        sync_portada(plid, sid, remotas[sid])
+    # 2) enlaces cuya playlist local ya no existe: se borró aquí -> fuera del servidor
+    List<Json> enlaces = await sqlite.query("select key, value from settings where key like 'srvpl:%'")
+    for int i in range(0, len(enlaces)):
+        string plid = jstr(enlaces[i]["key"], "").slice(6)
+        List<Json> existe = await sqlite.query("select 1 from playlists where id = ?", plid)
+        if len(existe) == 0:
+            string sid = jstr(enlaces[i]["value"], "")
+            if remotas[sid] != null:
+                if jstr(remotas[sid]["owner"], "") == yo:
+                    srv("DELETE", "/playlists/" + sid)
+                else:
+                    srv("DELETE", "/playlists/" + sid + "/members/" + http.url_encode(yo))
+            olvidar_playlist(plid)
+    # 3) las mías y las conjuntas a las que me invitaron que este equipo aún no tiene: se traen.
+    # (La lista del servidor solo trae las mías y aquellas en las que soy miembro.) Si no
+    # la quiero, la borro aquí y con eso salgo de ella.
+    for int i in range(0, len(lista)):
+        string sid = str(lista[i]["id"])
+        if not enlazadas.contains(sid) and not borradas.contains(int(sid)) and local_de(sid) == "":
+            importar_playlist(sid)
+            sync_portada(local_de(sid), sid, lista[i])
+    # 4) historial de escucha, como mucho cada 5 minutos
+    if state.incr("srv_hist", 1, 300000) == 1:
+        sync_historial()
+
+# "Descargar de la nube": ver el comentario de server_pull. También lo llama el reloj
+# (events.lux) cada pocos minutos: lo que se añade en un equipo aparece solo en el otro.
+fn Json traer_nube():
+    Json? r = srv("GET", "/library", null, 20000)
+    if r == null or r["status"] != 200:
+        return srv_fallo(r)
+    List<Json> items = jlist(r["body"])
+    int ya_tenia = 0
+    int creadas = 0
+    int encoladas = 0
+    int favoritas = 0
+    for int i in range(0, len(items)):
+        PistaCatalogo p = srv_pista(items[i])
+        string tn = jstr(items[i]["titleNorm"], "")
+        if tn == "":
+            tn = normalizar(p.title)
+        string an = jstr(items[i]["artistNorm"], "")
+        if an == "":
+            an = normalizar(jstr(items[i]["artist"], ""))
+        int dur = jint(items[i]["durationMs"], 0)
+        # 1) ¿ya tengo el audio? (misma id, o la misma canción con otra)
+        string tid = ""
+        List<Json> propio = await sqlite.query("select 1 from audio_files where track_id = ?", p.id)
+        if len(propio) > 0:
+            tid = p.id
+        else:
+            tid = equivalente_local(tn, an, dur, "", true)
+        if tid != "":
+            ya_tenia = ya_tenia + 1
+        else:
+            # 2) no hay audio: la pista local si existe (sin descargar) o una nueva
+            List<Json> existe = await sqlite.query("select 1 from tracks where id = ?", p.id)
+            if len(existe) > 0:
+                tid = p.id
+            else:
+                tid = equivalente_local(tn, an, dur, "", false)
+            if tid == "":
+                guardar_pista(p)
+                tid = p.id
+                creadas = creadas + 1
+            asegurar_descarga(tid, "prefetch")
+            encoladas = encoladas + 1
+        if jget(items[i], "favorite") == true:
+            int antes = len(await sqlite.query("select 1 from favorites where track_id = ?", tid))
+            await sqlite.exec("insert or ignore into favorites(track_id) values(?)", tid)
+            if antes == 0:
+                favoritas = favoritas + 1
+    # playlists: mis cambios suben, lo que hay en la nube baja (equipos nuevos incluidos)
+    int antes_listas = len(await sqlite.query("select 1 from playlists"))
+    srv_reconciliar()
+    int listas = len(await sqlite.query("select 1 from playlists")) - antes_listas
+    sync_historial()
+    tocar_biblioteca()
+    tocar_playlists()
+    return { "total": len(items), "alreadyHad": ya_tenia, "created": creadas, "queued": encoladas,
+             "favorites": favoritas, "playlists": listas }

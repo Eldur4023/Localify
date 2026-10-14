@@ -264,3 +264,18 @@
 @keyframes barra-sube {
   from { transform: translateY(100%); }
 }
+
+/* Social en el móvil: las rejillas de la pestaña Playlists bajan en vertical (2 columnas) */
+@media (max-width: 700px) {
+  .perfil__rejilla.perfil__rejilla--ancha {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-inline: 0;
+    padding-inline: 0;
+    overflow: visible;
+  }
+  .perfil__rejilla--ancha > .perfil__lista { flex: initial; }
+  .social__rejilla { grid-template-columns: minmax(0, 1fr); }
+  .perfil__nombre-input { text-align: center; font-size: 26px; }
+  .perfil__bio-input { text-align: center; }
+}

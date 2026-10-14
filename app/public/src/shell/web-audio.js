@@ -21,7 +21,7 @@
  */
 
 import { alRecibir } from "../ipc/events.js";
-import { player } from "../ipc/client.js";
+import { player, social } from "../ipc/client.js";
 
 /** Arranca el shim si hace falta. Lo llama main.js tras montar la UI. */
 export async function arrancarAudioWeb() {
@@ -115,6 +115,8 @@ export async function arrancarAudioWeb() {
 	}
 
 	// ── Servicio en primer plano: proceso vivo mientras suena ──
+	// Con la reproducción sincronizada activa también se arranca al abrir la app: si no, el móvil
+	// en segundo plano sin sonar se quedaba sin red y no seguía al otro equipo.
 	const sostenerProceso = (sonando) => {
 		try {
 			if (sonando) puente?.startPlayback?.();
@@ -125,6 +127,7 @@ export async function arrancarAudioWeb() {
 		}
 	};
 
+	void social.status().then((s) => { if (s.sync) sostenerProceso(true); }).catch(() => {});
 	alRecibir((ev) => {
 		switch (ev.type) {
 			case "trackChanged": {
@@ -148,6 +151,22 @@ export async function arrancarAudioWeb() {
 				}
 				break;
 			}
+			case "downloadCompleted": {
+				// la pista sonando llegó después de fijar el src (404 → el <audio> queda muerto): se
+				// recarga; la posición la corrige la sincronización (deriva) si está activa
+				if (ev.trackId !== pistaActual) break;
+				audio.src = `/audio/${encodeURIComponent(pistaActual)}`;
+				if (quererSonar) void audio.play().catch(() => {});
+				break;
+			}
+			case "remoteSeek": {
+				// otro equipo movió la reproducción: si el <audio> aún no tiene la pista cargada,
+				// el salto espera a los metadatos
+				const s = Math.max(0, ev.positionMs / 1000);
+				if (audio.readyState >= 1) audio.currentTime = s;
+				else audio.addEventListener("loadedmetadata", () => { audio.currentTime = s; }, { once: true });
+				break;
+			}
 			case "volumeChanged": {
 				audio.volume = Math.min(1, Math.max(0, ev.volume ?? 1));
 				break;
@@ -168,9 +187,8 @@ export async function arrancarAudioWeb() {
 		const ms = estado.positionMs ?? 0;
 		if (ms > 0) audio.addEventListener("loadedmetadata", () => { audio.currentTime = ms / 1000; }, { once: true });
 		void ponerMetadata(id);
-		// Una app recién abierta no empieza a sonar sola: lo que quedó "sonando"
-		// al cerrarla se retoma en pausa, en su posición.
-		if (estado.status === "playing") void player.pause();
+		// (una app recién abierta no empieza a sonar sola: el backend pasa a pausa lo que quedó
+		// "sonando" al arrancar, ver events.lux)
 	}).catch(() => {});
 
 	// ── fin de pista y posición → backend ──

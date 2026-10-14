@@ -1,0 +1,305 @@
+# serverify_cmd.lux — Comandos de la interfaz (server_* ajustes y sesión, social_* usuarios,
+# playlists y sincronización) y proxy de imágenes del servidor.
+
+# ─── Comandos (server_* ajustes/sesión, social_* usuarios y playlists) ───────
+
+fn Json sesion_guardada(Json? r):
+    if r == null or (r["status"] != 200 and r["status"] != 201):
+        if r != null and r["status"] == 409:
+            return error_api("USERNAME_TAKEN", "error.username_taken").status(409)
+        if r != null and (r["status"] == 401 or r["status"] == 400 or r["status"] == 429):
+            return error_api("SERVER_AUTH", "error.server_auth_" + str(r["status"])).status(r["status"])
+        return srv_fallo(r)
+    # server_cuenta sobrevive al cierre de sesión: volver a entrar con el mismo usuario conserva
+    # los enlaces; entrar con otro (u otro servidor) los descarta
+    if ajuste("server_cuenta", "") != jstr(r["body"]["user"]["username"], ""):
+        olvidar_enlaces()
+    ajuste_poner("server_cuenta", jstr(r["body"]["user"]["username"], ""))
+    ajuste_poner("server_token", jstr(r["body"]["token"], ""))
+    ajuste_poner("server_user", jstr(r["body"]["user"]["username"], ""))
+    state.remove("srv_caido")
+    return r["body"]["user"]
+
+fn Json cmd_social(string cmd, Json args):
+    if cmd == "server_status":
+        bool alcanzable = false
+        if ajuste("server_host", "") != "":
+            try:
+                Json i = await http.get(srv_base() + "/info", null, { "timeout_ms": 3000 })
+                alcanzable = jint(i["status"], 0) == 200
+            catch e:
+                alcanzable = false
+        if alcanzable:
+            state.remove("srv_caido")
+        return {
+            "host": ajuste("server_host", ""), "port": int(ajuste("server_port", "8787")),
+            "reachable": alcanzable, "loggedIn": ajuste("server_token", "") != "",
+            "username": ajuste("server_user", ""), "upload": ajuste("server_upload", "1") == "1",
+            "presence": ajuste("server_presence", "1") == "1",
+            "sync": ajuste("sync_playback", "0") == "1", "syncMode": ajuste("sync_modo", "both")
+        }
+    if cmd == "server_connect":
+        string host = arg_str(args, "host", "").trim()
+        int puerto = jint(jget(args, "port"), 8787)
+        if host == "" or puerto < 1 or puerto > 65535 or host.contains("/") or host.contains(" "):
+            return error_api("INVALID", "error.invalid").status(400)
+        if host != ajuste("server_host", "") or str(puerto) != ajuste("server_port", "8787"):
+            ajuste_poner("server_token", "")
+            ajuste_poner("server_user", "")
+            olvidar_enlaces()
+            ajuste_poner("server_cuenta", "")
+        ajuste_poner("server_host", host)
+        ajuste_poner("server_port", str(puerto))
+        state.remove("srv_caido")
+        return await cmd_social("server_status", {})
+    if cmd == "server_disconnect":
+        ajuste_poner("server_host", "")
+        ajuste_poner("server_token", "")
+        ajuste_poner("server_user", "")
+        return null
+    if cmd == "server_logout":
+        ajuste_poner("server_token", "")
+        ajuste_poner("server_user", "")
+        return null
+    if cmd == "server_set_upload":
+        ajuste_poner("server_upload", jget(args, "enabled") == true ? "1" : "0")
+        return null
+    if cmd == "server_set_presence":
+        ajuste_poner("server_presence", jget(args, "enabled") == true ? "1" : "0")
+        if jget(args, "enabled") != true and srv_sesion():
+            srv("PUT", "/presence", { "title": "", "artist": "" })
+        return null
+    # "Escuchando ahora": en silencio si no hay sesión o el usuario lo apagó
+    if cmd == "social_presence":
+        if not srv_sesion() or ajuste("server_presence", "1") != "1":
+            return null
+        srv("PUT", "/presence", { "title": arg_str(args, "title", ""), "artist": arg_str(args, "artist", "") })
+        return null
+    # Reproducción sincronizada (sync.lux): ajustes de este equipo + lista de equipos del usuario
+    if cmd == "social_sync_status":
+        Json? r = srv("GET", "/devices")
+        List<Json> equipos = r != null and r["status"] == 200 ? jlist(r["body"]) : []
+        return { "enabled": ajuste("sync_playback", "0") == "1", "mode": ajuste("sync_modo", "both"),
+                 "deviceId": sync_dispositivo(), "devices": equipos }
+    if cmd == "social_sync_set":
+        if jget(args, "enabled") != null:
+            bool activar = jget(args, "enabled") == true
+            ajuste_poner("sync_playback", activar ? "1" : "0")
+            # al (des)activar se parte de cero: el primer aviso del servidor solo engancha si suena
+            state.remove("sync_rev")
+            state.remove("sync_salida")
+            if activar and srv_sesion():
+                srv("PUT", "/devices", { "deviceId": sync_dispositivo(), "name": sync_nombre(), "platform": en_movil() ? "android" : "desktop" })
+        string modo = arg_str(args, "mode", "")
+        if modo == "both" or modo == "here":
+            ajuste_poner("sync_modo", modo)
+        return null
+    if cmd == "social_device_remove":
+        string dev = arg_str(args, "deviceId", "")
+        if dev == "" or dev == sync_dispositivo():
+            return error_api("INVALID", "error.invalid").status(400)
+        Json? r = srv("DELETE", "/devices/" + http.url_encode(dev))
+        return r != null and r["status"] < 300 ? null : srv_fallo(r)
+    if cmd == "server_login" or cmd == "server_register":
+        if ajuste("server_host", "") == "":
+            return error_api("SERVER_NOT_CONFIGURED", "error.server_not_configured").status(400)
+        Dict<string, Json> cuerpo = { "username": arg_str(args, "username", ""), "password": arg_str(args, "password", "") }
+        if cmd == "server_register":
+            cuerpo["displayName"] = arg_str(args, "displayName", "")
+        Dict<string, string> sin = {}
+        Json r = null
+        try:
+            Json h = await http.post(srv_base() + (cmd == "server_login" ? "/login" : "/register"), cuerpo, sin, { "timeout_ms": 15000 })
+            r = { "status": jint(h["status"], 0), "body": h["body"] }
+        catch e:
+            r = null
+        return sesion_guardada(r)
+
+    # a partir de aquí hace falta sesión
+    if not srv_sesion():
+        return error_api("SERVER_AUTH", "error.server_auth").status(401)
+
+    # Aporta mi biblioteca descargada: lotes de 20 pistas por llamada (la UI repite
+    # hasta done). Lo que el servidor ya tiene (por identidad) no se vuelve a subir.
+    if cmd == "server_sync_library":
+        int desde = jint(jget(args, "offset"), 0)
+        List<Json> filas = await sqlite.query("""
+            select t.id, t.title, t.artist_display as artist, coalesce(al.title, '') as album, t.duration_ms,
+                   t.title_norm, t.artist_norm, af.rel_path, af.format,
+                   (select count(*) from favorites fv where fv.track_id = t.id) as fav
+            from audio_files af join tracks t on t.id = af.track_id left join albums al on al.id = t.album_id
+            order by t.id limit 20 offset ?""", desde)
+        List<Json> items = []
+        for int i in range(0, len(filas)):
+            items.add({ "id": filas[i]["id"], "titleNorm": filas[i]["title_norm"], "artistNorm": filas[i]["artist_norm"],
+                        "durationMs": filas[i]["duration_ms"], "favorite": jint(filas[i]["fav"], 0) > 0 })
+        int ya_estaban = 0
+        int subidas = 0
+        int fallidas = 0
+        if len(items) > 0:
+            Json? r = srv("POST", "/tracks/match", { "items": items })
+            if r == null or r["status"] != 200:
+                return srv_fallo(r)
+            List<Json> res = jlist(r["body"])
+            for int i in range(0, len(filas)):
+                if jstr(res[i]["serverId"], "") != "":
+                    ya_estaban = ya_estaban + 1
+                    continue
+                string ruta = ruta_audio_abs(jstr(filas[i]["rel_path"], ""))
+                if os.is_file(ruta) and srv_poner(jstr(filas[i]["id"], ""), ruta, jstr(filas[i]["format"], "opus"), jstr(filas[i]["title"], ""),
+                                                   jstr(filas[i]["artist"], ""), jstr(filas[i]["album"], ""), jint(filas[i]["duration_ms"], 0)):
+                    subidas = subidas + 1
+                else:
+                    fallidas = fallidas + 1
+            # todo lo que el servidor ya tiene (lo que estaba y lo recién subido) pasa a ser mi nube
+            srv("PUT", "/library", { "items": items })
+        return { "done": len(filas) < 20, "next": desde + 20, "alreadyThere": ya_estaban, "uploaded": subidas, "failed": fallidas }
+
+    # "Descargar de la nube": trae lo que tengo guardado en el servidor (biblioteca,
+    # favoritos y mis playlists) a este equipo. NUNCA baja lo que ya tengo: una pista
+    # cuenta como tenida si hay audio en disco de esa misma canción (por id o por
+    # título + artista + duración), aunque tenga otro id. Solo se encolan las que faltan;
+    # la cola de descargas normal las trae (del servidor, que las tiene).
+    if cmd == "server_pull":
+        return traer_nube()
+
+    # Invitaciones pendientes: lo que me han ofrecido y aún no he aceptado
+    if cmd == "social_invitations":
+        Json? r = srv("GET", "/invitations")
+        return r != null and r["status"] == 200 ? r["body"] : srv_fallo(r)
+    # Acepto: la playlist entra en mi biblioteca y se sincroniza como cualquier otra
+    if cmd == "social_accept":
+        string sid = arg_str(args, "id", "")
+        Json? r = srv("POST", "/playlists/" + sid + "/accept")
+        if r == null or r["status"] != 204:
+            return srv_fallo(r)
+        return importar_playlist(sid)
+    # Rechazo: la invitación desaparece; la playlist no entra en mi biblioteca
+    if cmd == "social_decline":
+        Json? r = srv("DELETE", "/playlists/" + arg_str(args, "id", "") + "/invitation")
+        return r != null and r["status"] < 300 ? null : srv_fallo(r)
+    if cmd == "social_update_me":
+        Json? r = srv("PUT", "/me", { "displayName": arg_str(args, "displayName", ""), "bio": arg_str(args, "bio", "") })
+        return r != null and r["status"] == 200 ? r["body"] : srv_fallo(r)
+    if cmd == "social_users":
+        Json? r = srv("GET", "/users")
+        return r != null and r["status"] == 200 ? r["body"] : srv_fallo(r)
+    if cmd == "social_user":
+        Json? r = srv("GET", "/users/" + http.url_encode(arg_str(args, "username", "")))
+        return r != null and r["status"] == 200 ? r["body"] : srv_fallo(r)
+    if cmd == "social_playlists":
+        Json? r = srv("GET", "/playlists")
+        if r == null or r["status"] != 200:
+            return srv_fallo(r)
+        List<Json> out = []
+        List<Json> ls = jlist(r["body"])
+        for int i in range(0, len(ls)):
+            Json p = ls[i]
+            p["localId"] = local_de(str(p["id"]))
+            out.add(p)
+        return out
+    if cmd == "social_playlist":
+        string sid = arg_str(args, "id", "")
+        Json? r = srv("GET", "/playlists/" + sid)
+        if r == null or r["status"] != 200:
+            return srv_fallo(r)
+        Json p = r["body"]
+        p["localId"] = local_de(sid)
+        return p
+    # Compartir = cambiar la visibilidad / colaboración de una playlist (que ya vive en el servidor)
+    if cmd == "social_publish" or cmd == "social_unpublish":
+        string plid = arg_str(args, "playlistId", "")
+        List<Json> pl = await sqlite.query("select name, coalesce(description, '') as d from playlists where id = ?", plid)
+        if len(pl) == 0:
+            return error_api("NOT_FOUND", "error.not_found").status(404)
+        bool publica = cmd == "social_publish"
+        string vis = publica ? arg_str(args, "visibility", "private") : "private"
+        bool colab = false
+        string sid = ajuste("srvpl:" + plid, "")
+        if sid == "":
+            sid = crear_en_servidor(plid, vis, colab)
+            if sid == "":
+                return srv_fallo(null)
+            return { "localId": plid, "serverId": sid }
+        sync_una(plid, sid)
+        Json? r = srv("PUT", "/playlists/" + sid, { "name": jstr(pl[0]["name"], ""), "description": jstr(pl[0]["d"], ""),
+            "visibility": vis, "collaborative": colab })
+        if r == null or r["status"] >= 300:
+            return srv_fallo(r)
+        return { "localId": plid, "serverId": sid }
+    # Asegura que la playlist local vive en el servidor y devuelve su ficha (miembros, visibilidad)
+    if cmd == "social_ensure":
+        string plid = arg_str(args, "playlistId", "")
+        string sid = ajuste("srvpl:" + plid, "")
+        if sid == "":
+            sid = crear_en_servidor(plid)
+            if sid == "":
+                return srv_fallo(null)
+        Json? r = srv("GET", "/playlists/" + sid)
+        if r == null or r["status"] != 200:
+            return srv_fallo(r)
+        Json p = r["body"]
+        p["localId"] = plid
+        return p
+    if cmd == "social_sync":
+        string plid = arg_str(args, "playlistId", "")
+        string sid = ajuste("srvpl:" + plid, "")
+        if sid == "":
+            return error_api("NOT_FOUND", "error.not_found").status(404)
+        return sync_una(plid, sid)
+    # traer a mi biblioteca una playlist del servidor (de otra persona, compartida o pública)
+    if cmd == "social_import":
+        Json r = importar_playlist(arg_str(args, "id", ""))
+        # primera pista local: para poder sonar la playlist sin recargar la vista
+        if r != null and jstr(r["localId"], "") != "":
+            List<Json> p0 = await sqlite.query("select track_id from playlist_items where playlist_id = ? order by position asc limit 1", r["localId"])
+            if len(p0) > 0:
+                r["firstTrackId"] = p0[0]["track_id"]
+        return r
+    if cmd == "social_add_member":
+        Json? r = srv("POST", "/playlists/" + arg_str(args, "id", "") + "/members", { "username": arg_str(args, "username", "") })
+        if r != null and r["status"] == 404:
+            return error_api("USER_NOT_FOUND", "error.user_not_found").status(404)
+        return r != null and r["status"] < 300 ? null : srv_fallo(r)
+    if cmd == "social_remove_member":
+        Json? r = srv("DELETE", "/playlists/" + arg_str(args, "id", "") + "/members/" + http.url_encode(arg_str(args, "username", "")))
+        return r != null and r["status"] < 300 ? null : srv_fallo(r)
+    return error_api("UNKNOWN_COMMAND", "error.unknown_command").status(404)
+
+# ─── Imágenes del servidor (avatares, portadas de playlists ajenas) ──────────
+# El WebView no puede mandar el token del servidor en un <img>: se baja aquí y se sirve.
+
+get endpoint("/api/social/img/:kind/:id", string kind, string id):
+    if not srv_sesion() or (kind != "avatar" and kind != "playlist") or id.contains("/") or id.contains(".."):
+        return status(404)
+    string ruta = kind == "avatar" ? "/users/" + http.url_encode(id) + "/avatar" : "/playlists/" + id + "/cover"
+    string destino = os.path_join(covers_dir(), "srv-" + kind + "-" + id.replace("%", "_") + ".jpg")
+    Dict<string, string> cab = { "Authorization": "Bearer " + ajuste("server_token", "") }
+    try:
+        Json r = await http.get(srv_base() + ruta, cab, { "save_to": destino, "timeout_ms": 20000 })
+        if jint(r["status"], 0) != 200 or os.file_size(destino) < 100:
+            return status(404)
+    catch e:
+        if not os.is_file(destino):
+            return status(404)
+    header("Content-Type", "image/jpeg")
+    return send_file(destino, covers_dir())
+
+# Mi foto de perfil: el frontend la sube aquí y se reenvía al servidor.
+post endpoint("/api/social/avatar", File imagen):
+    if not srv_sesion():
+        return status(401)
+    string d = covers_dir()
+    string nombre = imagen.save(d)
+    if nombre == "":
+        return status(500)
+    string origen = os.path_join(d, nombre)
+    Dict<string, string> cab = { "Authorization": "Bearer " + ajuste("server_token", "") }
+    int estado = 0
+    try:
+        Json u = await http.put(srv_base() + "/me/avatar", { "k": "1" }, cab, { "files": { "avatar": origen }, "timeout_ms": 60000 })
+        estado = jint(u["status"], 0)
+    catch e:
+        estado = 0
+    os.remove_file(origen)
+    return estado < 300 and estado > 0 ? { "ok": true } : status(502)

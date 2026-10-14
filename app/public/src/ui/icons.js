@@ -29,6 +29,11 @@ const TRAZOS = {
 	// El indicador de "ya está en disco": la nube clásica con la flecha, para
 	// que se distinga de un botón de acción como "download" de arriba.
 	"cloud-download": "M19.35 10.04A7.49 7.49 0 0 0 12 4a7.49 7.99 0 0 0-7.35 6.04A5.5 5.5 0 0 0 6.5 20H19a5 5 0 0 0 .35-9.96ZM17 13l-5 5-5-5h3V9h4v4h3Z",
+	refresh: "M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35Z",
+	monitor: "M21 2H3a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h7v2H8v2h8v-2h-2v-2h7a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2Zm0 14H3V4h18v12Z",
+	smartphone: "M17 1H7a2 2 0 0 0-2 2v18a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2Zm0 18H7V5h10v14Z",
+	camera: "M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7ZM9 2 7.2 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-3.2L15 2H9Z",
+	trash: "M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12ZM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4Z",
 	alert: "M12 2 1 21h22L12 2Zm1 15h-2v-2h2v2Zm0-4h-2V9h2v4Z",
 	music: "M12 3v10.6A4 4 0 1 0 14 17V7h4V3h-6Z",
 	expand: "M4 4h7v2H6v5H4V4Zm9 0h7v7h-2V6h-5V4ZM4 13h2v5h5v2H4v-7Zm14 0h2v7h-7v-2h5v-5Z",

@@ -23,6 +23,11 @@ on start:
     # La salida solo se reabre si hay una elegida: la predeterminada ya está.
     string salida = jstr(jget(jget(ajustes_estructurados(), "audio"), "outputDeviceId"), "")
     motor_aplicar_ajustes(salida != "")
+    # Una app recién abierta no empieza a sonar sola: lo que quedó "sonando" al cerrarla se retoma
+    # en pausa, en su posición. Aquí y no en la interfaz: va ANTES de cualquier sincronización con
+    # otro equipo (si la interfaz lo pausaba después, pisaba el "sonando" que acababa de llegar).
+    if en_movil() and leer_estado().status == "playing":
+        mutar_estado("pause", "", "", -1)
 
 # ─── Tareas de fondo ─────────────────────────────────────────────────────────
 
@@ -47,6 +52,10 @@ every "1s":
 every "1m":
     recomendaciones_tick()
     sondeo_artistas_tick()
+
+# Reproducción sincronizada entre equipos (sync.lux): envía lo pendiente y pregunta cada segundo.
+every "500ms":
+    sync_tick()
 
 # La búsqueda remota pendiente (la escribe /api/invoke, la corre esto).
 every "300ms":
@@ -104,6 +113,7 @@ fn Json construir_snapshot():
         "playlistChangeKind": s_pl_kind,
         "settingsStamp": s_aj,
         "statsStamp": state.get("stamp_stats", ""),
+        "syncSeek": state.get("sync_seek", ""),
         "downloads": descargas_activas(),
         "remoteReady": ready,
         "estado": estado_dto()

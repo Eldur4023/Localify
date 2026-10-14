@@ -1,0 +1,258 @@
+# sync.lux — Reproducción sincronizada entre los equipos de un mismo usuario (PC ↔ móvil).
+#
+# Opcional (ajuste sync_playback, desde el perfil de Social) y sobre el servidor común. Cada
+# orden del reproductor publica "qué suena" (pista + ventana de cola + posición + play/pausa)
+# en PUT /playback; cada equipo pregunta cada segundo (GET /playback?since=) y, si el cambio
+# viene de otro equipo, lo aplica. Lo aplicado entra por reproductor_orden() marcado con
+# __remote, que NO se vuelve a publicar: así no hay rebotes.
+#
+# Una canción se reconoce entre equipos por id o, si no, por título + artista normalizados y
+# duración compatible (equivalente_local). Si el equipo no la tiene se crea la pista y se
+# descarga como siempre (servidor primero, yt-dlp después).
+#
+# Ajustes: sync_playback ("1" = activa), sync_modo ("both" = sonar en ambos, "here" = solo
+# suena donde se toca; aquí solo se sigue el estado en pausa), sync_device (id de este equipo).
+
+# ─── Identidad de este equipo ────────────────────────────────────────────────
+
+fn string sync_dispositivo():
+    string d = ajuste("sync_device", "")
+    if d == "":
+        d = nuevo_id()
+        ajuste_poner("sync_device", d)
+    return d
+
+fn string sync_nombre():
+    string n = ajuste("sync_nombre", "")
+    if n != "":
+        return n
+    if en_movil():
+        return "Móvil"
+    n = os.getenv("HOSTNAME", "")
+    if n == "":
+        n = os.getenv("HOST", "")
+    return n == "" ? "PC" : n
+
+fn bool sync_activo():
+    return srv_sesion() and ajuste("sync_playback", "0") == "1"
+
+# ─── Pistas ↔ identidades ────────────────────────────────────────────────────
+
+fn Json? sync_pista(string tid):
+    List<Json> f = await sqlite.query("""
+        select t.id, t.title, t.title_norm, t.artist_display, t.artist_norm, t.duration_ms,
+               (select al.title from albums al where al.id = t.album_id) as album
+        from tracks t where t.id = ?""", tid)
+    if len(f) == 0:
+        return null
+    return { "id": jstr(f[0]["id"], ""), "title": jstr(f[0]["title"], ""), "artist": jstr(f[0]["artist_display"], ""),
+             "album": jstr(f[0]["album"], ""), "durationMs": jint(f[0]["duration_ms"], 0),
+             "titleNorm": jstr(f[0]["title_norm"], ""), "artistNorm": jstr(f[0]["artist_norm"], "") }
+
+fn string sync_clave(Json? t):
+    if t == null:
+        return ""
+    return jstr(t["titleNorm"], "") + "|" + jstr(t["artistNorm"], "")
+
+# Pista local que corresponde a la remota. `crear` = darla de alta si no se tiene (solo la que
+# va a sonar: crear toda la cola llenaría la biblioteca de canciones que nadie pidió).
+fn string sync_resolver(Json t, bool crear):
+    string id = jstr(t["id"], "")
+    if id != "":
+        List<Json> f = await sqlite.query("select id from tracks where id = ?", id)
+        if len(f) > 0:
+            return id
+    string eq = equivalente_local(jstr(t["titleNorm"], ""), jstr(t["artistNorm"], ""), jint(t["durationMs"], 0), "", false)
+    if eq != "" or not crear:
+        return eq
+    return guardar_pista(srv_pista(t))
+
+# ─── Deriva: el desfase queda acotado ────────────────────────────────────────
+
+# Referencia compartida: dónde TIENE que estar la canción ahora (la última posición publicada o
+# aplicada, más el tiempo transcurrido). Se anota al publicar y al aplicar.
+fn void sync_ancla(string tid, int pos, bool suena):
+    state.set("sync_ref", tid + "|" + str(pos) + "|" + str(int(time.now())) + "|" + (suena ? "1" : "0"))
+
+# `real` = dónde está de verdad la canción en este equipo (motor en el PC; informe del <audio> en
+# el móvil). Un salto deja el audio ~1-2 s por detrás (el búfer tarda en llenarse) y nada más lo
+# corregía: con 2 s de margen y 10 s entre correcciones queda acotado sin saltos en bucle.
+fn void sync_deriva(int real):
+    List<string> r = state.get("sync_ref", "").split("|")
+    if len(r) < 4 or r[3] != "1" or not sync_activo():
+        return
+    EstadoCola e = leer_estado()
+    if e.track_id != r[0] or e.status != "playing":
+        return
+    int esperado = int(r[1]) + (int(time.now()) - int(r[2]))
+    int dif = real > esperado ? real - esperado : esperado - real
+    if dif < 2000 or state.incr("sync_deriva", 1, 10000) != 1:
+        return
+    Json? pista = track_row_por_id(e.track_id)
+    if pista != null and jint(pista["durationMs"], 0) > 0 and esperado > jint(pista["durationMs"], 0):
+        return
+    reproductor_orden("seek", { "positionMs": esperado, "__remote": true })
+    sync_marcar_salto(esperado)
+
+# ─── Publicar (este equipo → servidor) ───────────────────────────────────────
+
+# Al final de reproductor_orden / del fin de pista del móvil. Solo deja la foto en `state`:
+# la manda sync_tick (cada 500 ms), para que un servidor lento no frene los controles.
+fn void sync_publicar(string orden, EstadoCola antes, EstadoCola despues):
+    if despues.track_id == "" or not sync_activo():
+        return
+    Json? t = sync_pista(despues.track_id)
+    if t == null:
+        return
+    # ventana de cola, en el orden en que sonará: primero la cola de usuario, luego el contexto
+    List<Json> cola = []
+    for int i in range(0, len(despues.user_queue)):
+        Json? q = sync_pista(despues.user_queue[i].trackId)
+        if q != null and len(cola) < 25:
+            cola.add(q)
+    for int k in range(despues.queue_index + 1, len(despues.context_queue)):
+        if len(cola) >= 25:
+            break
+        Json? q = sync_pista(pista_en_orden(despues, k))
+        if q != null:
+            cola.add(q)
+    int pos = despues.cue != antes.cue ? despues.position_ms : posicion_viva(despues)
+    # El fin de canción lo publican TODOS los equipos a la vez; el servidor se queda con el
+    # primero (kind "auto" + la pista que acabó), así no hace falta un "líder".
+    bool auto = orden == "ended"
+    # fin de cola (este equipo se paró): no se anuncia, el otro equipo puede tener más que sonar
+    if auto and despues.status != "playing":
+        return
+    Json cuerpo = {
+        "deviceId": sync_dispositivo(), "trackKey": sync_clave(t), "kind": auto ? "auto" : "set",
+        "after": auto ? sync_clave(sync_pista(antes.track_id)) : "",
+        "state": { "track": t, "queue": cola, "positionMs": pos, "playing": despues.status == "playing",
+                   "shuffle": despues.shuffle, "repeat": despues.repeat_mode }
+    }
+    state.set("sync_salida", str(cuerpo))
+    sync_ancla(despues.track_id, pos, despues.status == "playing")
+
+# ─── Aplicar (servidor → este equipo) ────────────────────────────────────────
+
+# Solo los indicadores: la ventana que llega ya está en el orden de reproducción del equipo
+# que la mandó, así que aquí no se vuelve a barajar (las dos colas no se separarían).
+fn void sync_poner_flags(bool shuffle, string repeat, bool ventana_nueva):
+    for int intento in range(0, 3):
+        EstadoCola e = leer_estado()
+        if e.shuffle == shuffle and e.repeat_mode == repeat and not ventana_nueva:
+            return
+        e.shuffle = shuffle
+        e.repeat_mode = repeat
+        if ventana_nueva:
+            e.play_order = []
+            e.queue_index = 0
+        if guardar_estado(e):
+            return
+
+# El móvil no tiene motor: su <audio> solo se entera de un salto remoto por este sello
+# (snapshot "syncSeek" → evento remoteSeek en transport.js).
+fn void sync_marcar_salto(int ms):
+    state.set("sync_seek", str(time.now()) + ":" + str(ms))
+
+fn void sync_aplicar(Json r, bool primera):
+    Json st = r["state"]
+    Json t = st["track"]
+    if t == null:
+        return
+    bool juega = st["playing"] == true
+    int dur = jint(t["durationMs"], 0)
+    int pos = jint(st["positionMs"], 0)
+    if juega:
+        pos = pos + jint(r["now"], 0) - jint(r["at"], 0)
+    # un "sonando" viejo (el otro equipo se cerró) no debe arrastrarnos a media nada
+    if juega and dur > 0 and pos > dur + 3000:
+        return
+    if dur > 0 and pos > dur:
+        pos = dur
+    # al arrancar solo se engancha uno que esté sonando de verdad
+    if primera and not juega:
+        return
+    bool suena = juega and ajuste("sync_modo", "both") != "here"
+    bool shuffle = st["shuffle"] == true
+    string repeat = jstr(st["repeat"], "off")
+    EstadoCola e = leer_estado()
+    Json? mia = sync_pista(e.track_id)
+    if sync_clave(mia) != sync_clave(t):
+        string tid = sync_resolver(t, true)
+        if tid == "":
+            return
+        List<string> ids = [tid]
+        List<Json> cola = jlist(st["queue"])
+        for int i in range(0, len(cola)):
+            string q = sync_resolver(cola[i], false)
+            bool repetida = false
+            for int j in range(0, len(ids)):
+                if ids[j] == q:
+                    repetida = true
+            if q != "" and not repetida:
+                ids.add(q)
+        reproductor_orden("play_track", {
+            "trackId": tid, "context": { "kind": "search", "query": "", "trackIds": ids },
+            "__remote": true, "__posicion": pos, "__pausado": not suena
+        })
+        sync_poner_flags(shuffle, repeat, true)
+        sync_ancla(tid, pos, suena)
+        if pos > 1500:
+            sync_marcar_salto(pos)
+        return
+    # misma canción: solo se ajusta play/pausa y, si se ha desviado, la posición
+    int local = posicion_viva(e)
+    int dif = local > pos ? local - pos : pos - local
+    # al pausar/reanudar se alinea siempre: el aviso llega ~1 s después y, sin esto, el equipo
+    # queda por delante para siempre (el móvil además solo refresca su posición cada 3 s)
+    if dif > 1000 or suena != (e.status == "playing"):
+        reproductor_orden("seek", { "positionMs": pos, "__remote": true })
+        sync_marcar_salto(pos)
+    if suena and e.status != "playing":
+        reproductor_orden("resume", { "__remote": true })
+    elif not suena and e.status == "playing":
+        reproductor_orden("pause", { "__remote": true })
+    sync_poner_flags(shuffle, repeat, false)
+    sync_ancla(e.track_id, pos, suena)
+
+# ─── Bucle (events.lux, cada 500 ms) ─────────────────────────────────────────
+
+fn void sync_enviar():
+    string pendiente = state.get("sync_salida", "")
+    if pendiente == "":
+        return
+    state.remove("sync_salida")
+    Json? cuerpo = parse_json(pendiente)
+    if cuerpo != null:
+        srv("PUT", "/playback", cuerpo)
+
+fn void sync_recibir():
+    int desde = int(state.get("sync_rev", "0"))
+    Json? r = srv("GET", "/playback?since=" + str(desde))
+    if r == null or r["status"] != 200:
+        return
+    int rev = jint(r["body"]["rev"], 0)
+    # si hay algo mío sin enviar, manda lo mío (acaba de pasar en este equipo); la revisión NO se
+    # da por vista, así el cambio del otro equipo se vuelve a pedir en la siguiente pasada
+    if state.get("sync_salida", "") != "":
+        return
+    state.set("sync_rev", str(rev))
+    # lo mío ya está aplicado... salvo tras reiniciar: lo último que escribí puede seguir siendo la
+    # verdad (el otro equipo ya lo siguió) y este equipo ha arrancado en pausa
+    if jstr(r["body"]["deviceId"], "") == sync_dispositivo() and desde != 0:
+        return
+    sync_aplicar(r["body"], desde == 0)
+
+fn void sync_tick():
+    if not sync_activo():
+        return
+    if state.incr("sync_anuncio", 1, 60000) == 1:
+        srv("PUT", "/devices", { "deviceId": sync_dispositivo(), "name": sync_nombre(), "platform": en_movil() ? "android" : "desktop" })
+    sync_enviar()
+    if state.incr("sync_poll", 1, 900) == 1:
+        sync_recibir()
+    # en el móvil lo comprueba cada informe de posición del <audio> (movil.lux)
+    if not en_movil():
+        EstadoCola e = leer_estado()
+        if e.status == "playing":
+            sync_deriva(posicion_viva(e))

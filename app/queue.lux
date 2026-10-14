@@ -337,9 +337,6 @@ fn bool cola_avanzar(EstadoCola e, bool natural):
 
 fn bool cola_retroceder(EstadoCola e):
     # la actual vino de la cola de usuario: tirar del historial
-    bool en_historial = false
-    if len(e.history) > 0:
-        en_historial = true
     if len(e.user_queue) == 0 and len(e.history) > 0 and e.context_queue == []:
         e.track_id = e.history[len(e.history) - 1]
         e.history = e.history.slice(0, len(e.history) - 1)

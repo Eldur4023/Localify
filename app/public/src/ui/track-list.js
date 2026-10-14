@@ -31,7 +31,7 @@
 * activa. Es el patrón que los lectores de pantalla entienden para listas
 * largas, y el único compatible con reciclar nodos.
 */
-import { player } from "../ipc/client.js";
+import { library, player } from "../ipc/client.js";
 import { alRecibirTipo } from "../ipc/events.js";
 import { idioma, t } from "../i18n/index.js";
 import { duracion } from "../shell/player.js";
@@ -90,21 +90,34 @@ function pintarDisponibilidad(el, a) {
 	}
 }
 function pintarProgreso(el, percent) {
+	el.onclick = null;
 	el.className = "track__state track__state--downloading";
 	el.textContent = `${Math.round(percent * 100)}%`;
 	el.title = "";
 }
 function pintarDescargada(el) {
+	el.onclick = null;
 	el.className = "track__state track__state--local";
 	el.replaceChildren(icono("cloud-download", 16));
 	el.title = t("tracks.downloaded");
 }
 function pintarFallida(el, reasonKey) {
 	el.className = "track__state track__state--failed";
-	el.replaceChildren(icono("alert", 16));
-	el.title = t(reasonKey);
+	el.replaceChildren(icono("refresh", 16));
+	el.title = `${t(reasonKey)} — ${t("tracks.redownload")}`;
+	// Un clic vuelve a descargarla: la fila pasa a "0 %" y los eventos de descarga la llevan
+	// hasta el final (o de vuelta a fallida)
+	el.onclick = (e) => {
+		e.stopPropagation();
+		const id = el.closest("[data-track-id]")?.dataset["trackId"];
+		if (!id) return;
+		pintarProgreso(el, 0);
+		el.onclick = null;
+		void library.retryTrack(id).catch(() => pintarFallida(el, reasonKey));
+	};
 }
 function pintarAusente(el) {
+	el.onclick = null;
 	el.className = "track__state";
 	el.replaceChildren();
 	el.title = "";
@@ -284,7 +297,7 @@ export function mountTrackList(contenedor, opciones) {
 			playlistId: opciones.playlistId,
 			entryId: opciones.entryIdDe?.(pista, indice),
 			alCambiar: () => {
-				refrescar();
+				refrescar(true);
 				opciones.alQuitar?.();
 			}
 		}));
@@ -372,10 +385,11 @@ export function mountTrackList(contenedor, opciones) {
 		const p = fila ? piezas.get(fila) : undefined;
 		if (p) pintarDisponibilidad(p.estado, e.availability);
 	});
-	function refrescar() {
+	/** `conservarPosicion`: recargar tras un cambio (quitar, reordenar) sin volver arriba del todo. */
+	function refrescar(conservarPosicion = false) {
 		activa = -1;
 		opciones.reiniciarOrigen?.();
-		lista.reset();
+		lista.reset(conservarPosicion);
 	}
 	return {
 		el: lista.el,
