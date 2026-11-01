@@ -261,9 +261,13 @@ fn List<Json> cmd_home():
         select h.track_id as id from play_history h
         group by h.track_id order by max(h.played_at) desc limit 30
         """)
-    List<Json> recientes = []
+    List<string> ids_recientes = []
     for int i in range(0, len(sonadas)):
-        Json? p = track_row_por_id(jstr(sonadas[i]["id"], ""))
+        ids_recientes.add(jstr(sonadas[i]["id"], ""))
+    Dict<string, Json> recientes_por_id = await track_rows_por_ids(ids_recientes)
+    List<Json> recientes = []
+    for int i in range(0, len(ids_recientes)):
+        Json? p = recientes_por_id.get(ids_recientes[i])
         if p != null:
             recientes.add(p)
     empujar(secciones, "home.recent", "tracks", sin_repetir(recientes))

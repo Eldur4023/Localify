@@ -19,8 +19,11 @@
 # PlayerStateDto + revision y cue, que es lo que el cliente necesita para
 # ordenar y aplicar. positionMs es la posición VIVA (ancla), no la última
 # guardada.
-fn Json estado_dto():
-    EstadoCola e = leer_estado()
+#
+# `estado_dto_de` permite reutilizar un `leer_estado()` ya hecho (el tick del
+# móvil y el fin de una orden leen el estado igualmente): sin esto cada foto
+# parseaba la cola entera dos veces.
+fn Json estado_dto_de(EstadoCola e):
     Json? pista = track_row_por_id(e.track_id)
     int duracion = pista == null ? 0 : jint(pista["durationMs"], 0)
     int pos = posicion_viva(e)
@@ -40,6 +43,39 @@ fn Json estado_dto():
         "revision": e.revision,
         "cue": e.cue
     }
+
+fn Json estado_dto():
+    return estado_dto_de(leer_estado())
+
+# Posición para el sondeo de "ahora suena" (4 Hz): solo la fila del reproductor
+# y la duración, sin parsear la cola de contexto entera.
+fn Json posicion_dto():
+    List<Json> f = await sqlite.query("""
+        select ps.track_id as tid, ps.position_ms as pos, t.duration_ms as dur
+        from player_state ps left join tracks t on t.id = ps.track_id
+        where ps.id = 1""")
+    if len(f) == 0:
+        return { "positionMs": 0, "bufferedMs": 0 }
+    string tid = jstr(f[0]["tid"], "")
+    int pos = jint(f[0]["pos"], 0)
+    int dur = jint(f[0]["dur"], 0)
+    if en_movil():
+        # En el móvil el motor nativo no existe: la posición viva es la que
+        # reporta el <audio> (movil.lux).
+        if tid != "" and state.get("movil_pista", "") == tid:
+            int vivo = int(state.get("movil_pos_ms", "0"))
+            if vivo > 0:
+                pos = vivo
+    else:
+        Json st = audio.status()
+        if tid != "" and jstr(st["trackId"], "") == tid:
+            pos = jint(st["positionMs"], 0)
+            int d = jint(st["durationMs"], 0)
+            if d > 0:
+                dur = d
+    if dur > 0 and pos > dur:
+        pos = dur
+    return { "positionMs": pos, "bufferedMs": dur > 0 ? dur : pos }
 
 # ─── Escuchas (estadísticas) ─────────────────────────────────────────────────
 
@@ -97,12 +133,11 @@ fn void marcar_estadisticas():
 # ─── La puerta única ─────────────────────────────────────────────────────────
 
 fn Json reproductor_orden(string orden, Json args):
-    EstadoCola antes = leer_estado()
     if orden == "position":
-        # Consulta barata (la vista de "ahora suena" la pide a 4 Hz): no muta nada.
-        int dur = jint(jget(audio.status(), "durationMs"), 0)
-        int pos = posicion_viva(antes)
-        return { "positionMs": pos, "bufferedMs": dur > 0 ? dur : pos }
+        # Consulta barata (la vista de "ahora suena" la pide a 4 Hz): no muta
+        # nada ni necesita parsear la cola de contexto.
+        return posicion_dto()
+    EstadoCola antes = leer_estado()
     # Lo escuchado hasta ahora. Un aviso del motor (handoff/ended) trae el
     # suyo: para entonces el motor ya cambió de pista.
     int escuchado = jint(jget(args, "__listenedMs"), -1)
@@ -183,7 +218,11 @@ fn Json reproductor_orden(string orden, Json args):
     # lo aplicado desde otro equipo (__remote) no se vuelve a publicar
     if jget(args, "__remote") != true:
         sync_publicar(orden, antes, despues)
-    return estado_dto()
+    # En el móvil el tick de fondo va a 1 Hz (motor.lux): una orden publica su
+    # foto ya, para que la interfaz no espere hasta el siguiente tick.
+    if en_movil():
+        publicar_snapshot_de(despues)
+    return estado_dto_de(despues)
 
 # ─── Hacia fuera ─────────────────────────────────────────────────────────────
 
@@ -213,6 +252,10 @@ fn string portada_publica(string track_id):
 # pudo salir en su momento sale en una llamada posterior (discord_rpc.cpp
 # guarda siempre el último estado deseado, no los intermedios).
 fn void publicar_integraciones():
+    # En Android no hay MPRIS ni Discord: `window.*` no hace nada y esto solo
+    # costaría una lectura de estado + consulta de pista cada segundo.
+    if en_movil():
+        return
     EstadoCola e = leer_estado()
     Json? pista = track_row_por_id(e.track_id)
     int dur = pista == null ? 0 : jint(pista["durationMs"], 0)

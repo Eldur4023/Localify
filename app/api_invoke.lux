@@ -437,7 +437,7 @@ fn Json despachar_base(string cmd, Json args):
         tocar_playlists()
         return null
     if cmd == "playlist_detail":
-        return await cmd_playlist_detail(arg_str(args, "playlistId", ""))
+        return await cmd_playlist_detail(arg_str(args, "playlistId", ""), jget(args, "page"))
     if cmd == "playlist_add_tracks":
         await cmd_playlist_add(args)
         tocar_playlists()

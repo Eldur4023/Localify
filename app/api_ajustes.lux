@@ -213,9 +213,13 @@ fn Json cmd_stats():
         select track_id, coalesce(sum(ms_played), 0) as ms, count(*) as plays
         from play_history group by track_id order by plays desc, ms desc limit 10
         """)
+    List<string> ids_top = []
+    for int i in range(0, len(top_pistas)):
+        ids_top.add(jstr(top_pistas[i]["track_id"], ""))
+    Dict<string, Json> pistas_por_id = await track_rows_por_ids(ids_top)
     List<Json> top_out = []
     for int i in range(0, len(top_pistas)):
-        Json? p = track_row_por_id(jstr(top_pistas[i]["track_id"], ""))
+        Json? p = pistas_por_id.get(jstr(top_pistas[i]["track_id"], ""))
         if p != null:
             top_out.add({ "track": p, "msPlayed": jint(top_pistas[i]["ms"], 0), "plays": jint(top_pistas[i]["plays"], 0) })
     List<Json> top_artistas = await sqlite.query("""
@@ -223,14 +227,23 @@ fn Json cmd_stats():
         from play_history h join track_artists ta on ta.track_id = h.track_id
         group by ta.artist_id order by ms desc limit 10
         """)
+    List<string> ids_artistas = []
+    for int i in range(0, len(top_artistas)):
+        ids_artistas.add(jstr(top_artistas[i]["id"], ""))
+    List<Json> filas_artistas = []
+    if len(ids_artistas) > 0:
+        filas_artistas = await sqlite.query("""
+            select ar.id, ar.name, 0 as n_tracks, 0 as n_disponibles
+            from artists ar where ar.id in (?)
+            """, ids_artistas)
+    Dict<string, Json> artistas_por_id = {}
+    for int i in range(0, len(filas_artistas)):
+        artistas_por_id[jstr(filas_artistas[i]["id"], "")] = artist_row_dto(filas_artistas[i])
     List<Json> artistas_out = []
     for int i in range(0, len(top_artistas)):
-        List<Json> a = await sqlite.query("""
-            select ar.id, ar.name, 0 as n_tracks, 0 as n_disponibles
-            from artists ar where ar.id = ?
-            """, jstr(top_artistas[i]["id"], ""))
-        if len(a) > 0:
-            artistas_out.add({ "artist": artist_row_dto(a[0]), "msPlayed": jint(top_artistas[i]["ms"], 0) })
+        Json? a = artistas_por_id.get(jstr(top_artistas[i]["id"], ""))
+        if a != null:
+            artistas_out.add({ "artist": a, "msPlayed": jint(top_artistas[i]["ms"], 0) })
     return {
         "totalMsPlayed": jint(totales[0]["ms"], 0),
         "totalPlays": jint(totales[0]["plays"], 0),

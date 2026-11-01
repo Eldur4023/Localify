@@ -136,11 +136,28 @@ export function mountNowPlaying(contenedor) {
 		pintarCabecera(estado);
 		if (estado.track?.id !== pistaActual) await cargarLetra(estado.track?.id ?? null);
 	}
+	/** Posición que ya tiene el `<audio>` en el móvil, sin preguntar al backend. */
+	function posicionLocalMs() {
+		const ms = globalThis.__localifyWebAudio?.posicionMs?.();
+		return typeof ms === "number" && Number.isFinite(ms) ? ms : null;
+	}
+	let sondeoEnCurso = false;
 	function sondear() {
 		if (lineas.length === 0) return;
+		// En el móvil la posición es local: preguntarla por HTTP cuatro veces
+		// por segundo solo gastaba CPU y batería.
+		const local = posicionLocalMs();
+		if (local !== null) {
+			resaltar(lineaEn(local));
+			return;
+		}
+		// En escritorio sí hace falta el backend, pero sin solapar peticiones:
+		// con la vista abierta y el equipo cargado se acumulaban las respuestas.
+		if (sondeoEnCurso) return;
+		sondeoEnCurso = true;
 		void player.position().then((p) => resaltar(lineaEn(p.positionMs))).catch(() => {
 			// Un sondeo perdido no rompe nada: el siguiente lo corrige.
-		});
+		}).finally(() => { sondeoEnCurso = false; });
 	}
 	const dejarEventos = alRecibir((evento) => {
 		if (!abierta) return;

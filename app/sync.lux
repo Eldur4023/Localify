@@ -244,6 +244,10 @@ fn void sync_recibir():
     sync_aplicar(r["body"], desde == 0)
 
 fn void sync_tick():
+    # En el móvil, medio segundo de sondeo no aporta nada (la deriva la mueven
+    # los informes del <audio>, cada 3 s): una pasada por segundo basta.
+    if en_movil() and state.incr("sync_tick_movil", 1, 1000) != 1:
+        return
     if not sync_activo():
         return
     if state.incr("sync_anuncio", 1, 60000) == 1:

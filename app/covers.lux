@@ -220,12 +220,19 @@ get endpoint("/api/cover/:id", string id):
 # YouTube Music: se busca por nombre y se usa el primer artista que se llame igual.
 # Con caché: el resultado (también el "no hay") se recuerda, para que ni las miniaturas de una
 # lista ni el sondeo repitan la búsqueda en YouTube Music una y otra vez.
+fn string canal_recordado(string id0):
+    string alias = ajuste("alias:" + id0, "")
+    string id = alias != "" ? alias : id0
+    if id.starts_with("UC"):
+        return id
+    return state.get("canal:" + id, "")
+
 fn string canal_de_artista(string id0):
     string alias = ajuste("alias:" + id0, "")
     string id = alias != "" ? alias : id0
     if id.starts_with("UC"):
         return id
-    string recordado = state.get("canal:" + id, "")
+    string recordado = canal_recordado(id0)
     if recordado != "":
         return recordado == "-" ? "" : recordado
     string canal = buscar_canal_de_artista(id)

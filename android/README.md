@@ -37,7 +37,9 @@ En el CMake raíz hay un parche de una línea respecto al vendor limpio
 (`AND NOT ANDROID` en el guard de "Lux requires Linux"); el resto del vendor
 tiene dos ajustes de compatibilidad con clang/libc++ (`luxp_serve.cpp`:
 mutex en vez de `std::atomic<shared_ptr>`; `template.cpp`: `Value kNull{}`
-value-initialized).
+value-initialized) y uno de SQLite (`lux_script/db_sqlite.cpp`): WAL + writer
+en lote en teléfonos reales, y journal DELETE sin lote solo bajo el emulador
+ARM, donde WAL/hilos se cuelgan. `LUX_ANDROID_EMULATOR=1|0` fuerza el modo.
 
 ## Qué funciona distinto en el móvil
 
@@ -71,6 +73,11 @@ value-initialized).
   `window.__localifyNative.cmd`. Pausa al desenchufar auriculares
   (`ACTION_AUDIO_BECOMING_NOISY`). El audio focus lo gestiona Chromium; no está
   verificado con una llamada real.
+- **Fichas**: abrir un álbum de catálogo o un artista no espera a YouTube Music.
+  La importación de la discografía se encola (`discografia_tick`, una por tick) y
+  la ficha devuelve al instante lo que ya hay en SQLite; al terminar,
+  `tocar_biblioteca()` avisa a la vista para que se repinte sola. Las playlists
+  se piden por páginas de 100 y el scroll de las listas se agrupa por frame.
 - **Interfaz** (`app/public/src/styles/mobile.css`, `shell/gestos.js`): la misma
   que en escritorio con ≤700 px. Cajón de navegación (☰ o deslizar desde el
   cuarto izquierdo), mini-reproductor (portada, título, play, siguiente) y vista
