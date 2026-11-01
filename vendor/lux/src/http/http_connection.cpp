@@ -6,16 +6,8 @@
 #include "../../include/lux/logger.hpp"
 #include "../../include/lux/percent_encoding.hpp"
 
-#include <sys/epoll.h>
-#include <sys/sendfile.h>
-#include <sys/uio.h>
+#include <lux/platform.hpp>
 #include <fstream>
-#include <sys/stat.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
@@ -118,7 +110,7 @@ HttpConnection::~HttpConnection() {
         if (timer_ >= 0) ::close(timer_);
 #endif
         if (file_fd_     >= 0) ::close(file_fd_);
-        ::close(fd_);
+        plat::sock_close(fd_);
     }
 }
 
@@ -148,7 +140,7 @@ void HttpConnection::on_event(uint32_t events) {
 void HttpConnection::do_read() {
     char buf[16384];
     while (!closed_) {
-        ssize_t n = ::read(fd_, buf, sizeof(buf));
+        ssize_t n = plat::sock_read(fd_, buf, sizeof(buf));
         if (n == 0) { close(); return; }
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) return;
@@ -335,7 +327,7 @@ void HttpConnection::bind_stream(lux::Request& req) {
     auto self = std::static_pointer_cast<HttpConnection>(req._conn);
     req._raw_write = [self](const char* data, size_t len) -> ssize_t {
         if (self->closed_) { errno = EBADF; return -1; }
-        return ::write(self->fd_, data, len);
+        return plat::sock_write(self->fd_, data, len);
     };
     req._ws_queue_write = [self](std::string frame) {
         self->queue_ws_write(std::move(frame));
@@ -441,7 +433,7 @@ void HttpConnection::finish_dispatch(lux::Request& request,
     if (!response.sendfile_path().empty()) {
         // Non-TLS: open the file; do_sendfile() will stream it via sendfile(2).
         int fd = response.take_sendfile_fd();
-        if (fd < 0) fd = ::open(response.sendfile_path().c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0) fd = plat::file_open_ro(response.sendfile_path().c_str());
         if (fd < 0) {
             lux::Response err;
             err.status(500).json_text(R"({"error":"Cannot open file"})");
@@ -558,8 +550,7 @@ void HttpConnection::send_response(std::string data, const std::string* body) {
     // fast the client read. A slow reader is the write timeout's job.
     const size_t total = data.size() + (body ? body->size() : 0);
     if (body && !body->empty()) {
-        iovec iov[2] = {{data.data(), data.size()}, {const_cast<char*>(body->data()), body->size()}};
-        const ssize_t n = ::writev(fd_, iov, 2);
+        const ssize_t n = plat::sock_writev2(fd_, data.data(), data.size(), body->data(), body->size());
         if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) { close(); return; }
         const size_t written = n < 0 ? 0 : static_cast<size_t>(n);
         if (written == total) { on_write_complete(); return; }
@@ -575,8 +566,8 @@ void HttpConnection::send_response(std::string data, const std::string* body) {
     // an offset and arm EPOLLOUT only (EPOLLIN dropped until it completes).
     // Headers with a file behind them wait for it (MSG_MORE): one segment
     // for both instead of a small one of their own.
-    ssize_t n = file_fd_ >= 0 ? ::send(fd_, data.data(), data.size(), MSG_MORE)
-                              : ::write(fd_, data.data(), data.size());
+    ssize_t n = file_fd_ >= 0 ? plat::sock_send_more(fd_, data.data(), data.size())
+                              : plat::sock_write(fd_, data.data(), data.size());
     if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
         close(); return;
     }
@@ -594,7 +585,7 @@ void HttpConnection::send_response(std::string data, const std::string* body) {
 
 void HttpConnection::do_write() {
     while (write_offset_ < write_buf_.size()) {
-        ssize_t n = ::write(fd_, write_buf_.data() + write_offset_,
+        ssize_t n = plat::sock_write(fd_, write_buf_.data() + write_offset_,
                             write_buf_.size() - write_offset_);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -631,7 +622,7 @@ void HttpConnection::do_write() {
 
 void HttpConnection::do_ws_write() {
     while (ws_write_offset_ < ws_write_buf_.size()) {
-        ssize_t n = ::write(fd_,
+        ssize_t n = plat::sock_write(fd_,
                             ws_write_buf_.data() + ws_write_offset_,
                             ws_write_buf_.size() - ws_write_offset_);
         if (n < 0) {
@@ -674,7 +665,7 @@ void HttpConnection::queue_ws_write(std::string frame) {
         return;
     }
 
-    ssize_t n = ::write(fd_, frame.data(), frame.size());
+    ssize_t n = plat::sock_write(fd_, frame.data(), frame.size());
     if (n < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
             ws_write_buf_    = std::move(frame);
@@ -698,7 +689,7 @@ void HttpConnection::queue_ws_write(std::string frame) {
 void HttpConnection::do_sendfile() {
     // Zero-copy kernel transfer, plaintext only.
     while (file_remaining_ > 0) {
-        ssize_t n = ::sendfile(fd_, file_fd_, &file_offset_,
+        ssize_t n = plat::sendfile(fd_, file_fd_, &file_offset_,
                                std::min(file_remaining_, size_t{256 * 1024}));
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -836,7 +827,7 @@ void HttpConnection::close() {
     deadline_msg_ = nullptr;
     if (timer_ >= 0) { loop_.cancel_timer(timer_); timer_ = -1; }
     loop_.remove(fd_);
-    ::close(fd_);
+    plat::sock_close(fd_);
     if (file_fd_ >= 0) { ::close(file_fd_); file_fd_ = -1; }
     if (conn_count_) conn_count_->fetch_sub(1, std::memory_order_relaxed);
     if (loop_count_) loop_count_->fetch_sub(1, std::memory_order_relaxed);

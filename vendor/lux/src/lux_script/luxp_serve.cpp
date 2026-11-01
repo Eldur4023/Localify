@@ -1,4 +1,5 @@
 #include <lux_script/luxp_serve.hpp>
+#include <lux_script/platform_os.hpp>
 
 #include <lux/logger.hpp>
 #include <lux/request.hpp>
@@ -73,14 +74,14 @@ std::optional<std::string> fetch_static(const std::string& url, const std::strin
         const size_t slash = page_path.rfind('/');
         abs = (slash == std::string::npos ? "/" : page_path.substr(0, slash + 1)) + abs;
     }
-    abs = fs::path(abs.substr(0, abs.find_first_of("?#"))).lexically_normal().generic_string();
+    abs = plat::to_path(abs.substr(0, abs.find_first_of("?#"))).lexically_normal().generic_string();
     const auto mounts = g_statics_load();
     for (const auto& m : *mounts) {
         std::string prefix = m.url_prefix;
         if (!prefix.ends_with('/')) prefix += '/';
         if (!abs.starts_with(prefix)) continue;
-        const fs::path root = fs::path(m.fs_root).lexically_normal();
-        const fs::path file = (root / abs.substr(prefix.size())).lexically_normal();
+        const fs::path root = plat::to_path(m.fs_root).lexically_normal();
+        const fs::path file = (root / plat::to_path(abs.substr(prefix.size()))).lexically_normal();
         if (file.lexically_relative(root).generic_string().starts_with("..")) return std::nullopt;
         if (auto bytes = read_disk(file)) {
             if (file_out) *file_out = file;
@@ -340,7 +341,7 @@ bool pack_site(const std::string& entry_html, const std::string& out_path, std::
         *report += "  resource  " + c.resources.back().first + "\n";
     }
     const std::string bytes = luxium::page::encode_container(c);
-    std::ofstream f(out_path, std::ios::binary);
+    std::ofstream f(plat::to_path(out_path), std::ios::binary);
     if (!f.write(bytes.data(), std::streamsize(bytes.size()))) return fail("cannot write " + out_path);
     *report += out_path + ": " + std::to_string(c.pages.size()) + " page(s), " +
                std::to_string(c.resources.size()) + " resource(s), " + std::to_string(bytes.size()) + " bytes\n";
