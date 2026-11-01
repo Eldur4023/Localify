@@ -36,8 +36,14 @@ fn bool es_video_id(string id):
 # `yt-dlp -U`; el del sistema suele ir años por detrás y YouTube deja de dar audio
 # con versiones viejas), si no el del PATH.
 fn string ytdlp_bin():
-    string propio = os.path_join(os.getenv("HOME", ""), ".local", "bin", "yt-dlp")
+    # Windows: <datos>\bin\yt-dlp.exe si existe; si no "yt-dlp", que CreateProcess busca junto
+    # al ejecutable de la app y luego en el PATH.
+    string propio = es_windows() ? os.path_join(os.cwd(), "bin", "yt-dlp.exe") : os.path_join(os.getenv("HOME", ""), ".local", "bin", "yt-dlp")
     return os.is_file(propio) ? propio : "yt-dlp"
+
+# Windows define OS=Windows_NT en el entorno de todo proceso (os no expone un os.name()).
+fn bool es_windows():
+    return os.getenv("OS", "") == "Windows_NT"
 
 # Las versiones nuevas resuelven YouTube con un runtime de JavaScript y solo activan
 # deno por defecto: si hay node, se le dice que lo use.
@@ -699,13 +705,12 @@ fn string seleccionar_youtube_id(string tid):
 fn bool ffprobe_disponible():
     if state.get("ffprobe_ok", "") != "":
         return state.get("ffprobe_ok", "") == "1"
-    Json r = await os.run("which", ["ffprobe"])
-    bool ok = jint(r["status"], 1) == 0 and jstr(r["stdout"], "").trim() != ""
+    bool ok = hay_binario("ffprobe")
     state.set("ffprobe_ok", ok ? "1" : "0")
     return ok
 
 fn bool hay_binario(string nombre):
-    Json r = await os.run("which", [nombre])
+    Json r = await os.run(es_windows() ? "where" : "which", [nombre])
     return jint(r["status"], 1) == 0 and jstr(r["stdout"], "").trim() != ""
 
 fn Json? ffprobe_info(string ruta):

@@ -30,6 +30,7 @@ int main(int argc, char** argv) {
     lux::App app;
     serve_module(app, [mod] { return mod; });
     install_audio_hooks();
+    install_console_ctrl_handler();
     const uint16_t port = argc > 2 && std::atoi(argv[2]) > 0 ? static_cast<uint16_t>(std::atoi(argv[2])) : find_free_port();
     std::cout << "port " << port << std::endl;
     app.run("127.0.0.1", port);   // returns on SIGTERM/SIGINT

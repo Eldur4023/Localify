@@ -75,11 +75,36 @@ find_package(Threads REQUIRED)
 # Same skip-if-missing spirit as Lux's own pdf/http modules: required here
 # (this project IS the desktop shell), so missing dev packages are a hard
 # configure error with the exact fix, not a silent partial build.
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(LUX_GTK REQUIRED gtk+-3.0)
-pkg_check_modules(LUX_WEBKIT QUIET webkit2gtk-4.1)
-if(NOT LUX_WEBKIT_FOUND)
-    pkg_check_modules(LUX_WEBKIT REQUIRED webkit2gtk-4.0)
+if(WIN32)
+    # Windows: webview.h's WebView2 (Edge) backend instead of GTK/WebKit. It
+    # #includes "WebView2.h", which is NOT vendored: take it from the
+    # Microsoft.Web.WebView2 NuGet package (build/native/include/WebView2.h)
+    # and point at it with -DWEBVIEW2_INCLUDE_DIR=<dir> (or drop it in
+    # third_party/webview2/). No WebView2Loader.dll/.lib is needed: webview.h
+    # ships its own loader. The WebView2 Runtime must exist at run time
+    # (preinstalled on Windows 11).
+    # Toolchain: MinGW-w64 (GNU ld; the whole-archive trick below is GNU-only).
+    if(NOT MINGW)
+        message(FATAL_ERROR "Windows build is only set up for MinGW-w64 (g++/clang++ with GNU ld).")
+    endif()
+    find_path(WEBVIEW2_INCLUDE_DIR WebView2.h
+        HINTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/webview2 ENV WEBVIEW2_INCLUDE_DIR)
+    if(NOT WEBVIEW2_INCLUDE_DIR)
+        message(FATAL_ERROR
+            "WebView2.h not found. Get the Microsoft.Web.WebView2 NuGet package, then pass "
+            "-DWEBVIEW2_INCLUDE_DIR=<pkg>/build/native/include (or copy WebView2.h to third_party/webview2/).")
+    endif()
+    set(LOCALIFY_WINDOW_SRC src/desktop_window_win.cpp)
+    # Win10 1607+ APIs (GetDpiForWindow) are used by the window shell.
+    add_compile_definitions(_WIN32_WINNT=0x0A00 WINVER=0x0A00)
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(LUX_GTK REQUIRED gtk+-3.0)
+    pkg_check_modules(LUX_WEBKIT QUIET webkit2gtk-4.1)
+    if(NOT LUX_WEBKIT_FOUND)
+        pkg_check_modules(LUX_WEBKIT REQUIRED webkit2gtk-4.0)
+    endif()
+    set(LOCALIFY_WINDOW_SRC src/desktop_window.cpp)
 endif()
 
 # ── respack: embeds an app's source directory into a generated .cpp ─────────
@@ -91,10 +116,16 @@ target_include_directories(respack PRIVATE include)
 function(_lux_desktop_link name)
     target_include_directories(${name} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party
-        ${LUX_GTK_INCLUDE_DIRS} ${LUX_WEBKIT_INCLUDE_DIRS})
-    target_link_directories(${name} PRIVATE
-        ${LUX_GTK_LIBRARY_DIRS} ${LUX_WEBKIT_LIBRARY_DIRS})
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+    if(WIN32)
+        target_include_directories(${name} PRIVATE ${WEBVIEW2_INCLUDE_DIR})
+        target_link_libraries(${name} PRIVATE
+            ole32 oleaut32 shell32 shlwapi user32 advapi32 version comdlg32 ws2_32)
+        target_link_options(${name} PRIVATE -static-libgcc -static-libstdc++)
+    else()
+        target_include_directories(${name} PRIVATE ${LUX_GTK_INCLUDE_DIRS} ${LUX_WEBKIT_INCLUDE_DIRS})
+        target_link_directories(${name} PRIVATE ${LUX_GTK_LIBRARY_DIRS} ${LUX_WEBKIT_LIBRARY_DIRS})
+    endif()
     # --whole-archive: liblux_script.a is linked member-by-member, and a
     # module .cpp with nothing else in this binary referencing it (true of
     # sqlite/hash/regex/... whenever the app doesn't happen to call
@@ -106,8 +137,10 @@ function(_lux_desktop_link name)
     # back up past add_subdirectory().
     target_link_libraries(${name} PRIVATE
         -Wl,--whole-archive lux_script -Wl,--no-whole-archive
-        lux Threads::Threads
-        ${LUX_GTK_LIBRARIES} ${LUX_WEBKIT_LIBRARIES})
+        lux Threads::Threads)
+    if(NOT WIN32)
+        target_link_libraries(${name} PRIVATE ${LUX_GTK_LIBRARIES} ${LUX_WEBKIT_LIBRARIES})
+    endif()
 endfunction()
 
 # Declares one app: DIR's own directory (LuxScript + templates + static
@@ -150,9 +183,13 @@ function(add_lux_desktop_app name)
     # The UI server is Lux's own main(), renamed lux_main() by LUX_EMBEDDED and run on a thread by runtime.cpp
     set(_lux_main ${CMAKE_CURRENT_SOURCE_DIR}/vendor/lux/src/lux_script/main.cpp)
     set_source_files_properties(${_lux_main} PROPERTIES COMPILE_DEFINITIONS LUX_EMBEDDED)
-    add_executable(${name} src/runtime.cpp src/audio_engine.cpp src/desktop_common.cpp src/desktop_window.cpp src/mpris.cpp src/discord_rpc.cpp ${_lux_main} ${_generated})
+    add_executable(${name} src/runtime.cpp src/audio_engine.cpp src/desktop_common.cpp ${LOCALIFY_WINDOW_SRC} src/mpris.cpp src/discord_rpc.cpp ${_lux_main} ${_generated})
     target_compile_definitions(${name} PRIVATE LUXDESKTOP_APP_ID="${APP_ID}")
     _lux_desktop_link(${name})
+    if(WIN32)
+        # GUI subsystem: no console window. MinGW's CRT start-up still calls main().
+        target_link_options(${name} PRIVATE -mwindows)
+    endif()
 endfunction()
 
 # ── The app ───────────────────────────────────────────────────────────────
@@ -165,7 +202,7 @@ add_lux_desktop_app(localify DIR ${CMAKE_CURRENT_SOURCE_DIR}/app ID localify)
 # Reads app/ straight off disk and hot-reloads it through LuxScript's own
 # compiler -- no respack, no rebuilding THIS binary after editing app.lux, a
 # template or a static file. Run ./build/localify-dev while you work.
-add_executable(localify-dev src/dev.cpp src/audio_engine.cpp src/desktop_common.cpp src/desktop_window.cpp src/mpris.cpp src/discord_rpc.cpp)
+add_executable(localify-dev src/dev.cpp src/audio_engine.cpp src/desktop_common.cpp ${LOCALIFY_WINDOW_SRC} src/mpris.cpp src/discord_rpc.cpp)
 target_compile_definitions(localify-dev PRIVATE
     LUXDESKTOP_APP_DIR="${CMAKE_CURRENT_SOURCE_DIR}/app")
 _lux_desktop_link(localify-dev)
@@ -178,6 +215,6 @@ enable_testing()
 add_test(NAME audio_engine COMMAND audio_engine_test)
 
 # ── Sin ventana: servidor + motor de audio, para tests de extremo a extremo ──
-add_executable(app-headless src/headless.cpp src/audio_engine.cpp src/desktop_common.cpp src/desktop_window.cpp src/mpris.cpp src/discord_rpc.cpp)
+add_executable(app-headless src/headless.cpp src/audio_engine.cpp src/desktop_common.cpp ${LOCALIFY_WINDOW_SRC} src/mpris.cpp src/discord_rpc.cpp)
 _lux_desktop_link(app-headless)
 add_test(NAME e2e_audio COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e_audio.py $<TARGET_FILE:app-headless>)

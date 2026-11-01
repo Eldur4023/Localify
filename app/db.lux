@@ -300,6 +300,8 @@ fn string biblioteca_raiz():
         return r
     string home = os.getenv("HOME", "")
     if home == "":
+        home = os.getenv("USERPROFILE", "")   # Windows
+    if home == "":
         home = os.cwd()
     return os.path_join(home, "Music", "Localify")
 

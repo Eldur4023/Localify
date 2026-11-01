@@ -13,16 +13,15 @@
 #include <lux_script/window_config.hpp>
 #include <lux_script/window_control.hpp>
 
-#include <arpa/inet.h>
+#include "net_compat.hpp"
+
+#include <csignal>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
-#include <netinet/in.h>
 #include <stdexcept>
-#include <sys/socket.h>
 #include <thread>
-#include <unistd.h>
 
 namespace fs = std::filesystem;
 
@@ -70,26 +69,39 @@ void install_window_control_hooks() {
     };
 }
 
+void install_console_ctrl_handler() {
+#ifdef _WIN32
+    SetConsoleCtrlHandler([](DWORD ev) -> BOOL {
+        if (ev == CTRL_CLOSE_EVENT || ev == CTRL_LOGOFF_EVENT || ev == CTRL_SHUTDOWN_EVENT) {
+            std::raise(SIGTERM);
+            return TRUE;
+        }
+        return FALSE;   // Ctrl+C / Ctrl+Break: the CRT's SIGINT path handles it
+    }, TRUE);
+#endif
+}
+
 // Binds to loopback with port 0 (the OS picks a free ephemeral port), reads
 // it back with getsockname(), then releases it immediately. A small race
 // (something else could grab the same port before Lux's own bind) is the
 // same trade-off every "find a free port" helper makes; fine for a desktop
 // app that only ever talks to itself.
 uint16_t find_free_port() {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) throw std::runtime_error("socket: " + std::string(std::strerror(errno)));
+    net_init();
+    sock_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd == kBadSock) throw std::runtime_error("socket: " + sock_error());
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
     addr.sin_port        = 0;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        ::close(fd);
-        throw std::runtime_error("bind: " + std::string(std::strerror(errno)));
+        sock_close(fd);
+        throw std::runtime_error("bind: " + sock_error());
     }
-    socklen_t len = sizeof(addr);
-    ::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len);
+    sock_len_t ilen = sizeof(addr);
+    ::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &ilen);
     uint16_t port = ntohs(addr.sin_port);
-    ::close(fd);
+    sock_close(fd);
     return port;
 }
 
@@ -115,9 +127,16 @@ std::string resolve_display_name(const std::shared_ptr<lux_script::Module>& mod)
 }
 
 fs::path xdg_cache_home() {
+#ifdef _WIN32
+    // %LOCALAPPDATA% is the Windows analogue of ~/.cache.
+    if (const char* la = std::getenv("LOCALAPPDATA"); la && *la) return fs::path(la);
+    if (const char* tmp = std::getenv("TEMP"); tmp && *tmp) return fs::path(tmp);
+    return fs::path(".");
+#else
     if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg) return fs::path(xdg);
     const char* home = std::getenv("HOME");
     return fs::path(home ? home : ".") / ".cache";
+#endif
 }
 
 fs::path geometry_file(const std::string& id) {
@@ -152,11 +171,10 @@ void save_geometry(const std::string& id, int width, int height) {
 bool wait_for_server(uint16_t port, std::chrono::milliseconds timeout) {
     auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
-        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (fd >= 0) {
-            timeval tv{1, 0};
-            ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-            ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        net_init();
+        sock_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd != kBadSock) {
+            set_timeouts(fd, 1);
             sockaddr_in addr{};
             addr.sin_family      = AF_INET;
             addr.sin_port        = htons(port);
@@ -168,7 +186,7 @@ bool wait_for_server(uint16_t port, std::chrono::milliseconds timeout) {
                 if (::send(fd, req, sizeof(req) - 1, 0) > 0 && ::recv(fd, buf, sizeof(buf) - 1, 0) > 0)
                     ready = std::strncmp(buf + 9, "503", 3) != 0;   // "HTTP/1.1 503 ..."
             }
-            ::close(fd);
+            sock_close(fd);
             if (ready) return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));

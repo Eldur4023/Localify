@@ -1,5 +1,15 @@
 #include "mpris.hpp"
 
+#ifndef __linux__
+// No D-Bus off Linux: no-op stubs. TODO: Windows System Media Transport
+// Controls (SMTC) via WinRT would be the equivalent of MPRIS here.
+namespace luxdesktop {
+void mpris_init(const std::string&, const std::string&, std::uint16_t) {}
+void mpris_update(const lux_script::Value&) {}
+void mpris_shutdown() {}
+} // namespace luxdesktop
+#else
+
 #include <gio/gio.h>
 
 #include <arpa/inet.h>
@@ -396,3 +406,5 @@ void mpris_shutdown() {
 }
 
 } // namespace luxdesktop
+
+#endif // __linux__

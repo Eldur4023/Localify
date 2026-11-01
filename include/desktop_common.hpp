@@ -24,6 +24,11 @@ extern std::mutex        g_window_mutex;
 
 void        install_window_control_hooks();
 
+// Windows: turns console close/logoff/shutdown events into SIGTERM so Lux's
+// graceful stop runs (Ctrl+C already reaches its SIGINT handler through the
+// CRT). No-op on Linux.
+void        install_console_ctrl_handler();
+
 // The one audio engine of the process, and the `audio` module's hooks onto it.
 // install_audio_hooks() also opens the output device (the system default; the
 // backend picks another one later with audio.set_device()).

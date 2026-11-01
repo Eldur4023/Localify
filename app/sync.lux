@@ -31,6 +31,8 @@ fn string sync_nombre():
     n = os.getenv("HOSTNAME", "")
     if n == "":
         n = os.getenv("HOST", "")
+    if n == "":
+        n = os.getenv("COMPUTERNAME", "")   # Windows
     return n == "" ? "PC" : n
 
 fn bool sync_activo():
