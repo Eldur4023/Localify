@@ -50,31 +50,45 @@ fn string clave_cancion(Json fila):
 fn bool es_version(Json fila):
     return clase_de_version(jstr(fila["title"], "")) != "original"
 
-# Claves de todo lo que has escuchado alguna vez.
-fn List<string> claves_escuchadas():
-    List<Json> f = await sqlite.query("""
-        select distinct t.title, t.artist_display from play_history h join tracks t on t.id = h.track_id
-        """)
-    List<string> out = []
-    for int i in range(0, len(f)):
-        out.add(titulo_canonico(jstr(f[i]["title"], "")) + "|" + normalizar(jstr(f[i]["artist_display"], "")))
+# Claves de todo lo que has escuchado alguna vez, como conjunto (membresía O(1)).
+# Calcular titulo_canonico + normalizar de todo el historial cuesta ~45 us por
+# pista en la VM: se guarda en `state` (una cadena por líneas) y solo se rehace
+# si cambió el historial (nº de escuchas) o la biblioteca (sello).
+fn Dict<string, int> claves_escuchadas():
+    List<Json> sg = await sqlite.query("select count(*) as n, (select value from settings where key = 'stamp_library') as s from play_history")
+    string firma = str(jint(sg[0]["n"], 0)) + ":" + jstr(sg[0]["s"], "")
+    List<string> claves = []
+    if state.get("claves_firma", "") == firma:
+        claves = state.get("claves_blob", "").split("\n")
+    else:
+        List<Json> f = await sqlite.query("""
+            select distinct t.title, t.artist_display from play_history h join tracks t on t.id = h.track_id
+            """)
+        for int i in range(0, len(f)):
+            claves.add(titulo_canonico(jstr(f[i]["title"], "")) + "|" + normalizar(jstr(f[i]["artist_display"], "")))
+        state.set("claves_blob", claves.join("\n"))
+        state.set("claves_firma", firma)
+    Dict<string, int> out = {}
+    for int i in range(0, len(claves)):
+        out[claves[i]] = 1
     return out
 
 # Las filas de `ids` (en ese orden) que pasan el filtro de descubrimiento, sin
 # repetir canción ni con lo ya usado; como mucho `tope`. Marca lo que coge en
-# `usadas`.
-fn List<Json> filtrar_nuevas(List<string> ids, List<string> escuchadas, List<string> usadas, int tope):
+# `usadas`. Una sola consulta para todo el lote.
+fn List<Json> filtrar_nuevas(List<string> ids, Dict<string, int> escuchadas, Dict<string, int> usadas, int tope):
     List<Json> out = []
+    Dict<string, Json> filas = track_rows_por_ids(ids)
     for int i in range(0, len(ids)):
         if len(out) >= tope:
             break
-        Json? fila = track_row_por_id(ids[i])
+        Json? fila = filas.get(ids[i])
         if fila == null or jint(fila["durationMs"], 0) <= 0 or es_version(fila):
             continue
         string clave = clave_cancion(fila)
-        if escuchadas.contains(clave) or usadas.contains(clave):
+        if escuchadas.has(clave) or usadas.has(clave):
             continue
-        usadas.add(clave)
+        usadas[clave] = 1
         out.add(fila)
     return out
 
@@ -120,8 +134,8 @@ fn string sql_similares():
               from tracks t join albumes_semilla al on al.album_id = t.album_id
             union all
             select distinct p2.track_id, 0.15
-              from playlist_items p1 join semilla s on s.id = p1.track_id
-              join playlist_items p2 on p2.playlist_id = p1.playlist_id
+              from semilla s cross join playlist_items p1 on p1.track_id = s.id
+              cross join playlist_items p2 on p2.playlist_id = p1.playlist_id
         )
         select c.track_id as id, sum(c.peso) as puntuacion
         from candidatos c
@@ -205,7 +219,7 @@ fn void recomendaciones_tick():
         """, ventana_dias())
     if len(artistas) == 0:
         return
-    List<string> escuchadas = claves_escuchadas()
+    Dict<string, int> escuchadas = claves_escuchadas()
     List<List<string>> montones = []
     for int i in range(0, len(artistas)):
         string nombre = jstr(artistas[i]["nombre"], "")
@@ -219,9 +233,10 @@ fn void recomendaciones_tick():
         # Solo canciones de ESE artista (la búsqueda por nombre trae también
         # versiones de otros), que no conozcas y que no sean directos/versiones.
         List<string> suyas = []
-        List<string> vistas = []
+        Dict<string, int> vistas = {}
+        Dict<string, Json> filas = track_rows_por_ids(ids)
         for int k in range(0, len(ids)):
-            Json? fila = track_row_por_id(ids[k])
+            Json? fila = filas.get(ids[k])
             if fila == null or jint(fila["durationMs"], 0) <= 0 or es_version(fila):
                 continue
             List<Json> de_el = await sqlite.query("""
@@ -231,9 +246,9 @@ fn void recomendaciones_tick():
             if len(de_el) == 0:
                 continue
             string clave = clave_cancion(fila)
-            if escuchadas.contains(clave) or vistas.contains(clave):
+            if escuchadas.has(clave) or vistas.has(clave):
                 continue
-            vistas.add(clave)
+            vistas[clave] = 1
             suyas.add(ids[k])
         montones.add(suyas)
     List<string> elegidas = intercalar(montones, por_seccion() * 2)
@@ -246,8 +261,8 @@ fn void recomendaciones_tick():
 
 fn List<Json> cmd_home():
     List<Json> secciones = []
-    List<string> escuchadas = claves_escuchadas()
-    List<string> usadas = []
+    Dict<string, int> escuchadas = claves_escuchadas()
+    Dict<string, int> usadas = {}
 
     # 1. Lo que no conoces.
     empujar(secciones, "home.from_catalog", "tracks", filtrar_nuevas(tanda_catalogo(), escuchadas, usadas, por_seccion()))

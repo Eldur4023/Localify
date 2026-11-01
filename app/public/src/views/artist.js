@@ -50,6 +50,12 @@ export function mountArtistView(contenedor, ruta) {
 			dejarBiblioteca = null;
 		}
 	}
+	/** Huella de lo que se pinta: si no cambia, no se reconstruye la página. */
+	function huella(d) {
+		const pistas = (l) => (l ?? []).map((p) => `${p.id}:${p.availability?.kind ?? ""}`).join(",");
+		const discos = (l) => (l ?? []).map((a) => a.id).join(",");
+		return [d.name, d.localTrackCount, d.importing, pistas(d.topTracks), discos(d.albums), discos(d.singles), pistas(d.allTracks)].join("|");
+	}
 	function programarRecarga() {
 		// Varios cambios de biblioteca seguidos (una descarga, la importación)
 		// no deben reconstruir cientos de filas una vez por evento.
@@ -57,9 +63,10 @@ export function mountArtistView(contenedor, ruta) {
 		recargaTimer = setTimeout(() => {
 			recargaTimer = 0;
 			void library.artistDetail(artistId).then((d) => {
+				const igual = detalle !== null && huella(d) === huella(detalle);
 				detalle = d;
 				sincronizarSuscripcion();
-				etiquetas();
+				if (!igual) etiquetas();
 			}).catch(() => {});
 		}, 350);
 	}

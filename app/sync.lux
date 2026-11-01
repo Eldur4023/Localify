@@ -38,16 +38,32 @@ fn bool sync_activo():
 
 # ─── Pistas ↔ identidades ────────────────────────────────────────────────────
 
-fn Json? sync_pista(string tid):
-    List<Json> f = await sqlite.query("""
+fn string sync_sql_pista():
+    return """
         select t.id, t.title, t.title_norm, t.artist_display, t.artist_norm, t.duration_ms,
                (select al.title from albums al where al.id = t.album_id) as album
-        from tracks t where t.id = ?""", tid)
+        from tracks t """
+
+fn Json sync_pista_fila(Json f):
+    return { "id": jstr(f["id"], ""), "title": jstr(f["title"], ""), "artist": jstr(f["artist_display"], ""),
+             "album": jstr(f["album"], ""), "durationMs": jint(f["duration_ms"], 0),
+             "titleNorm": jstr(f["title_norm"], ""), "artistNorm": jstr(f["artist_norm"], "") }
+
+fn Json? sync_pista(string tid):
+    List<Json> f = await sqlite.query(sync_sql_pista() + "where t.id = ?", tid)
     if len(f) == 0:
         return null
-    return { "id": jstr(f[0]["id"], ""), "title": jstr(f[0]["title"], ""), "artist": jstr(f[0]["artist_display"], ""),
-             "album": jstr(f[0]["album"], ""), "durationMs": jint(f[0]["duration_ms"], 0),
-             "titleNorm": jstr(f[0]["title_norm"], ""), "artistNorm": jstr(f[0]["artist_norm"], "") }
+    return sync_pista_fila(f[0])
+
+# Varias pistas de una vez (una consulta, no una por pista).
+fn Dict<string, Json> sync_pistas(List<string> ids):
+    Dict<string, Json> out = {}
+    if len(ids) == 0:
+        return out
+    List<Json> f = await sqlite.query(sync_sql_pista() + "where t.id in (?)", ids)
+    for int i in range(0, len(f)):
+        out[jstr(f[i]["id"], "")] = sync_pista_fila(f[i])
+    return out
 
 fn string sync_clave(Json? t):
     if t == null:
@@ -81,7 +97,7 @@ fn void sync_deriva(int real):
     List<string> r = state.get("sync_ref", "").split("|")
     if len(r) < 4 or r[3] != "1" or not sync_activo():
         return
-    EstadoCola e = leer_estado()
+    EstadoCola e = leer_estado_ligero()
     if e.track_id != r[0] or e.status != "playing":
         return
     int esperado = int(r[1]) + (int(time.now()) - int(r[2]))
@@ -105,16 +121,20 @@ fn void sync_publicar(string orden, EstadoCola antes, EstadoCola despues):
     if t == null:
         return
     # ventana de cola, en el orden en que sonará: primero la cola de usuario, luego el contexto
-    List<Json> cola = []
+    # (candidatas de sobra: alguna puede no existir ya en tracks)
+    List<string> cand = []
     for int i in range(0, len(despues.user_queue)):
-        Json? q = sync_pista(despues.user_queue[i].trackId)
-        if q != null and len(cola) < 25:
-            cola.add(q)
+        if len(cand) < 40:
+            cand.add(despues.user_queue[i].trackId)
     for int k in range(despues.queue_index + 1, len(despues.context_queue)):
-        if len(cola) >= 25:
+        if len(cand) >= 40:
             break
-        Json? q = sync_pista(pista_en_orden(despues, k))
-        if q != null:
+        cand.add(pista_en_orden(despues, k))
+    Dict<string, Json> filas = sync_pistas(cand)
+    List<Json> cola = []
+    for int i in range(0, len(cand)):
+        Json? q = filas.get(cand[i])
+        if q != null and len(cola) < 25:
             cola.add(q)
     int pos = despues.cue != antes.cue ? despues.position_ms : posicion_viva(despues)
     # El fin de canción lo publican TODOS los equipos a la vez; el servidor se queda con el
@@ -138,13 +158,14 @@ fn void sync_publicar(string orden, EstadoCola antes, EstadoCola despues):
 # que la mandó, así que aquí no se vuelve a barajar (las dos colas no se separarían).
 fn void sync_poner_flags(bool shuffle, string repeat, bool ventana_nueva):
     for int intento in range(0, 3):
-        EstadoCola e = leer_estado()
+        EstadoCola e = ventana_nueva ? leer_estado() : leer_estado_ligero()
         if e.shuffle == shuffle and e.repeat_mode == repeat and not ventana_nueva:
             return
         e.shuffle = shuffle
         e.repeat_mode = repeat
         if ventana_nueva:
             e.play_order = []
+            e.ctx_sucio = true
             e.queue_index = 0
         if guardar_estado(e):
             return
@@ -175,7 +196,7 @@ fn void sync_aplicar(Json r, bool primera):
     bool suena = juega and ajuste("sync_modo", "both") != "here"
     bool shuffle = st["shuffle"] == true
     string repeat = jstr(st["repeat"], "off")
-    EstadoCola e = leer_estado()
+    EstadoCola e = leer_estado_ligero()
     Json? mia = sync_pista(e.track_id)
     if sync_clave(mia) != sync_clave(t):
         string tid = sync_resolver(t, true)
@@ -226,9 +247,11 @@ fn void sync_enviar():
     if cuerpo != null:
         srv("PUT", "/playback", cuerpo)
 
-fn void sync_recibir():
+# `espera` (s): el servidor mantiene la petición abierta hasta que cambie algo (o pasen
+# `espera` s); uno antiguo ignora el parámetro y responde al instante.
+fn void sync_recibir(int espera):
     int desde = int(state.get("sync_rev", "0"))
-    Json? r = srv("GET", "/playback?since=" + str(desde))
+    Json? r = srv("GET", "/playback?since=" + str(desde) + "&wait=" + str(espera), null, espera * 1000 + 5000)
     if r == null or r["status"] != 200:
         return
     int rev = jint(r["body"]["rev"], 0)
@@ -243,6 +266,18 @@ fn void sync_recibir():
         return
     sync_aplicar(r["body"], desde == 0)
 
+# Escuchar al otro equipo (events.lux, cada 1 s, en su propio bloque: la petición larga no
+# debe retrasar sync_enviar). Con el servidor nuevo es una espera larga (se entera al
+# instante y no hay sondeo); si responde al momento (servidor antiguo) se espacia: 1 s
+# sonando aquí, 5 s en pausa.
+fn void sync_escuchar_tick():
+    if not sync_activo() or state.get("srv_caido", "") != "" or state.get("sync_descanso", "") != "":
+        return
+    int t0 = time.now()
+    sync_recibir(25)
+    if time.now() - t0 < 2000:
+        state.set("sync_descanso", "1", leer_estado_ligero().status == "playing" ? 900 : 4500)
+
 fn void sync_tick():
     # En el móvil, medio segundo de sondeo no aporta nada (la deriva la mueven
     # los informes del <audio>, cada 3 s): una pasada por segundo basta.
@@ -253,10 +288,8 @@ fn void sync_tick():
     if state.incr("sync_anuncio", 1, 60000) == 1:
         srv("PUT", "/devices", { "deviceId": sync_dispositivo(), "name": sync_nombre(), "platform": en_movil() ? "android" : "desktop" })
     sync_enviar()
-    if state.incr("sync_poll", 1, 900) == 1:
-        sync_recibir()
     # en el móvil lo comprueba cada informe de posición del <audio> (movil.lux)
     if not en_movil():
-        EstadoCola e = leer_estado()
+        EstadoCola e = leer_estado_ligero()
         if e.status == "playing":
             sync_deriva(posicion_viva(e))

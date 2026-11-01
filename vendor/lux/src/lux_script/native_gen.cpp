@@ -13,6 +13,8 @@
 #include <set>
 #include <sstream>
 
+// Android has no g++: the --native code generator is compiled out (LUX_NO_NATIVE).
+#ifndef LUX_NO_NATIVE
 namespace lux_script {
 namespace {
 
@@ -5536,3 +5538,4 @@ std::string route_runtime_prelude() {
 }
 
 } // namespace lux_script
+#endif // LUX_NO_NATIVE

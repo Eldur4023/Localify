@@ -313,6 +313,11 @@ public:
         // the process's mmap_lock); pread() from the page cache is cheaper.
         sqlite3_exec(db, "PRAGMA temp_store=MEMORY", nullptr, nullptr, &msg);
         if (msg) sqlite3_free(msg);
+#ifdef __ANDROID__
+        // 512 KiB of page cache per connection instead of the default 2 MiB.
+        sqlite3_exec(db, "PRAGMA cache_size=-512", nullptr, nullptr, &msg);
+        if (msg) sqlite3_free(msg);
+#endif
 
         // Waits instead of failing when another connection holds the file --
         // except on an inline slot: the event loop never sleeps.

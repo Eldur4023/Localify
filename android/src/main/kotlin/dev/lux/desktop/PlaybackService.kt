@@ -113,7 +113,6 @@ class PlaybackService : Service() {
                 val b = descargarArte(url)
                 ui.post { if (url == arteUrl) { arte = b; refrescar() } }
             }.start()
-            else ui.post { refrescar() }
         }
         ui.post { refrescar() }
     }

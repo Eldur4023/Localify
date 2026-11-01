@@ -111,7 +111,6 @@ export function mountSidebar(contenedor, router) {
 	const bloque = nodo("div", "sidebar__block");
 	bloque.append(cabecera, lista);
 	contenedor.append(nav, bloque);
-	const soltados = [];
 	function etiquetas() {
 		titulo.textContent = t("library.playlists");
 		nueva.setAttribute("aria-label", t("playlist.new"));
@@ -180,55 +179,82 @@ export function mountSidebar(contenedor, router) {
 	}
 	/** Copia mutable de lo último pintado, para reordenar sin repintar todo. */
 	let ordenActual = [];
+	/** Un nodo por playlist, por id: pintar solo toca lo que cambió. */
+	const nodos = new Map();
+	function crearNodo(p) {
+		const n = { p, clave: "" };
+		n.li = document.createElement("li");
+		n.a = nodo("a", "sidebar__item");
+		n.a.href = `#/playlist/${p.id}`;
+		n.a.dataset["playlistId"] = p.id;
+		// Miniatura en vez del icono genérico: en una barra con diez playlists,
+		// diez notas musicales iguales no distinguen ninguna.
+		n.arte = nodo("span", "sidebar__arte");
+		n.nombre = document.createElement("span");
+		n.a.append(n.arte, n.nombre);
+		// Los manejadores leen `n.p`, que se actualiza en cada pintado.
+		n.quitar = [
+			// Soltar pistas encima las añade.
+			zonaDeSoltado(n.a, TIPO_PISTAS, async (ids) => {
+				await api.addTracks(n.p.id, ids, null);
+				refrescar();
+			}),
+			// Arrastrar la propia fila reordena la lista de playlists.
+			reordenable(n.a, () => n.p.id, TIPO_PLAYLIST)
+		];
+		// Las mismas opciones que en su ficha.
+		n.a.addEventListener("contextmenu", (e) => {
+			e.preventDefault();
+			abrirMenu(e.clientX, e.clientY, opcionesDePlaylist(n.p, {
+				alCambiar: refrescar,
+				alBorrar: () => {
+					refrescar();
+					// Si se borró la que estaba abierta, la pantalla se queda
+					// enseñando algo que ya no existe.
+					if (globalThis.location.hash === `#/playlist/${n.p.id}`) {
+						router.ir("library");
+					}
+				}
+			}));
+		});
+		n.li.append(n.a);
+		botones.set(`playlist:${p.id}`, n.a);
+		return n;
+	}
+	function actualizarNodo(n, p) {
+		n.p = p;
+		n.nombre.textContent = p.name;
+		// Con la barra colapsada el texto no se ve: el globo es lo único que queda.
+		n.a.title = p.name;
+		// La imagen se rehace solo si cambió (como en la ficha de la playlist).
+		const clave = `${p.hasOwnCover}:${p.updatedAt}:${(p.coverAlbums ?? []).join(",")}`;
+		if (clave === n.clave) return;
+		n.clave = clave;
+		n.arte.replaceChildren(icono("music", 20));
+		ponerImagenDePlaylist(n.arte, p, true);
+	}
 	function pintar(items) {
 		ordenActual = [...items];
-		for (const cancelar of soltados.splice(0)) cancelar();
-		lista.replaceChildren(liked);
+		const vivos = new Set();
+		let previo = liked;
+		if (liked.parentNode !== lista) lista.prepend(liked);
 		for (const p of ordenActual) {
-			const li = document.createElement("li");
-			const a = nodo("a", "sidebar__item");
-			a.href = `#/playlist/${p.id}`;
-			a.dataset["playlistId"] = p.id;
-			// Miniatura en vez del icono genérico: en una barra con diez playlists,
-			// diez notas musicales iguales no distinguen ninguna, y la portada de lo
-			// que hay dentro sí se reconoce de reojo.
-			const arte = nodo("span", "sidebar__arte");
-			arte.append(icono("music", 20));
-			ponerImagenDePlaylist(arte, p);
-			const nombre = document.createElement("span");
-			nombre.textContent = p.name;
-			// Con la barra colapsada el texto no se ve: el globo del sistema es lo
-			// único que queda para saber cuál es cuál sin abrirla.
-			a.title = p.name;
-			a.append(arte, nombre);
-			// Soltar pistas encima las añade. Es lo que la gente intenta sin que
-			// nadie se lo diga.
-			soltados.push(zonaDeSoltado(a, TIPO_PISTAS, async (ids) => {
-				await api.addTracks(p.id, ids, null);
-				refrescar();
-			}));
-			// Arrastrar la propia fila reordena la lista de playlists.
-			soltados.push(reordenable(a, () => p.id, TIPO_PLAYLIST));
-			// Las mismas opciones que en su ficha. Renombrar una playlist obligaba a
-			// entrar en ella, volver y comprobar que el cambio se veía; aquí está
-			// donde se la está mirando.
-			a.addEventListener("contextmenu", (e) => {
-				e.preventDefault();
-				abrirMenu(e.clientX, e.clientY, opcionesDePlaylist(p, {
-					alCambiar: refrescar,
-					alBorrar: () => {
-						refrescar();
-						// Si se borró la que estaba abierta, la pantalla se queda
-						// enseñando algo que ya no existe.
-						if (globalThis.location.hash === `#/playlist/${p.id}`) {
-							router.ir("library");
-						}
-					}
-				}));
-			});
-			li.append(a);
-			lista.append(li);
-			botones.set(`playlist:${p.id}`, a);
+			vivos.add(p.id);
+			let n = nodos.get(p.id);
+			if (!n) {
+				n = crearNodo(p);
+				nodos.set(p.id, n);
+			}
+			actualizarNodo(n, p);
+			if (previo.nextSibling !== n.li) previo.after(n.li);
+			previo = n.li;
+		}
+		for (const [id, n] of nodos) {
+			if (vivos.has(id)) continue;
+			for (const q of n.quitar) q();
+			n.li.remove();
+			botones.delete(`playlist:${id}`);
+			nodos.delete(id);
 		}
 	}
 	/**
@@ -319,7 +345,8 @@ export function mountSidebar(contenedor, router) {
 			dejarIdioma();
 			dejarEventos();
 			dejarReordenPlaylists();
-			for (const cancelar of soltados.splice(0)) cancelar();
+			for (const n of nodos.values()) for (const q of n.quitar) q();
+			nodos.clear();
 			contenedor.replaceChildren();
 		}
 	};

@@ -25,8 +25,20 @@ export function mountQueuePanel(contenedor) {
 	contenedor.append(el);
 	let instantanea = null;
 	let revision = -1n;
-	const desmontadores = [];
+	/** Filas ya creadas, por clave: pintar reutiliza las que siguen en la cola. */
+	let cache = new Map();
+	let usadas = new Set();
+	function limpiarCache() {
+		for (const r of cache.values()) r.quitar?.();
+		cache = new Map();
+	}
 	function fila(entrada, opciones) {
+		const clave = `${opciones.usuario ? 1 : 0}:${entrada.entryId}:${entrada.track.title}:${entrada.track.artistDisplay}`;
+		usadas.add(clave);
+		const previa = cache.get(clave);
+		if (previa) return previa.f;
+		const registro = { f: null, quitar: null };
+		cache.set(clave, registro);
 		const f = nodo("div", "cola__fila");
 		f.dataset["entryId"] = entrada.entryId;
 		const textos = nodo("div", "cola__textos");
@@ -43,13 +55,14 @@ export function mountQueuePanel(contenedor) {
 				void api.remove(entrada.entryId);
 			}, { tamano: 14 });
 			f.append(quitar);
-			desmontadores.push(reordenable(f, () => entrada.entryId));
+			registro.quitar = reordenable(f, () => entrada.entryId);
 		}
 		// Un clic salta a esa entrada: en la cola no hay nada más que hacer con
 		// una fila, igual que en las listas de pistas.
 		f.addEventListener("click", () => {
 			void api.jumpTo(entrada.entryId);
 		});
+		registro.f = f;
 		return f;
 	}
 	function bloque(clave, entradas, usuario) {
@@ -61,13 +74,16 @@ export function mountQueuePanel(contenedor) {
 		return s;
 	}
 	function pintar() {
-		for (const quitar of desmontadores.splice(0)) quitar();
+		usadas = new Set();
 		cuerpo.replaceChildren();
 		titulo.textContent = t("queue.title");
 		vaciar.textContent = t("queue.clear");
 		cerrarBoton.setAttribute("aria-label", t("common.close"));
 		cerrarBoton.title = t("common.close");
-		if (!instantanea) return;
+		if (!instantanea) {
+			limpiarCache();
+			return;
+		}
 		const q = instantanea;
 		vaciar.hidden = q.userQueue.length === 0;
 		if (q.current) {
@@ -88,6 +104,11 @@ export function mountQueuePanel(contenedor) {
 		if (!q.current && q.userQueue.length === 0 && q.contextQueue.length === 0) {
 			const p = nodo("p", "vista__empty", t("queue.empty"));
 			cuerpo.append(p);
+		}
+		for (const [k, r] of cache) {
+			if (usadas.has(k)) continue;
+			r.quitar?.();
+			cache.delete(k);
 		}
 	}
 	async function refrescar() {
@@ -141,7 +162,10 @@ export function mountQueuePanel(contenedor) {
 		if (e.key === "Escape" && !el.hidden) cerrar();
 	};
 	globalThis.addEventListener("keydown", alTeclado);
-	const dejarIdioma = alCambiarIdioma(pintar);
+	const dejarIdioma = alCambiarIdioma(() => {
+		limpiarCache();
+		pintar();
+	});
 	pintar();
 	return {
 		abrir,
@@ -156,7 +180,7 @@ export function mountQueuePanel(contenedor) {
 			dejarEventos();
 			dejarReorden();
 			globalThis.removeEventListener("keydown", alTeclado);
-			for (const quitar of desmontadores.splice(0)) quitar();
+			limpiarCache();
 			el.remove();
 		}
 	};

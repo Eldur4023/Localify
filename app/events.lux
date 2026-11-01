@@ -26,7 +26,7 @@ on start:
     # Una app recién abierta no empieza a sonar sola: lo que quedó "sonando" al cerrarla se retoma
     # en pausa, en su posición. Aquí y no en la interfaz: va ANTES de cualquier sincronización con
     # otro equipo (si la interfaz lo pausaba después, pisaba el "sonando" que acababa de llegar).
-    if en_movil() and leer_estado().status == "playing":
+    if en_movil() and leer_estado_ligero().status == "playing":
         mutar_estado("pause", "", "", -1)
 
 # ─── Tareas de fondo ─────────────────────────────────────────────────────────
@@ -39,6 +39,13 @@ every "200ms":
 # Las descargas avanzan por ticks (downloads.lux).
 every "1s":
     tick_descargas()
+
+# Lo que baja del servidor común (hasta 120 s de timeout) en su propio bloque: no frena el tick.
+every "1s":
+    srv_descargas_tick()
+
+# Serverify (red, puede tardar): aparte del tick de descargas.
+every "1s":
     # Serverify: playlists reflejadas en la nube, como mucho una vez cada 30 s (o ya, si
     # alguien tocó una playlist: despachar borra la marca)
     if srv_activo() and state.incr("srv_rec", 1, 30000) == 1:
@@ -56,6 +63,10 @@ every "1m":
 # Reproducción sincronizada entre equipos (sync.lux): envía lo pendiente y pregunta cada segundo.
 every "500ms":
     sync_tick()
+
+# ...y la escucha del otro equipo (petición larga) en su propio bloque.
+every "1s":
+    sync_escuchar_tick()
 
 # Importaciones de discografía que se pidieron al abrir una ficha en el móvil:
 # una por tick, en su propio bloque para que una importación lenta no retrase
@@ -89,21 +100,11 @@ fn Json construir_snapshot_de(EstadoCola e):
         state.set("remote_ready", "")
         ready.add({ "queryId": int(rr) })
 
-    List<Json> sellos = await sqlite.query("select key, value from settings where key in ('stamp_library','stamp_playlists','stamp_settings','playlists_change_kind')")
-    string s_lib = ""
-    string s_pl = ""
-    string s_aj = ""
-    string s_pl_kind = ""
-    for int i in range(0, len(sellos)):
-        string k = jstr(sellos[i]["key"], "")
-        if k == "stamp_library":
-            s_lib = jstr(sellos[i]["value"], "")
-        elif k == "stamp_playlists":
-            s_pl = jstr(sellos[i]["value"], "")
-        elif k == "stamp_settings":
-            s_aj = jstr(sellos[i]["value"], "")
-        elif k == "playlists_change_kind":
-            s_pl_kind = jstr(sellos[i]["value"], "")
+    # (ajuste() va por la caché de `state`: sin consulta a SQLite por foto)
+    string s_lib = ajuste("stamp_library", "")
+    string s_pl = ajuste("stamp_playlists", "")
+    string s_aj = ajuste("stamp_settings", "")
+    string s_pl_kind = ajuste("playlists_change_kind", "")
 
     return {
         "revision": e.revision,
@@ -125,34 +126,43 @@ fn Json construir_snapshot_de(EstadoCola e):
     }
 
 fn Json construir_snapshot():
-    return construir_snapshot_de(leer_estado())
+    return construir_snapshot_de(leer_estado_ligero())
 
 # Guarda la foto si cambió; los flujos SSE miran `snap_seq`, que es memoria.
 fn void publicar_snapshot_de(EstadoCola e):
     string txt = str(construir_snapshot_de(e))
+    state.set("snap_suena", e.status == "playing" ? "1" : "0")
     if txt != state.get("snap_txt", ""):
         state.set("snap_txt", txt)
         state.incr("snap_seq")
 
 fn void publicar_snapshot():
-    publicar_snapshot_de(leer_estado())
+    publicar_snapshot_de(leer_estado_ligero())
 
 # Una ventana abierta: al conectar recibe la foto actual (también al
 # reconectar), y luego cada cambio.
 sse endpoint("/api/events/stream"):
     int visto = 0
-    int latidos = 0
     # En el móvil no hay 5 fotos/s: el <audio> mueve la barra por su cuenta y
     # despertar el flujo 20 veces por segundo solo gasta batería.
-    int espera = en_movil() ? 200 : 50
+    int rapida = en_movil() ? 200 : 50
+    int espera = rapida
+    int quieto = 0     # ms seguidos sin foto nueva
+    int desde_ping = 0
     while sse.open:
         int seq = state.get("snap_seq", 0)
         if seq != visto:
             visto = seq
+            quieto = 0
             sse.send("snapshot", state.get("snap_txt", "{}"))
+        # En pausa y sin cambios desde hace 5 s no hace falta despertar 20 (5 en móvil) veces por
+        # segundo: se espacia (la primera foto tras un cambio llega con ese retraso como mucho).
+        espera = (quieto > 5000 and state.get("snap_suena", "0") != "1") ? (en_movil() ? 1000 : 250) : rapida
         await sleep(espera)
-        latidos = latidos + 1
-        if latidos % (15000 / espera) == 0:
+        quieto = quieto + espera
+        desde_ping = desde_ping + espera
+        if desde_ping >= 15000:
+            desde_ping = 0
             sse.ping("keepalive")
 
 # Diálogo nativo de fichero: lo resuelve la propia ventana GTK. Solo se llama

@@ -23,10 +23,33 @@ foreach(_m PDF POSTGRES MYSQL CRYPTO GZIP IMAGE)
     set(LUX_${_m} OFF CACHE BOOL "" FORCE)
 endforeach()
 # Módulos nativos de Lux que ninguna parte de app/ importa (correo, claves, OTP, zip, csv).
+# En Android además rooms y test (ni app/ ni server/ los importan; mail.cpp ya
+# queda fuera por vendor/lux). OJO: nada de ellos se puede `import`ar en Android.
 set(LUX_MODULE_EXCLUDE "" CACHE STRING "" FORCE)
-foreach(_m imap mailparse keyring otp zip csv)
+set(_excluded_modules imap mailparse keyring otp zip csv)
+if(ANDROID)
+    list(APPEND _excluded_modules rooms test)
+endif()
+foreach(_m ${_excluded_modules})
     list(APPEND LUX_MODULE_EXCLUDE "src/lux_script/modules/base_modules/${_m}.cpp")
 endforeach()
+
+# Android size/battery flags (they must precede add_subdirectory: they apply to
+# lux, lux_script and the modules too). -g0: no debug info (AGP strips the .so
+# anyway; this shrinks the 73 MB of intermediates). Hidden visibility + the
+# version script below leave only the JNI entry points exported.
+if(ANDROID)
+    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -g0 -fvisibility=hidden")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g0 -fvisibility=hidden -fvisibility-inlines-hidden")
+    # Off by default: measured -61 KB (0.7%) only, not worth the risk with --whole-archive registrars.
+    option(LUX_ANDROID_LTO "ThinLTO for the Android build" OFF)
+    # Manual -flto=thin: CMAKE_INTERPROCEDURAL_OPTIMIZATION makes CMake 3.22 link
+    # with gold, which does not know --pack-dyn-relocs.
+    if(LUX_ANDROID_LTO)
+        set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -flto=thin")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -flto=thin")
+    endif()
+endif()
 add_subdirectory(vendor/lux)
 
 # ── Android: no window, no GTK -- the Kotlin Activity (android/) owns a
@@ -55,7 +78,22 @@ if(ANDROID)
         DEPENDS ${_respack} ${_app_files}
         VERBATIM)
 
+    # Size: -Os for the interpreter + modules, -O2 for the HTTP core.
+    target_compile_options(lux_script PRIVATE -Os)
+    target_compile_options(lux PRIVATE -O2)
+
     add_library(luxapp SHARED src/boot.cpp src/android.cpp ${_generated})
+    target_compile_options(luxapp PRIVATE -Os)
+    # Only Java_* and JNI_OnLoad are exported (android/jni.map); the rest is local.
+    # --pack-dyn-relocs=android (APS2) is safe on minSdk 28; relr needs API 30.
+    target_link_options(luxapp PRIVATE
+        -Wl,--exclude-libs,ALL
+        -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/android/jni.map
+        -fuse-ld=lld
+        -Wl,--icf=all
+        -Wl,--pack-dyn-relocs=android
+        -Wl,--build-id=none)
+    set_target_properties(luxapp PROPERTIES LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/android/jni.map)
     target_include_directories(luxapp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     set(THREADS_PREFER_PTHREAD_FLAG ON)
     find_package(Threads REQUIRED)

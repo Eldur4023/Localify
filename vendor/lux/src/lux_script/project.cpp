@@ -2406,9 +2406,13 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         // comentario sobre BuiltinModule en project.hpp. Solo si lo demas
         // compilo limpio: no tiene sentido invocar g++ sobre un programa que
         // de todas formas no se va a publicar.
+#ifndef LUX_NO_NATIVE
         if (native && diags.empty())
             mod->native = compile_native(mod->program, fns, sigs, ".lux-native",
                                           mod->native_warning, &mod->native_why, &mod->functions, &enums);
+#else
+        (void)native;   // --native needs g++: not available in this build
+#endif
 
         ClassTable classes;
         build_classes(mod->program, fns, sigs, enums, &mod->program.imports, classes, diags);

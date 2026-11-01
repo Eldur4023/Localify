@@ -12,35 +12,29 @@ fn List<string> ids_de_filas(List<Json> filas):
     return out
 
 # Descargas activas resumidas (para que la UI muestre progreso).
+#
+# Solo lo que usa la interfaz (ipc/transport.js: trackId, state, bytesDone, bytesTotal,
+# lastError, attempts). Sin trabajos activos (tick_descargas lo anota en `state`) no
+# se consulta nada: la foto se hace 5 veces por segundo.
 fn List<Json> descargas_activas():
+    if state.get("dl_activos", "1") == "0":
+        return []
     List<Json> f = await sqlite.query("""
-        select j.track_id, j.state, j.priority, j.bytes_done, j.bytes_total, j.video_id,
-               j.last_error, j.attempts,
-               t.title, t.artist_display, t.duration_ms
-        from download_jobs j join tracks t on t.id = j.track_id
-        where j.state in ('queued','matching','downloading','finalizing')
-        order by j.priority, j.updated_at
+        select track_id, state, bytes_done, bytes_total, last_error, attempts
+        from download_jobs
+        where state in ('queued','matching','downloading','finalizing')
+        order by priority, updated_at
         """)
     List<Json> out = []
     for int i in range(0, len(f)):
         Json r = f[i]
-        int hecho = jint(r["bytes_done"], 0)
-        int total = jint(r["bytes_total"], 0)
-        int pct = 0
-        if total > 0:
-            pct = int((hecho * 100.0) / total)
         out.add({
             "trackId": jstr(r["track_id"], ""),
             "state": jstr(r["state"], ""),
-            "priority": jstr(r["priority"], ""),
-            "bytesDone": hecho,
-            "bytesTotal": total,
-            "percent": pct,
+            "bytesDone": jint(r["bytes_done"], 0),
+            "bytesTotal": jint(r["bytes_total"], 0),
             "attempts": jint(r["attempts"], 0),
-            "lastError": jstr(r["last_error"], ""),
-            "title": jstr(r["title"], ""),
-            "artistDisplay": jstr(r["artist_display"], ""),
-            "durationMs": jint(r["duration_ms"], 0)
+            "lastError": jstr(r["last_error"], "")
         })
     return out
 

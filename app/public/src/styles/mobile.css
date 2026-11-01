@@ -154,7 +154,7 @@
   .destacado__arte { width: 72px; height: 72px; }
   .destacado__titulo { font-size: var(--fs-xl, 22px); }
   /* con el teclado abierto sobran las pestañas: el hueco es para lo que se escribe */
-  body:has(input:not([type=range]):focus) .tabs { display: none; }
+  body.teclado-abierto .tabs { display: none; }
 
   /* ── Listas: portada, título y artista, estado ─────────────────────────── */
 

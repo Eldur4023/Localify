@@ -4,8 +4,6 @@ import { alCambiarIdioma, t } from "../i18n/index.js";
 import { botonIcono, icono } from "../ui/icons.js";
 import { ponerPortadaDePista } from "../ui/cards.js";
 import { nodo } from "../ui/dom.js";
-/** Cada cuánto se comprueba qué línea toca. El mismo ritmo que la barra. */
-const SONDEO_MS = 250;
 export function mountNowPlaying(contenedor) {
 	const el = nodo("section", "ampliada");
 	el.hidden = true;
@@ -40,7 +38,6 @@ export function mountNowPlaying(contenedor) {
 	let lineas = [];
 	let nodos = [];
 	let activa = -1;
-	let temporizador = null;
 	function pintarCabecera(estado) {
 		titulo.textContent = estado.track?.title ?? t("player.nothing");
 		if (estado.track?.id !== pistaPintada) {
@@ -107,11 +104,7 @@ export function mountNowPlaying(contenedor) {
 		if (!nodo) return;
 		nodo.classList.add("is-activa");
 		// Centrar en el contenedor de la letra, sin tocar ningún otro scroll.
-		const destino = nodo.offsetTop - letra.clientHeight / 2 + nodo.offsetHeight / 2;
-		letra.scrollTo({
-			top: Math.max(0, destino),
-			behavior: "smooth"
-		});
+		nodo.scrollIntoView({ block: "center", behavior: "smooth" });
 	}
 	async function cargarLetra(trackId) {
 		pistaActual = trackId;
@@ -131,8 +124,8 @@ export function mountNowPlaying(contenedor) {
 		if (pistaActual !== trackId) return;
 		pintarLetra();
 	}
-	async function sincronizar() {
-		const estado = await player.getState();
+	async function sincronizar(dado) {
+		const estado = dado ?? await player.getState();
 		pintarCabecera(estado);
 		if (estado.track?.id !== pistaActual) await cargarLetra(estado.track?.id ?? null);
 	}
@@ -141,28 +134,13 @@ export function mountNowPlaying(contenedor) {
 		const ms = globalThis.__localifyWebAudio?.posicionMs?.();
 		return typeof ms === "number" && Number.isFinite(ms) ? ms : null;
 	}
-	let sondeoEnCurso = false;
-	function sondear() {
-		if (lineas.length === 0) return;
-		// En el móvil la posición es local: preguntarla por HTTP cuatro veces
-		// por segundo solo gastaba CPU y batería.
-		const local = posicionLocalMs();
-		if (local !== null) {
-			resaltar(lineaEn(local));
-			return;
-		}
-		// En escritorio sí hace falta el backend, pero sin solapar peticiones:
-		// con la vista abierta y el equipo cargado se acumulaban las respuestas.
-		if (sondeoEnCurso) return;
-		sondeoEnCurso = true;
-		void player.position().then((p) => resaltar(lineaEn(p.positionMs))).catch(() => {
-			// Un sondeo perdido no rompe nada: el siguiente lo corrige.
-		}).finally(() => { sondeoEnCurso = false; });
-	}
 	const dejarEventos = alRecibir((evento) => {
 		if (!abierta) return;
 		if (evento.type === "trackChanged" || evento.type === "playStatusChanged") {
-			void sincronizar();
+			void sincronizar(evento.estado);
+		} else if (evento.type === "positionTick" && lineas.length > 0) {
+			// En el móvil manda la posición del <audio>; la de la foto va con retraso.
+			resaltar(lineaEn(posicionLocalMs() ?? evento.positionMs));
 		}
 	});
 	// En móvil la vista entra y sale deslizando (clase `is-visible`, ver
@@ -181,9 +159,6 @@ export function mountNowPlaying(contenedor) {
 		}
 		document.body.classList.add("is-ampliada");
 		void sincronizar();
-		// El sondeo solo corre con la vista abierta: mantenerlo de fondo sería un
-		// comando cuatro veces por segundo para mover algo que nadie ve.
-		temporizador ??= globalThis.setInterval(sondear, SONDEO_MS);
 	}
 	function cerrar() {
 		abierta = false;
@@ -194,10 +169,6 @@ export function mountNowPlaying(contenedor) {
 			el.hidden = true;
 		}
 		document.body.classList.remove("is-ampliada");
-		if (temporizador !== null) {
-			globalThis.clearInterval(temporizador);
-			temporizador = null;
-		}
 	}
 	const alTeclado = (e) => {
 		if (e.key === "Escape" && abierta) cerrar();

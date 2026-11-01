@@ -270,6 +270,14 @@ fn void db_init():
     if v < 4:
         recalcular_normalizados()
         ajuste_poner("schema_version", "4")
+    if v < 5:
+        # Migración 5: índices de (título, artista) -- parejas_duplicadas() (cada arranque) y la
+        # ordenación por artista de la biblioteca --, y la reparación de títulos repetidos, que antes
+        # corría en cada arranque (guardar_pista ya no deja entrar títulos así).
+        await sqlite.exec("create index if not exists idx_tracks_title_artist on tracks(title_norm, artist_norm)")
+        await sqlite.exec("create index if not exists idx_tracks_artist_title on tracks(artist_norm, title_norm, id)")
+        reparar_titulos_repetidos()
+        ajuste_poner("schema_version", "5")
     # Al abrir la app no se sigue sonando: se restaura EN PAUSA en la última
     # posición conocida, como el original.
     await sqlite.exec("update player_state set status = 'paused' where id = 1 and status = 'playing'")
@@ -283,15 +291,27 @@ fn bool player_state_tiene(string columna):
             return true
     return false
 
-# Ajuste persistido: get con valor por defecto.
+# Ajuste persistido: get con valor por defecto. Se llama varias veces por segundo desde
+# los ticks de fondo (srv_activo, sync_activo...): se cachea en `state` ("v" + valor, o "-" si
+# no existe), y ajuste_poner lo mantiene al día. Única escritura a `settings` fuera de aquí:
+# el borrado masivo de las claves `srvp*` (serverify_playlists.lux), que por eso no se cachean.
 fn string ajuste(string clave, string por_defecto):
+    bool cacheable = not clave.starts_with("srvp")
+    if cacheable:
+        string c = state.get("aj:" + clave, "")
+        if c != "":
+            return c == "-" ? por_defecto : c.slice(1)
     List<Json> filas = await sqlite.query("select value from settings where key = ?", clave)
-    if len(filas) == 0:
-        return por_defecto
-    return jstr(filas[0]["value"], por_defecto)
+    string v = len(filas) == 0 ? "" : jstr(filas[0]["value"], "")
+    bool hay = len(filas) > 0 and filas[0]["value"] != null
+    if cacheable:
+        state.set("aj:" + clave, hay ? "v" + v : "-")
+    return hay ? v : por_defecto
 
 fn void ajuste_poner(string clave, string valor):
     await sqlite.exec("insert into settings(key, value, updated_at) values(?, ?, unixepoch()) on conflict(key) do update set value = excluded.value, updated_at = unixepoch()", clave, valor)
+    if not clave.starts_with("srvp"):
+        state.set("aj:" + clave, "v" + valor)
 
 # Raíz de la biblioteca en disco (audio/, covers/, .tmp/).
 fn string biblioteca_raiz():

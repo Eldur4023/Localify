@@ -45,7 +45,7 @@ fn Json estado_dto_de(EstadoCola e):
     }
 
 fn Json estado_dto():
-    return estado_dto_de(leer_estado())
+    return estado_dto_de(leer_estado_ligero())
 
 # Posición para el sondeo de "ahora suena" (4 Hz): solo la fila del reproductor
 # y la duración, sin parsear la cola de contexto entera.
@@ -97,18 +97,23 @@ fn void escucha_progreso(string track_id, int ms, string contexto):
     int dur = len(f) > 0 ? jint(f[0]["duration_ms"], 0) : 0
     int completa = dur > 0 and ms * 10 >= dur * 9 ? 1 : 0
     string id = state.get("escucha_id", "")
+    bool nueva = false
     if id != "" and state.get("escucha_pista", "") == track_id:
         await sqlite.exec("update play_history set ms_played = max(ms_played, ?), completed = max(completed, ?) where id = ?",
             ms, completa, id)
     else:
         id = nuevo_id()
+        nueva = true
         await sqlite.exec("insert into play_history(id, track_id, played_at, ms_played, completed, context) values(?, ?, unixepoch(), ?, ?, ?)",
             id, track_id, ms, completa, contexto)
         state.set("escucha_id", id)
         state.set("escucha_pista", track_id)
     state.set("escucha_ms", str(ms))
     state.set("escucha_t", str(time.now()))
-    marcar_estadisticas()
+    # La interfaz repinta las estadísticas (consulta pesada) en cada cambio de sello: al abrirse una
+    # escucha, y después como mucho cada 30 s mientras suena (antes: cada informe, ~5 s).
+    if nueva or state.incr("stats_sello", 1, 30000) == 1:
+        marcar_estadisticas()
 
 fn void escucha_cerrar():
     state.remove("escucha_id")
@@ -137,7 +142,7 @@ fn Json reproductor_orden(string orden, Json args):
         # Consulta barata (la vista de "ahora suena" la pide a 4 Hz): no muta
         # nada ni necesita parsear la cola de contexto.
         return posicion_dto()
-    EstadoCola antes = leer_estado()
+    EstadoCola antes = leer_estado_ligero()
     # Lo escuchado hasta ahora. Un aviso del motor (handoff/ended) trae el
     # suyo: para entonces el motor ya cambió de pista.
     int escuchado = jint(jget(args, "__listenedMs"), -1)
@@ -196,7 +201,9 @@ fn Json reproductor_orden(string orden, Json args):
     else:
         return error_api("INVALID", "error.invalid").status(400)
 
-    EstadoCola despues = leer_estado()
+    # La ventana de cola solo la necesita sync_publicar (con sync activo): lo demás, escalares.
+    bool remoto = jget(args, "__remote") == true
+    EstadoCola despues = (not remoto and sync_activo()) ? leer_estado() : leer_estado_ligero()
     bool cambio_pista = despues.track_id != antes.track_id
     if antes.track_id != "" and (cambio_pista or (natural and despues.cue != antes.cue)):
         escucha_progreso(antes.track_id, escuchado, antes.context)
@@ -216,7 +223,7 @@ fn Json reproductor_orden(string orden, Json args):
     if despues.revision != antes.revision:
         publicar_integraciones()
     # lo aplicado desde otro equipo (__remote) no se vuelve a publicar
-    if jget(args, "__remote") != true:
+    if not remoto:
         sync_publicar(orden, antes, despues)
     # En el móvil el tick de fondo va a 1 Hz (motor.lux): una orden publica su
     # foto ya, para que la interfaz no espere hasta el siguiente tick.
@@ -256,7 +263,7 @@ fn void publicar_integraciones():
     # costaría una lectura de estado + consulta de pista cada segundo.
     if en_movil():
         return
-    EstadoCola e = leer_estado()
+    EstadoCola e = leer_estado_ligero()
     Json? pista = track_row_por_id(e.track_id)
     int dur = pista == null ? 0 : jint(pista["durationMs"], 0)
     int pos = posicion_viva(e)

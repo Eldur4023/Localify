@@ -74,11 +74,17 @@ export function mountAlbumView(contenedor, ruta) {
 	* importando, la suscripción se mantiene.
 	*/
 	let dejarBiblioteca = null;
+	let recargaTimer = 0;
 	function sincronizarSuscripcion() {
 		const esperando = detalle?.importing === true;
 		if (esperando && !dejarBiblioteca) {
 			dejarBiblioteca = alRecibirTipo("libraryChanged", () => {
-				trackList.refrescar(true);
+				// Debounce: durante una importación llegan varios por segundo.
+				if (recargaTimer) return;
+				recargaTimer = setTimeout(() => {
+					recargaTimer = 0;
+					trackList.refrescar(true);
+				}, 350);
 			});
 		} else if (!esperando && dejarBiblioteca) {
 			dejarBiblioteca();
@@ -150,6 +156,7 @@ export function mountAlbumView(contenedor, ruta) {
 	return { destroy() {
 		dejarIdioma();
 		dejarBiblioteca?.();
+		clearTimeout(recargaTimer);
 		trackList.destroy();
 		el.remove();
 	} };

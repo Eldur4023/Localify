@@ -179,10 +179,7 @@ fn Json cmd_settings_patch(Json cambios):
         actuales["integrations"] = jget(cambios, "integrations")
     if jget(cambios, "language") != null:
         ajuste_poner("language", jstr(jget(cambios, "language"), "es"))
-    await sqlite.exec("""
-        insert into settings(key, value, updated_at) values('settings_json', ?, unixepoch())
-        on conflict(key) do update set value = excluded.value, updated_at = unixepoch()
-        """, str(actuales))
+    ajuste_poner("settings_json", str(actuales))
     # EQ y crossfade, en el acto; la salida solo si cambió (reabrirla corta el sonido).
     motor_aplicar_ajustes(otra_salida)
     tocar_ajustes()

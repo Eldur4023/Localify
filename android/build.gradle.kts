@@ -32,7 +32,7 @@ android {
                 // libcurl+openssl (ver android/README.md, "Dependencies").
                 val deps = System.getProperty("user.home") + "/android-deps/arm64"
                 arguments += listOf(
-                    "-DANDROID_STL=c++_shared",
+                    "-DANDROID_STL=c++_static",
                     "-DCMAKE_BUILD_TYPE=Release",
                     "-DLUX_EXAMPLES=OFF",
                     "-DSQLITE3_INC=$deps/include",
@@ -61,7 +61,9 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.findByName("release")
-            isMinifyEnabled = false   // el código es una Activity y un servicio; lo pesado es nativo
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
