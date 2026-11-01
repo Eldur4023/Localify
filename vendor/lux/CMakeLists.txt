@@ -21,7 +21,7 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID AND NOT WIN32)
     message(FATAL_ERROR "Lux requires Linux: it uses epoll, sendfile(2) and SO_REUSEPORT.")
 endif()
 
@@ -249,6 +249,12 @@ function(lux_link_script target)
         -Wl,--whole-archive
         lux_script
         -Wl,--no-whole-archive)
+    if(WIN32)
+        # MinGW emits the `TLS init function` of every inline thread_local
+        # (lux::detail::current_token...) as a strong symbol in each object;
+        # with the whole archive pulled in, ld reports it as multiply defined.
+        target_link_options(${target} PRIVATE -Wl,--allow-multiple-definition)
+    endif()
 endfunction()
 
 # --native (phase 4/5, routes): native_build.cpp invokes g++ as a subprocess

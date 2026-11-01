@@ -121,7 +121,7 @@ function(_lux_desktop_link name)
         target_include_directories(${name} PRIVATE ${WEBVIEW2_INCLUDE_DIR})
         target_link_libraries(${name} PRIVATE
             ole32 oleaut32 shell32 shlwapi user32 advapi32 version comdlg32 ws2_32)
-        target_link_options(${name} PRIVATE -static-libgcc -static-libstdc++)
+        target_link_options(${name} PRIVATE -static-libgcc -static-libstdc++ -Wl,--allow-multiple-definition)
     else()
         target_include_directories(${name} PRIVATE ${LUX_GTK_INCLUDE_DIRS} ${LUX_WEBKIT_INCLUDE_DIRS})
         target_link_directories(${name} PRIVATE ${LUX_GTK_LIBRARY_DIRS} ${LUX_WEBKIT_LIBRARY_DIRS})
