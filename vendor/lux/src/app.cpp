@@ -19,6 +19,7 @@
 #include <iostream>
 #include <memory>
 #include <filesystem>
+#include <cstdlib>
 #include <thread>
 #include <charconv>
 #include <chrono>
@@ -557,6 +558,14 @@ void App::run(const std::string& host, uint16_t port) {
 #endif
     if (num_threads == 0) num_threads = std::thread::hardware_concurrency();
     num_threads = std::max(1u, num_threads);
+    // Override: LUX_THREADS env or App::set_threads(). Caps the event loops;
+    // the two pools get at least 2 workers (handlers block on the DB/IO).
+    unsigned pool_threads = num_threads;
+    {
+        int want = threads_;
+        if (const char* e = std::getenv("LUX_THREADS")) want = std::atoi(e);
+        if (want > 0) { num_threads = static_cast<unsigned>(want); pool_threads = std::max(2u, num_threads); }
+    }
 
     // Shared pool for route handlers with no `await` at all: pure CPU-bound
     // work (see BlockingAwaitable, blocking_pool.hpp) that would otherwise
@@ -566,7 +575,7 @@ void App::run(const std::string& host, uint16_t port) {
     // default, core+8) -- see blocking_pool.hpp for the actual numbers this
     // was picked from: it is the knee of a real variance-vs-typical-case-cost
     // curve, not a round number.
-    blocking_pool().start(num_threads, 0, std::chrono::milliseconds(10));
+    blocking_pool().start(pool_threads, 0, std::chrono::milliseconds(10));
 
     // Separate pool for is_async native module calls (os.run(), http.*,
     // read_file()/write_file()) -- see io_blocking_pool()'s comment
@@ -578,7 +587,7 @@ void App::run(const std::string& host, uint16_t port) {
     // plenty of overflow room (self-retiring after 2s idle, same as the
     // other pool) for a burst of concurrent slow calls to not queue up
     // behind each other.
-    io_blocking_pool().start(num_threads, num_threads * 16);
+    io_blocking_pool().start(pool_threads, pool_threads * 16);
 
     // Descriptors: the soft limit up to the hard one (often 1024 of
     // 524288), as Go does at startup -- at 1024 the server ran out of them

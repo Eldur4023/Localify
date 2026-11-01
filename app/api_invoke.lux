@@ -368,6 +368,7 @@ fn Json despachar_base(string cmd, Json args):
         return jint(n[0]["n"], 0)
     if cmd == "library_retry_failed":
         int tocado = await sqlite.exec("update download_jobs set state = 'queued', attempts = 0, last_error = null, updated_at = unixepoch() where state = 'failed'")
+        state.set("dl_activos", "1")
         return tocado
     # Re-descargar UNA pista (botón de la fila cuando la descarga falló): vuelve a la cola, o se
     # encarga si no había trabajo. Prioridad inmediata: la pidió el usuario.
@@ -437,7 +438,7 @@ fn Json despachar_base(string cmd, Json args):
         tocar_playlists()
         return null
     if cmd == "playlist_detail":
-        return await cmd_playlist_detail(arg_str(args, "playlistId", ""))
+        return await cmd_playlist_detail(arg_str(args, "playlistId", ""), jget(args, "page"))
     if cmd == "playlist_add_tracks":
         await cmd_playlist_add(args)
         tocar_playlists()

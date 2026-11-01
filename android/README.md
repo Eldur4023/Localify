@@ -33,11 +33,27 @@ Para regenerarlas: amalgamation de sqlite.org, openssl-3.3 (`./Configure
 android-arm64`, con `ANDROID_NDK_ROOT` exportado) y curl-8.10 (cmake,
 `CURL_USE_OPENSSL=ON`, estático).
 
+Para adelgazar el `.so` (sin verificar: las deps no se han recompilado así),
+añadir a `Configure`: `no-legacy no-engine no-deprecated no-comp no-srp no-ct
+no-ocsp no-cms no-ts no-dsa no-sm2 no-sm3 no-sm4 no-idea no-camellia no-aria
+no-seed no-rc2 no-rc4 no-des no-whirlpool no-mdc2 no-dso no-tests`, y a cmake de
+curl: `-DHTTP_ONLY=ON -DCURL_DISABLE_LDAP=ON`. Ojo: `no-dsa`/`no-des` pueden
+romper suites TLS antiguas; probar la descarga de YouTube y el servidor común.
+
+El build de release (`CMakeLists.txt`, rama `ANDROID`): `-fvisibility=hidden` +
+`android/jni.map` (solo se exportan los `Java_*`; si se añade un símbolo que se
+resuelva con `dlsym` o `RegisterNatives` por nombre, hay que añadirlo al mapa),
+`-Os`/`-O2`, `--icf=all`, `--pack-dyn-relocs=android` (no `relr`: necesita API 30,
+y `minSdk` es 28), STL estática, `LUX_NO_NATIVE` (sin el generador `--native`: en
+el móvil no hay g++) y R8 (`android/proguard-rules.pro`: puente JS y métodos JNI).
+
 En el CMake raíz hay un parche de una línea respecto al vendor limpio
 (`AND NOT ANDROID` en el guard de "Lux requires Linux"); el resto del vendor
 tiene dos ajustes de compatibilidad con clang/libc++ (`luxp_serve.cpp`:
 mutex en vez de `std::atomic<shared_ptr>`; `template.cpp`: `Value kNull{}`
-value-initialized).
+value-initialized) y uno de SQLite (`lux_script/db_sqlite.cpp`): WAL + writer
+en lote en teléfonos reales, y journal DELETE sin lote solo bajo el emulador
+ARM, donde WAL/hilos se cuelgan. `LUX_ANDROID_EMULATOR=1|0` fuerza el modo.
 
 ## Qué funciona distinto en el móvil
 
@@ -71,6 +87,11 @@ value-initialized).
   `window.__localifyNative.cmd`. Pausa al desenchufar auriculares
   (`ACTION_AUDIO_BECOMING_NOISY`). El audio focus lo gestiona Chromium; no está
   verificado con una llamada real.
+- **Fichas**: abrir un álbum de catálogo o un artista no espera a YouTube Music.
+  La importación de la discografía se encola (`discografia_tick`, una por tick) y
+  la ficha devuelve al instante lo que ya hay en SQLite; al terminar,
+  `tocar_biblioteca()` avisa a la vista para que se repinte sola. Las playlists
+  se piden por páginas de 100 y el scroll de las listas se agrupa por frame.
 - **Interfaz** (`app/public/src/styles/mobile.css`, `shell/gestos.js`): la misma
   que en escritorio con ≤700 px. Cajón de navegación (☰ o deslizar desde el
   cuarto izquierdo), mini-reproductor (portada, título, play, siguiente) y vista

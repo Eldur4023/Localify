@@ -40,6 +40,14 @@ class PlaybackService : Service() {
     private var sonando = false
     private var arte: Bitmap? = null
     private var arteUrl = ""
+    // Lo que hay pintado en la notificación. La posición cambia cada pocos
+    // segundos, pero la notificación (y su bitmap) solo se rehace cuando
+    // cambia algo visible: título, artista, play/pausa o portada.
+    private var notificado = false
+    private var notifTitulo = ""
+    private var notifArtista = ""
+    private var notifSonando = false
+    private var notifArte: Bitmap? = null
 
     // Auriculares desenchufados / Bluetooth caído: pausar, no seguir por el altavoz.
     private val ruidoso = object : BroadcastReceiver() {
@@ -102,11 +110,33 @@ class PlaybackService : Service() {
         if (url != arteUrl) {
             arteUrl = url; arte = null
             if (url.isNotEmpty()) Thread {
-                val b = try { URL(url).openStream().use { BitmapFactory.decodeStream(it) } } catch (e: Exception) { null }
+                val b = descargarArte(url)
                 ui.post { if (url == arteUrl) { arte = b; refrescar() } }
             }.start()
         }
         ui.post { refrescar() }
+    }
+
+    /**
+     * Portada reducida antes de entrar en la notificación. Una carátula de
+     * YouTube llega a 1280x720: en ARGB son ~3,7 MB por cada `startForeground`
+     * y el binder revienta (TransactionTooLargeException) o va a tirones.
+     * 256 px de lado es de sobra para la miniatura (~230 KB como mucho).
+     */
+    private fun descargarArte(url: String): Bitmap? = try {
+        val conexion = URL(url).openConnection().apply {
+            connectTimeout = 5000
+            readTimeout = 5000
+        }
+        val datos = conexion.getInputStream().use { it.readBytes() }
+        val medidas = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(datos, 0, datos.size, medidas)
+        var escala = 1
+        while (medidas.outWidth / (escala * 2) >= TAMANO_ARTE || medidas.outHeight / (escala * 2) >= TAMANO_ARTE)
+            escala *= 2
+        BitmapFactory.decodeByteArray(datos, 0, datos.size, BitmapFactory.Options().apply { inSampleSize = escala })
+    } catch (e: Exception) {
+        null
     }
 
     private fun accion(icono: Int, etiqueta: String, accion: String): Notification.Action =
@@ -117,6 +147,8 @@ class PlaybackService : Service() {
         ).build()
 
     private fun refrescar() {
+        // La MediaSession sí se actualiza siempre: la pantalla de bloqueo
+        // extrapola el progreso a partir de la posición y la velocidad.
         sesion.setMetadata(
             MediaMetadata.Builder()
                 .putString(MediaMetadata.METADATA_KEY_TITLE, titulo)
@@ -134,6 +166,13 @@ class PlaybackService : Service() {
                 .setState(if (sonando) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED, posicionMs, 1f)
                 .build()
         )
+        // Solo un cambio visible rehace la notificación (y vuelve a pasar el
+        // bitmap al sistema): la posición no está entre ellos.
+        if (notificado && titulo == notifTitulo && artista == notifArtista &&
+            sonando == notifSonando && arte === notifArte
+        ) return
+        notificado = true
+        notifTitulo = titulo; notifArtista = artista; notifSonando = sonando; notifArte = arte
         val abrir = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE
@@ -165,6 +204,8 @@ class PlaybackService : Service() {
         const val ACCION_PREV = "dev.lux.desktop.PREV"
         const val CANAL = "playback"
         const val ID_NOTIFICACION = 1
+        /** Lado máximo (px) de la portada que viaja en la notificación. */
+        const val TAMANO_ARTE = 256
 
         /** Lo fija MainActivity: manda el comando ("play", "next", "seek"...) a la página. */
         @Volatile var alComando: ((String, Long) -> Unit)? = null

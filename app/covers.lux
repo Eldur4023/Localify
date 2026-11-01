@@ -90,15 +90,20 @@ fn string? portada_album_url_fallback(string album_id):
 # Portada de álbum: la suya, o la miniatura de una de sus pistas con vídeo.
 fn Json? portada_album_respuesta(string id):
     string destino = os.path_join(covers_dir(), "album-" + id + ".jpg")
+    if not os.is_file(destino) and state.get("sinfoto:album:" + id, "") != "":
+        return status(404)
     string? url = portada_album_url(id)
     if url == null:
         url = portada_album_url_fallback(id)
     if url == null:
+        state.set("sinfoto:album:" + id, "1", 600000)
         return status(404)
     bool ok = cachear_imagen(url, destino)
     if not ok or not os.is_file(destino):
+        state.set("sinfoto:album:" + id, "1", 600000)
         return status(404)
     header("Content-Type", "image/jpeg")
+    header("Cache-Control", "public, max-age=604800")
     return send_file(destino, covers_dir())
 
 # Pistas del catálogo del servidor (ids de Spotify, sin álbum ni vídeo conocido): se busca
@@ -129,6 +134,8 @@ fn string? portada_por_busqueda(string tid):
 
 fn Json? portada_pista_respuesta(string id):
     string destino = os.path_join(covers_dir(), "track2-" + id + ".jpg")
+    if not os.is_file(destino) and state.get("sinfoto:track:" + id, "") != "":
+        return status(404)
     # La portada del álbum es más fiable que la miniatura del vídeo: muchas
     # miniaturas de "audio oficial" traen la carátula centrada sobre un
     # lienzo más ancho, con el margen (gris o negro) incrustado en los
@@ -148,11 +155,14 @@ fn Json? portada_pista_respuesta(string id):
         else:
             url = portada_por_busqueda(id)
             if url == null:
+                state.set("sinfoto:track:" + id, "1", 1800000)
                 return status(404)
     bool ok = cachear_imagen(url, destino)
     if not ok or not os.is_file(destino):
+        state.set("sinfoto:track:" + id, "1", 1800000)
         return status(404)
     header("Content-Type", "image/jpeg")
+    header("Cache-Control", "public, max-age=604800")
     return send_file(destino, covers_dir())
 
 get endpoint("/api/cover/track/:id", string id):
@@ -178,6 +188,7 @@ fn Json? portada_playlist_respuesta(string id):
             string abs = os.path_join(biblioteca_raiz(), rel)
             if os.is_file(abs):
                 header("Content-Type", "image/jpeg")
+                header("Cache-Control", "public, max-age=604800")
                 return send_file(abs, biblioteca_raiz())
     # sin portada propia: la del álbum de la primera pista
     List<Json> p = await sqlite.query("select track_id from playlist_items where playlist_id = ? order by position limit 1", id)
@@ -190,6 +201,7 @@ fn Json? portada_playlist_respuesta(string id):
                 bool ok = cachear_imagen(jstr(a[0]["cover_url"], ""), destino)
                 if ok and os.is_file(destino):
                     header("Content-Type", "image/jpeg")
+                    header("Cache-Control", "public, max-age=604800")
                     return send_file(destino, covers_dir())
     return status(404)
 
@@ -220,16 +232,38 @@ get endpoint("/api/cover/:id", string id):
 # YouTube Music: se busca por nombre y se usa el primer artista que se llame igual.
 # Con caché: el resultado (también el "no hay") se recuerda, para que ni las miniaturas de una
 # lista ni el sondeo repitan la búsqueda en YouTube Music una y otra vez.
+fn string canal_recordado(string id0):
+    string alias = ajuste("alias:" + id0, "")
+    string id = alias != "" ? alias : id0
+    if id.starts_with("UC"):
+        return id
+    string c = state.get("canal:" + id, "")
+    if c != "":
+        return c
+    # persistido: tras reiniciar no se vuelve a buscar en YouTube Music a cada artista
+    # ("-:<unix>" = se buscó y no hay; vale 7 días)
+    string p = ajuste("canal:" + id, "")
+    if p == "":
+        return ""
+    if p.starts_with("-"):
+        if ahora() - int(p.slice(2)) > 7 * 86400:
+            return ""
+        state.set("canal:" + id, "-", 1800000)
+        return "-"
+    state.set("canal:" + id, p, 86400000)
+    return p
+
 fn string canal_de_artista(string id0):
     string alias = ajuste("alias:" + id0, "")
     string id = alias != "" ? alias : id0
     if id.starts_with("UC"):
         return id
-    string recordado = state.get("canal:" + id, "")
+    string recordado = canal_recordado(id0)
     if recordado != "":
         return recordado == "-" ? "" : recordado
     string canal = buscar_canal_de_artista(id)
     state.set("canal:" + id, canal == "" ? "-" : canal, canal == "" ? 1800000 : 86400000)
+    ajuste_poner("canal:" + id, canal == "" ? "-:" + str(ahora()) : canal)
     return canal
 
 fn string buscar_canal_de_artista(string id):
@@ -295,4 +329,5 @@ get endpoint("/api/cover/artist/:id", string id):
             state.set("sinfoto:" + id, "1", 1800000)
             return status(404)
     header("Content-Type", "image/jpeg")
+    header("Cache-Control", "public, max-age=3600")
     return send_file(destino, covers_dir())

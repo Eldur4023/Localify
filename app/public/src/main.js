@@ -25,8 +25,6 @@ import { mountLibraryView } from "./views/library.js";
 import { mountLikedView } from "./views/liked.js";
 import { mountPlaylistView } from "./views/playlist.js";
 import { mountSearchView } from "./views/search.js";
-import { mountSettingsView } from "./views/settings.js";
-import { mountSocialView } from "./views/social.js";
 import { alCambiarIdioma, t } from "./i18n/index.js";
 import { instalarCapturaDeErrores, mostrarError } from "./ui/error-overlay.js";
 /**
@@ -61,6 +59,12 @@ function quitarMenuDelNavegador() {
 		if (!editable) e.preventDefault();
 	});
 }
+/** Marca el body mientras un campo de texto tiene el foco (CSS: oculta las pestañas); evita `:has()`, caro en cada cambio de foco. */
+function vigilarTeclado() {
+	const campo = (e) => e.target instanceof HTMLInputElement && e.target.type !== "range";
+	document.addEventListener("focusin", (e) => { if (campo(e)) document.body.classList.add("teclado-abierto"); });
+	document.addEventListener("focusout", (e) => { if (campo(e)) document.body.classList.remove("teclado-abierto"); });
+}
 /** Busca un contenedor obligatorio del armazón. */
 function contenedor(id) {
 	const el = document.getElementById(id);
@@ -71,11 +75,30 @@ function contenedor(id) {
 	}
 	return el;
 }
+/**
+* Vista cargada bajo demanda: el módulo (y sus dependencias) se descarga al
+* entrar por primera vez. Devuelve de inmediato algo desmontable, así que el
+* router no necesita saber que es asíncrona.
+*/
+function perezosa(cargar) {
+	return (c, r) => {
+		let muerta = false;
+		let vista = null;
+		cargar().then((montar) => {
+			if (!muerta) vista = montar(c, r);
+		}).catch((e) => mostrarError("no se pudo cargar la vista", String(e)));
+		return { destroy() {
+			muerta = true;
+			vista?.destroy();
+		} };
+	};
+}
 function main() {
 	// Lo primero: sin esto, un fallo de montaje deja la ventana a medio pintar y
 	// sin decir por qué.
 	instalarCapturaDeErrores();
 	quitarMenuDelNavegador();
+	vigilarTeclado();
 	// El ancho de la barra lateral se aplica antes de montar nada: hacerlo
 	// después dejaría un fotograma con la barra en su ancho de fábrica.
 	// No se guarda el resultado: el armazón no se desmonta nunca, así que no hay
@@ -100,8 +123,8 @@ function main() {
 		playlist: (c, r) => mountPlaylistView(c, r),
 		album: (c, r) => mountAlbumView(c, r),
 		artist: (c, r) => mountArtistView(c, r),
-		social: (c, r) => mountSocialView(c, r),
-		settings: (c) => mountSettingsView(c)
+		social: perezosa(() => import("./views/social.js").then((m) => m.mountSocialView)),
+		settings: perezosa(() => import("./views/settings.js").then((m) => m.mountSettingsView))
 	}, "home");
 	const sidebar = mountSidebar(barraLateral, router);
 	const topbar = mountTopBar(barraSuperior, router);

@@ -21,15 +21,17 @@
 * blanco pasa desapercibido durante meses; `[playlist.rename]` en pantalla se
 * arregla el mismo día.
 */
-import es from "./es.js";
-import en from "./en.js";
-const CATALOGOS = {
-	es,
-	en
-};
+// Solo se carga el catálogo del idioma activo (el otro, al cambiar). es y en
+// tienen las mismas claves, así que no hace falta catálogo de respaldo.
+// shortcut: top-level await (WebKitGTK >= 2.34, WebView >= 89); si falta, pasar a import estático.
+const CATALOGOS = {};
+async function cargarCatalogo(id) {
+	CATALOGOS[id] ??= (await import(`./${id}.js`)).default;
+}
 /** Clave del ajuste guardado en el navegador. */
 const ALMACEN = "localify.idioma";
 let actual = detectar();
+await cargarCatalogo(actual);
 /**
 * Idioma inicial.
 *
@@ -52,7 +54,7 @@ const oyentes = new Set();
 * así que un nombre de playlist con `<script>` es solo texto.
 */
 export function t(clave, params) {
-	const plantilla = CATALOGOS[actual][clave] ?? CATALOGOS.en[clave];
+	const plantilla = CATALOGOS[actual][clave];
 	if (plantilla === undefined) return `[${clave}]`;
 	if (!params) return plantilla;
 	return plantilla.replace(/\{(\w+)\}/g, (coincidencia, nombre) => {
@@ -78,8 +80,9 @@ export function idioma() {
 	return actual;
 }
 /** Cambia de idioma y repinta todo lo registrado. */
-export function cambiarIdioma(nuevo) {
+export async function cambiarIdioma(nuevo) {
 	if (nuevo === actual) return;
+	await cargarCatalogo(nuevo);
 	actual = nuevo;
 	globalThis.localStorage?.setItem(ALMACEN, nuevo);
 	document.documentElement.lang = nuevo;

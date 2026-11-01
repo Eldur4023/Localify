@@ -20,6 +20,15 @@ export function mountVirtualList(container, options) {
 	container.replaceChildren(el);
 	const items = [];
 	const pool = [];
+	/** Limpiadores devueltos por `createRow`, uno por fila del grupo. */
+	const limpiadores = [];
+	/** Qué ítem/índice pintó cada hueco: si coincide, se salta `renderRow`. */
+	const pintadoItem = [];
+	const pintadoIndice = [];
+	function invalidar() {
+		pintadoItem.length = 0;
+		pintadoIndice.length = 0;
+	}
 	let agotada = false;
 	let cargando = false;
 	let destruida = false;
@@ -45,10 +54,11 @@ export function mountVirtualList(container, options) {
 		return visibles + overscan * 2;
 	}
 	/** Ajusta el grupo de nodos al tamaño necesario. */
-	function ajustarGrupo() {
-		const necesarios = tamanoGrupo();
+	function ajustarGrupo(necesarios) {
+		if (pool.length !== necesarios) invalidar();
 		while (pool.length < necesarios) {
-			const fila = options.createRow();
+			const { el: fila, limpiar } = options.createRow();
+			limpiadores.push(limpiar);
 			fila.classList.add("vlist__row");
 			fila.style.height = `${options.rowHeight}px`;
 			viewport.append(fila);
@@ -58,24 +68,40 @@ export function mountVirtualList(container, options) {
 		// ocultos gastaría memoria sin dar nada a cambio.
 		while (pool.length > necesarios) {
 			pool.pop()?.remove();
+			limpiadores.pop()?.();
 		}
 	}
+	/** Última fila pintada, para no repetir el trabajo si el scroll no cruzó
+	 * ninguna fila (en el móvil los eventos llegan a decenas por segundo). */
+	let ultimaPrimera = -1;
+	let ultimoTamano = -1;
 	/** Coloca y rellena los nodos según la posición del scroll. */
-	function pintar() {
+	function pintar(forzar = false) {
 		if (destruida) return;
 		const primera = Math.max(0, Math.floor(el.scrollTop / options.rowHeight) - overscan);
-		ajustarGrupo();
+		const necesarios = tamanoGrupo();
+		if (!forzar && primera === ultimaPrimera && necesarios === ultimoTamano) return;
+		ultimaPrimera = primera;
+		ultimoTamano = necesarios;
+		ajustarGrupo(necesarios);
 		for (let i = 0; i < pool.length; i += 1) {
 			const indice = primera + i;
-			const fila = pool[i];
+			// Anillo: un índice cae siempre en el mismo hueco, así cruzar una fila
+			// solo repinta la que entra, no las ~30 del grupo.
+			const hueco = indice % pool.length;
+			const fila = pool[hueco];
 			if (!fila) continue;
 			const item = items[indice];
 			if (item === undefined) {
 				// Más allá de lo cargado: se esconde en vez de eliminarse, para que el
 				// grupo siga teniendo el mismo tamaño.
 				fila.hidden = true;
+				pintadoItem[hueco] = undefined;
 				continue;
 			}
+			if (pintadoItem[hueco] === item && pintadoIndice[hueco] === indice) continue;
+			pintadoItem[hueco] = item;
+			pintadoIndice[hueco] = indice;
 			fila.hidden = false;
 			fila.style.transform = `translateY(${indice * options.rowHeight}px)`;
 			options.renderRow(fila, item, indice);
@@ -102,7 +128,7 @@ export function mountVirtualList(container, options) {
 		if (agotada || items.length * options.rowHeight >= posicionPendiente + el.clientHeight) {
 			el.scrollTop = posicionPendiente;
 			posicionPendiente = null;
-			pintar();
+			pintar(true);
 		} else {
 			void cargar();
 		}
@@ -120,7 +146,7 @@ export function mountVirtualList(container, options) {
 			if (pagina.items.length > 0) {
 				items.push(...pagina.items);
 				spacer.style.height = `${items.length * options.rowHeight}px`;
-				pintar();
+				pintar(true);
 			}
 		} catch {
 			posicionPendiente = null;
@@ -134,11 +160,20 @@ export function mountVirtualList(container, options) {
 		}
 	}
 	// `passive` porque nunca se llama a `preventDefault`: sin él, el navegador
-	// tiene que esperar a que el manejador termine antes de desplazar.
-	const alDesplazar = () => pintar();
+	// tiene que esperar a que el manejador termine antes de desplazar. El
+	// repintado se agrupa en un frame: en el móvil los eventos de scroll llegan
+	// más rápido que los frames y se repetía el mismo trabajo varias veces.
+	let cuadro = 0;
+	const alDesplazar = () => {
+		if (cuadro) return;
+		cuadro = requestAnimationFrame(() => {
+			cuadro = 0;
+			pintar();
+		});
+	};
 	el.addEventListener("scroll", alDesplazar, { passive: true });
 	// Al cambiar de tamaño la ventana cambia cuántas filas caben.
-	const observador = new ResizeObserver(() => pintar());
+	const observador = new ResizeObserver(() => pintar(true));
 	observador.observe(el);
 	void cargar();
 	return {
@@ -146,7 +181,10 @@ export function mountVirtualList(container, options) {
 		get items() {
 			return items;
 		},
-		refresh: pintar,
+		refresh: () => {
+			invalidar();
+			pintar(true);
+		},
 		move(desde, hasta) {
 			if (desde < 0 || desde >= items.length) return;
 			const [movido] = items.splice(desde, 1);
@@ -156,7 +194,8 @@ export function mountVirtualList(container, options) {
 			// fila más abajo de donde se soltó.
 			const destino = hasta > desde ? hasta - 1 : hasta;
 			items.splice(Math.max(0, Math.min(items.length, destino)), 0, movido);
-			pintar();
+			invalidar();
+			pintar(true);
 		},
 		reset(conservarPosicion = false) {
 			posicionPendiente = conservarPosicion && el.scrollTop > 0 ? el.scrollTop : null;
@@ -165,6 +204,9 @@ export function mountVirtualList(container, options) {
 			agotada = false;
 			avisadoDesde = -1;
 			avisadoHasta = -1;
+			ultimaPrimera = -1;
+			ultimoTamano = -1;
+			invalidar();
 			spacer.style.height = "0px";
 			el.scrollTop = 0;
 			// Descarta cualquier carga en curso de la generación anterior: sin esto,
@@ -179,9 +221,11 @@ export function mountVirtualList(container, options) {
 		},
 		destroy() {
 			destruida = true;
+			if (cuadro) cancelAnimationFrame(cuadro);
 			observador.disconnect();
 			el.removeEventListener("scroll", alDesplazar);
 			el.remove();
+			for (const limpiar of limpiadores.splice(0)) limpiar?.();
 		}
 	};
 }

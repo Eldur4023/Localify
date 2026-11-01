@@ -142,12 +142,19 @@
 
   .track--suelta .track__arte { width: 44px; height: 44px; }
   .track--suelta .track__index { display: none; }
+  /* La ficha de un artista puede traer cientos de canciones. El navegador se
+     salta el pintado de las que están fuera de pantalla; el hueco reservado
+     evita que la altura total baile al acercarse. */
+  .track--perezosa {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 56px;
+  }
   .fila-web .track__index { display: flex; }
   .destacado { gap: var(--sp-3); padding: var(--sp-3); }
   .destacado__arte { width: 72px; height: 72px; }
   .destacado__titulo { font-size: var(--fs-xl, 22px); }
   /* con el teclado abierto sobran las pestañas: el hueco es para lo que se escribe */
-  body:has(input:not([type=range]):focus) .tabs { display: none; }
+  body.teclado-abierto .tabs { display: none; }
 
   /* ── Listas: portada, título y artista, estado ─────────────────────────── */
 

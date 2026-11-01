@@ -62,6 +62,7 @@ size_t NativeModule::routes_compiled() const {
     return n;
 }
 
+#ifndef LUX_NO_NATIVE   // Android: no g++, compile_native() is not built nor called
 namespace {
 
 // Una funcion de usuario por su nombre, para poder pasarle a check_function
@@ -568,5 +569,7 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     return out;
 #endif // LUX_NATIVE_UNAVAILABLE
 }
+
+#endif // LUX_NO_NATIVE
 
 } // namespace lux_script

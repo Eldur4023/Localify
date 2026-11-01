@@ -1,4 +1,5 @@
 import { library, player, playlists } from "../ipc/client.js";
+import { alRecibirTipo } from "../ipc/events.js";
 import { pedirTexto } from "../ui/dialogo.js";
 import { alCambiarIdioma, t } from "../i18n/index.js";
 import { ponerPortada } from "../ui/cards.js";
@@ -59,12 +60,37 @@ export function mountAlbumView(contenedor, ruta) {
 			detalle = await library.albumDetail(albumId);
 			entregado = true;
 			pintarCabecera();
+			sincronizarSuscripcion();
 			return {
 				items: detalle.tracks,
 				hasMore: false
 			};
 		}
 	});
+	/**
+	* En el móvil el backend puede devolver el álbum vacío mientras trae sus
+	* pistas de YouTube Music en segundo plano. Cuando avisa de que la
+	* biblioteca cambió, se vuelve a pedir la ficha una sola vez; si sigue
+	* importando, la suscripción se mantiene.
+	*/
+	let dejarBiblioteca = null;
+	let recargaTimer = 0;
+	function sincronizarSuscripcion() {
+		const esperando = detalle?.importing === true;
+		if (esperando && !dejarBiblioteca) {
+			dejarBiblioteca = alRecibirTipo("libraryChanged", () => {
+				// Debounce: durante una importación llegan varios por segundo.
+				if (recargaTimer) return;
+				recargaTimer = setTimeout(() => {
+					recargaTimer = 0;
+					trackList.refrescar(true);
+				}, 350);
+			});
+		} else if (!esperando && dejarBiblioteca) {
+			dejarBiblioteca();
+			dejarBiblioteca = null;
+		}
+	}
 	function pintarCabecera() {
 		if (!detalle) return;
 		titulo.textContent = detalle.title;
@@ -129,6 +155,8 @@ export function mountAlbumView(contenedor, ruta) {
 	const dejarIdioma = alCambiarIdioma(etiquetas);
 	return { destroy() {
 		dejarIdioma();
+		dejarBiblioteca?.();
+		clearTimeout(recargaTimer);
 		trackList.destroy();
 		el.remove();
 	} };

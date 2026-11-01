@@ -111,13 +111,17 @@ export function mountLibraryView(contenedor) {
 	// sin que el usuario haga nada en esta vista: sin escuchar el evento, las
 	// canciones nuevas solo aparecerían al navegar fuera y volver.
 	const dejarLibraryChanged = alRecibirTipo("libraryChanged", (evento) => {
-		if (evento.scope === "tracks") recargar();
+		if (evento.scope !== undefined && evento.scope !== "tracks") return;
+		clearTimeout(temporizadorRecarga);
+		temporizadorRecarga = setTimeout(() => trackList.refrescar(true), 350);
 	});
+	let temporizadorRecarga = 0;
 	etiquetas();
 	const dejarIdioma = alCambiarIdioma(etiquetas);
 	return { destroy() {
 		dejarIdioma();
 		dejarLibraryChanged();
+		clearTimeout(temporizadorRecarga);
 		orden.removeEventListener("change", recargar);
 		trackList.destroy();
 		el.remove();

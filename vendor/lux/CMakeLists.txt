@@ -275,6 +275,12 @@ target_compile_definitions(lux_script PRIVATE
     LUX_NATIVE_SCRIPT_LIB="$<TARGET_FILE:lux_script>"
     LUX_NATIVE_LIB="$<TARGET_FILE:lux>")
 
+# Android has no g++ to run --native with: compile the code generator out
+# (native_gen.cpp / native_build.cpp / the call in project.cpp).
+if(ANDROID)
+    target_compile_definitions(lux_script PUBLIC LUX_NO_NATIVE)
+endif()
+
 if(LUX_SQLITE)
     find_path(SQLITE3_INC sqlite3.h)
     find_library(SQLITE3_LIB sqlite3)
@@ -393,7 +399,12 @@ endfunction()
 set(_m src/lux_script/modules/base_modules)
 lux_optional_module(LUX_PDF    "pdf"       PACKAGES cairo                  FILES ${_m}/pdf.cpp
                     WIN_HEADERS cairo.h WIN_LIBS cairo)
-lux_optional_module(LUX_HTTP   "http/mail" PACKAGES libcurl                FILES ${_m}/http.cpp ${_m}/mail.cpp
+# Android: mail.cpp (SMTP over curl) is left out -- Localify never imports it.
+set(_http_files ${_m}/http.cpp)
+if(NOT ANDROID)
+    list(APPEND _http_files ${_m}/mail.cpp)
+endif()
+lux_optional_module(LUX_HTTP   "http/mail" PACKAGES libcurl                FILES ${_http_files}
                     WIN_HEADERS curl/curl.h WIN_LIBS curl
                     WIN_SYSLIBS ws2_32 crypt32 bcrypt secur32 normaliz iphlpapi WIN_DEFS CURL_STATICLIB)
 lux_optional_module(LUX_CRYPTO "crypto"    PACKAGES libcrypto              FILES ${_m}/crypto.cpp

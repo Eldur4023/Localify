@@ -1,7 +1,6 @@
 import { library, playlists, player, queue } from "../ipc/client.js";
 import { t } from "../i18n/index.js";
 import { confirmar, pedirTexto } from "./dialogo.js";
-import { elegirCandidato } from "./reasignar-metadatos.js";
 /** Longitud máxima del nombre de una playlist, la misma que acepta el backend. */
 const MAX_NOMBRE = 100;
 /**
@@ -156,7 +155,7 @@ export function opcionesDePista(pista, ctx) {
 		separar: true,
 		etiqueta: t("menu.reassign_metadata"),
 		ejecutar: async () => {
-			const elegido = await elegirCandidato(pista.title);
+			const elegido = await (await import("./reasignar-metadatos.js")).elegirCandidato(pista.title);
 			if (!elegido) return;
 			await library.assignMetadata(pista.id, elegido);
 			ctx.alCambiar?.();

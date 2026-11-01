@@ -148,8 +148,12 @@ fn int cmd_rescan():
 
 fn Json cmd_album_detail(string id):
     # álbum de catálogo (YouTube Music) aún sin pistas: se traen al abrirlo
+    bool importando = false
     if id.starts_with("MPRE") and len(await sqlite.query("select 1 from tracks where album_id = ? limit 1", id)) == 0:
-        importar_album(id)
+        if en_movil():
+            importando = encolar_discografia("album", id)
+        else:
+            importar_album(id)
     List<Json> albumes = await sqlite.query("select id, title, release_date, album_type, label from albums where id = ?", id)
     if len(albumes) == 0:
         return error_api("NOT_FOUND", "error.not_found").status(404)
@@ -181,6 +185,7 @@ fn Json cmd_album_detail(string id):
         "label": jstr(a["label"], ""),
         "totalDurationMs": suma,
         "localCount": locales,
+        "importing": importando,
         "tracks": rows
     }
 
@@ -197,8 +202,16 @@ fn Json cmd_artist_detail(string id0):
         return error_api("NOT_FOUND", "error.not_found").status(404)
     # La discografía real: se trae de YouTube Music (si el artista es un duplicado "local:"/"srv:",
     # del canal que le corresponde por nombre) y se junta con lo que ya hay en la biblioteca.
-    string canal = canal_de_artista(id)
-    importar_discografia(canal)
+    # En el móvil no se espera a la red: se encola y la vista se repinta al terminar.
+    bool importando = false
+    string canal = ""
+    if en_movil():
+        string recordado = canal_recordado(id)
+        canal = recordado == "-" ? "" : recordado
+        importando = encolar_discografia("artista", id)
+    else:
+        canal = canal_de_artista(id)
+        importar_discografia(canal)
     string otro = canal != "" ? canal : id
     List<Json> pistas = await sqlite.query(sql_pista_dto() + """
         join track_artists ta on ta.track_id = t.id and ta.artist_id in (?, ?)
@@ -238,7 +251,8 @@ fn Json cmd_artist_detail(string id0):
         "topTracks": top,
         "allTracks": todas,
         "albums": albums_out,
-        "singles": singles_out
+        "singles": singles_out,
+        "importing": importando
     }
 
 # ─── Candidatos y reasignación de metadatos ─────────────────────────────────
@@ -564,7 +578,11 @@ fn Json cmd_playlist_list():
         out.add(playlist_summary_dto(filas[i]))
     return out
 
-fn Json cmd_playlist_detail(string plid):
+fn Json cmd_playlist_detail(string plid, Json? page):
+    int offset = page == null ? 0 : jint(jget(page, "offset"), 0)
+    int limite = page == null ? 0 : jint(jget(page, "limit"), 0)
+    if offset < 0:
+        offset = 0
     List<Json> f = await sqlite.query("""
         select p.*, coalesce((select count(*) from playlist_items pi where pi.playlist_id = p.id), 0) as n
         from playlists p where p.id = ?
@@ -572,23 +590,41 @@ fn Json cmd_playlist_detail(string plid):
     if len(f) == 0:
         return error_api("NOT_FOUND", "error.not_found").status(404)
     Json resumen = playlist_summary_dto(f[0])
-    List<Json> items = await sqlite.query("""
-        select pi.id as entry_id, pi.track_id, pi.added_at from playlist_items pi
-        where pi.playlist_id = ? order by pi.position asc
-        """, plid)
-    List<Json> entries = []
-    int suma = 0
+    List<Json> items = []
+    if limite > 0:
+        items = await sqlite.query("""
+            select pi.id as entry_id, pi.track_id, pi.added_at from playlist_items pi
+            where pi.playlist_id = ? order by pi.position asc limit ? offset ?
+            """, plid, limite, offset)
+    else:
+        items = await sqlite.query("""
+            select pi.id as entry_id, pi.track_id, pi.added_at from playlist_items pi
+            where pi.playlist_id = ? order by pi.position asc
+            """, plid)
+    # Una sola consulta para todas las pistas: con `track_row_por_id` por
+    # entrada, abrir una playlist de 500 canciones eran 500 viajes a SQLite
+    # antes de pintar nada (y en el móvil se notaba muchísimo).
+    List<string> ids = []
     for int i in range(0, len(items)):
-        Json? p = track_row_por_id(jstr(items[i]["track_id"], ""))
+        ids.add(jstr(items[i]["track_id"], ""))
+    Dict<string, Json> por_id = await track_rows_por_ids(ids)
+    List<Json> entries = []
+    for int i in range(0, len(items)):
+        Json? p = por_id.get(jstr(items[i]["track_id"], ""))
         if p != null:
             entries.add({ "entryId": jstr(items[i]["entry_id"], ""), "track": p, "addedAt": jint(items[i]["added_at"], 0) })
-            suma = suma + jint(p["durationMs"], 0)
+    List<Json> dur = await sqlite.query("""
+        select coalesce(sum(t.duration_ms), 0) as ms from playlist_items pi
+        join tracks t on t.id = pi.track_id where pi.playlist_id = ?
+        """, plid)
     Dict<string, Json> out = {}
     for string clave in resumen:
         out[clave] = resumen[clave]
     out["description"] = f[0]["description"]
-    out["totalDurationMs"] = suma
+    out["totalDurationMs"] = jint(dur[0]["ms"], 0)
     out["entries"] = entries
+    out["nextOffset"] = offset + len(items)
+    out["hasMore"] = limite > 0 and offset + len(items) < jint(f[0]["n"], 0)
     return out
 
 fn void cmd_playlist_add(Json args):

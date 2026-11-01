@@ -134,16 +134,22 @@ export function mountPlayerBar(contenedor, opciones) {
 		pintarRepeticion();
 		if (!estado?.track) titulo.textContent = t("player.nothing");
 	}
+	let iconoBoton = null;
+	let iconoRepetir = null;
 	function pintarBoton() {
 		const sonando = estado?.status === "playing";
-		cambiarIcono(tocar, sonando ? "pause" : "play", 20);
+		const ic = sonando ? "pause" : "play";
+		if (ic !== iconoBoton) cambiarIcono(tocar, ic, 20);
+		iconoBoton = ic;
 		const etiqueta = sonando ? t("player.pause") : t("player.play");
 		tocar.setAttribute("aria-label", etiqueta);
 		tocar.title = etiqueta;
 	}
 	function pintarRepeticion() {
 		const modo = estado?.repeat ?? "off";
-		cambiarIcono(repetir, modo === "track" ? "repeat-one" : "repeat", 18);
+		const ic = modo === "track" ? "repeat-one" : "repeat";
+		if (ic !== iconoRepetir) cambiarIcono(repetir, ic, 18);
+		iconoRepetir = ic;
 		repetir.classList.toggle("is-active", modo !== "off");
 		const etiqueta = modo === "off" ? t("player.repeat_off") : modo === "queue" ? t("player.repeat_queue") : t("player.repeat_track");
 		repetir.setAttribute("aria-label", etiqueta);
@@ -151,6 +157,7 @@ export function mountPlayerBar(contenedor, opciones) {
 	}
 	/** "Escuchando ahora" de Social: al cambiar lo que suena y cada minuto mientras suena. */
 	let anunciado = null;
+	let iconoMegusta = null;
 	function anunciar(forzar = false) {
 		const p = estado?.status === "playing" ? estado.track : null;
 		const clave = p?.id ?? "";
@@ -168,7 +175,9 @@ export function mountPlayerBar(contenedor, opciones) {
 		anunciar();
 		titulo.textContent = nuevo.track?.title ?? t("player.nothing");
 		artista.textContent = nuevo.track?.artistDisplay ?? "";
-		cambiarIcono(megusta, nuevo.track?.isFavorite ? "heart-filled" : "heart", 18);
+		const icMg = nuevo.track?.isFavorite ? "heart-filled" : "heart";
+		if (icMg !== iconoMegusta) cambiarIcono(megusta, icMg, 18);
+		iconoMegusta = icMg;
 		megusta.classList.toggle("is-active", nuevo.track?.isFavorite === true);
 		// La portada se rehace en cada cambio de pista: reutilizar la etiqueta
 		// dejaría un instante la carátula de la canción anterior sobre el título
@@ -274,6 +283,12 @@ export function mountPlayerBar(contenedor, opciones) {
 		void player.getState().then(pintar).catch(() => {});
 	}
 	const dejarEventos = alRecibir((evento) => {
+		// La foto SSE ya trae el estado completo: sin viaje extra. Varios eventos de
+		// la misma foto comparten objeto, se pinta una vez.
+		const sincronizar = () => {
+			if (!evento.estado) refrescar();
+			else if (evento.estado !== estado) pintar(evento.estado);
+		};
 		switch (evento.type) {
 			// Cada revision nueva, no solo los cambios de estado que ve una
 			// foto: una pausa→suena entre dos fotos no cambia "status".
@@ -283,7 +298,7 @@ export function mountPlayerBar(contenedor, opciones) {
 			case "shuffleChanged":
 			case "repeatModeChanged":
 			case "volumeChanged":
-				refrescar();
+				sincronizar();
 				break;
 			case "positionTick":
 				if (!arrastrando) pintarPosicion(evento.positionMs, evento.durationMs || (estado?.durationMs ?? 0));

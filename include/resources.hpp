@@ -15,3 +15,6 @@ struct EmbeddedFile {
 // Defined by the generated <app>_resources.cpp (one per app, see
 // add_lux_desktop_app() in CMakeLists.txt) -- never hand-written.
 extern const std::vector<EmbeddedFile> kEmbeddedFiles;
+
+// Hex FNV-1a of every embedded path+byte, emitted by respack: identifies the build.
+extern const char* const kEmbeddedHash;

@@ -16,13 +16,44 @@
 #include <ctime>
 #include <unordered_set>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <lux_script/platform_os.hpp>
 #include <chrono>
 
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
+
 namespace lux_script {
 
 namespace {
+
+#ifdef __ANDROID__
+// WAL+shm y el hilo del writer se cuelgan o revientan bajo el traductor ARM
+// del emulador (SI_KERNEL/SEGV en lux-dbwriter). En un teléfono real no: allí
+// WAL y el batch son la diferencia entre un fsync por escritura --con el
+// lock exclusivo bloqueando a los lectores-- y una transacción por tanda.
+// Se detecta por las propiedades que pone el emulador; LUX_ANDROID_EMULATOR=1
+// o =0 permite forzarlo al probar.
+bool android_emulador() {
+    static const bool emu = [] {
+        if (const char* forzado = std::getenv("LUX_ANDROID_EMULATOR"); forzado && *forzado)
+            return std::string(forzado) != "0";
+        char valor[PROP_VALUE_MAX] = {0};
+        if (__system_property_get("ro.kernel.qemu", valor) > 0 && std::string(valor) == "1")
+            return true;
+        char hardware[PROP_VALUE_MAX] = {0};
+        if (__system_property_get("ro.hardware", hardware) > 0) {
+            const std::string h(hardware);
+            if (h == "ranchu" || h == "goldfish" || h == "vbox86" || h == "cutf_cvm")
+                return true;
+        }
+        return false;
+    }();
+    return emu;
+}
+#endif
 
 // Expands a List argument into as many `?` placeholders as it has elements,
 // e.g. `where id in (?)` with args = [["a","b","c"]] becomes
@@ -251,12 +282,16 @@ public:
 
         // WAL: concurrent reads with a write in progress.  Without this, with
         // several workers any write would block every read.
-        // Bajo el traductor ARM del emulador, WAL+shm se cuelga o revienta
-        // (SI_KERNEL/SEGV en lux-dbwriter): allí se usa journal DELETE.
+        // Solo bajo el traductor ARM del emulador se usa journal DELETE:
+        // allí WAL+shm se cuelga o revienta (SI_KERNEL/SEGV en lux-dbwriter).
         char* msg = nullptr;
 #ifdef __ANDROID__
-        sqlite3_exec(db, "PRAGMA journal_mode=DELETE", nullptr, nullptr, &msg);
-        sqlite3_exec(db, "PRAGMA synchronous=FULL", nullptr, nullptr, &msg);
+        if (android_emulador()) {
+            sqlite3_exec(db, "PRAGMA journal_mode=DELETE", nullptr, nullptr, &msg);
+            sqlite3_exec(db, "PRAGMA synchronous=FULL", nullptr, nullptr, &msg);
+        } else {
+            sqlite3_exec(db, "PRAGMA journal_mode=WAL", nullptr, nullptr, &msg);
+        }
 #else
         sqlite3_exec(db, "PRAGMA journal_mode=WAL", nullptr, nullptr, &msg);
 #endif
@@ -277,6 +312,11 @@ public:
         // the process's mmap_lock); pread() from the page cache is cheaper.
         sqlite3_exec(db, "PRAGMA temp_store=MEMORY", nullptr, nullptr, &msg);
         if (msg) sqlite3_free(msg);
+#ifdef __ANDROID__
+        // 512 KiB of page cache per connection instead of the default 2 MiB.
+        sqlite3_exec(db, "PRAGMA cache_size=-512", nullptr, nullptr, &msg);
+        if (msg) sqlite3_free(msg);
+#endif
 
         // Waits instead of failing when another connection holds the file --
         // except on an inline slot: the event loop never sleeps.
@@ -386,11 +426,8 @@ public:
     // ran commits as one transaction -- one WAL append instead of one each.
     DbPool::Batch batch() override {
 #ifdef __ANDROID__
-        // El hilo de batch + las cadenas de reanudación desde el writer
-        // revientan en ARM (SEGV en lux-dbwriter; ver android/README.md).
-        // Sin writer: cada escritura es autocommit en su worker — más lento
-        // y sin agrupar commits, pero sólido.
-        return {};
+        // Solo el emulador necesita el camino sin writer (ver android_emulador).
+        if (android_emulador()) return {};
 #endif
         if (!shared_file_) return {};
         return [this](size_t writer, std::vector<DbPool::Write>& writes) { return run_batch(writer, writes); };

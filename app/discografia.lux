@@ -103,10 +103,22 @@ fn void fusionar_duplicados_de(string canal, string nombre):
         await sqlite.exec("delete from artists where id = ?", d)
         ajuste_poner("alias:" + d, canal)   # los enlaces y vistas guardadas con el id viejo siguen funcionando
 
+# ¿Ya importada hace poco? En memoria (6 h) o, tras reiniciar, por la marca guardada en
+# ajustes (7 días): una discografía casi no cambia y cada importación son decenas de peticiones.
+fn bool discografia_reciente(string canal):
+    if state.get("disc:" + canal, "") != "":
+        return true
+    int t = int(ajuste("disc_t:" + canal, "0"))
+    if t > 0 and ahora() - t < 7 * 86400:
+        state.set("disc:" + canal, "1", 21600000)
+        return true
+    return false
+
 # Trae de YouTube Music todas las canciones y lanzamientos de un artista (canal UC...).
-# Como mucho una vez cada 6 horas por artista.
+# Como mucho una vez cada 7 días por artista (6 h si falló).
+
 fn void importar_discografia(string canal):
-    if not canal.starts_with("UC") or state.get("disc:" + canal, "") != "":
+    if not canal.starts_with("UC") or discografia_reciente(canal):
         return
     state.set("disc:" + canal, "1", 21600000)
     Json? principal = ytm_navegar(canal)
@@ -173,6 +185,8 @@ fn void importar_discografia(string canal):
             await sqlite.rollback()
             log.warn("discografia: no se pudieron guardar los lanzamientos de " + nombre + ": " + e.message)
     fusionar_duplicados_de(canal, nombre)
+    # persistido: tras reiniciar (Android lo hace a menudo) no se vuelve a importar a todos
+    ajuste_poner("disc_t:" + canal, str(ahora()))
     tocar_biblioteca()
 
 # Pistas de un álbum de catálogo (sin pistas guardadas aún).
@@ -201,10 +215,67 @@ fn void importar_album(string album_id):
     catch e:
         await sqlite.rollback()
         log.warn("discografia: no se pudo guardar el álbum " + album_id + ": " + e.message)
+    # En el móvil la ficha ya se pintó vacía y espera este aviso para volver a
+    # pedir el álbum; en escritorio es un cambio de biblioteca más.
+    tocar_biblioteca()
+
+# ─── Cola de importaciones (solo móvil) ─────────────────────────────────────
+#
+# Abrir una ficha en el móvil no puede quedarse esperando a YouTube Music:
+# resolver el canal y traer la discografía son varias peticiones de red, y la
+# vista parece colgada hasta que acaban. En su lugar se encola el trabajo y la
+# petición devuelve lo que ya hay en SQLite; al terminar, `tocar_biblioteca()`
+# avisa a la interfaz para que se repinte sola.
+
+fn bool encolar_discografia(string tipo, string id):
+    if id == "":
+        return false
+    if state.get("disc_pend:" + id, "") != "":
+        return true
+    if state.get("disc:" + id, "") != "":
+        return false
+    # Un artista puede estar ya importado bajo su canal UC aunque la ficha se
+    # abra con un id "local:"/"srv:". Sin red: solo se consulta la caché.
+    if tipo == "artista":
+        string recordado = canal_recordado(id)
+        if recordado != "" and recordado != "-" and discografia_reciente(recordado):
+            return false
+    state.set("disc_pend:" + id, "1", 21600000)
+    string nueva = tipo + "|" + id
+    string cola = state.get("disc_cola", "")
+    # La última ficha abierta va primero: si alguien toca tres álbumes seguidos,
+    # el que está mirando se completa antes que los dos por los que ya pasó.
+    state.set("disc_cola", cola == "" ? nueva : nueva + "\n" + cola)
+    return true
+
+# Procesa una entrada por tick. No hace falta más: importar una discografía ya
+# tarda lo suyo, y así una ráfaga de fichas abiertas no lanza diez a la vez.
+fn void discografia_tick():
+    string cola = state.get("disc_cola", "")
+    if cola == "":
+        return
+    int corte = cola.index_of("\n")
+    string primera = corte < 0 ? cola : cola.slice(0, corte)
+    state.set("disc_cola", corte < 0 ? "" : cola.slice(corte + 1))
+    int barra = primera.index_of("|")
+    if barra <= 0:
+        return
+    string tipo = primera.slice(0, barra)
+    string id = primera.slice(barra + 1)
+    state.remove("disc_pend:" + id)
+    if tipo == "album":
+        importar_album(id)
+    else:
+        string canal = canal_de_artista(id)
+        if canal != "":
+            importar_discografia(canal)
 
 # Sondeo en segundo plano: los artistas que de verdad se escuchan (o están en favoritos),
 # uno por minuto, de más a menos escuchados. Así Inicio y las fichas ya traen la discografía.
 fn void sondeo_artistas_tick():
+    # Un pase sin nada que importar descansa media hora (antes: la consulta pesada cada minuto).
+    if state.get("sondeo_reposo", "") != "":
+        return
     List<Json> candidatos = await sqlite.query("""
         select ta.artist_id as id, count(*) as n
         from play_history h join track_artists ta on ta.track_id = h.track_id
@@ -217,7 +288,8 @@ fn void sondeo_artistas_tick():
         if canal == "":
             state.set("sin:" + id, "1", 86400000)
             continue
-        if state.get("disc:" + canal, "") != "":
+        if discografia_reciente(canal):
             continue
         importar_discografia(canal)
         return
+    state.set("sondeo_reposo", "1", 1800000)

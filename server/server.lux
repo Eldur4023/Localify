@@ -388,9 +388,14 @@ group("/api"):
         r = await sqlite.query("select rev from playback where user_id = ?", yo())
         return { "rev": r[0]["rev"], "now": ahora }
 
-    # GET: 204 si no hay nada nuevo desde `since` (barato: se llama cada segundo)
-    get endpoint("/playback", int since = 0):
+    # GET: 204 si no hay nada nuevo desde `since`. Con `wait` (s, máx. 25) la petición espera a
+    # que cambie la revisión y responde en cuanto cambia (sin sondeo del cliente); sin `wait`, al instante.
+    get endpoint("/playback", int since = 0, int wait = 0):
+        int hasta = int(time.now()) + (wait > 25 ? 25 : (wait < 0 ? 0 : wait)) * 1000
         List<Json> r = await sqlite.query("select rev, device_id, state, at from playback where user_id = ?", yo())
+        while (len(r) == 0 or int(r[0]["rev"]) == since) and int(time.now()) < hasta:
+            await sleep(400)
+            r = await sqlite.query("select rev, device_id, state, at from playback where user_id = ?", yo())
         if len(r) == 0 or int(r[0]["rev"]) == since:
             return status(204)
         Json st = parse_json(str(r[0]["state"]))

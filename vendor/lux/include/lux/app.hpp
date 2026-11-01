@@ -323,6 +323,8 @@ public:
     // (run() raises their soft limit to the hard one), less 1024 kept for
     // everything else -- database files, uploads, outgoing HTTP.
     App& max_connections(int n) { max_connections_ = n; return *this; }
+    // Event-loop count (0: one per usable core); LUX_THREADS env overrides. Pools get max(2, n).
+    App& set_threads(int n) { threads_ = n; return *this; }
 
     // Overrides how handle_request() decides "is there a declared route for
     // this (method, path)?" when gating static-mount serving (see its call
@@ -372,6 +374,7 @@ private:
     std::function<void()>                     before_stop_;
     std::function<void(core::EventLoop&)>     on_start_;
 
+    int                                       threads_ = 0;
     int                                       max_connections_ = 0;   // 0: from the fd limit
 
 
