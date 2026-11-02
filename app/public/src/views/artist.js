@@ -1,4 +1,5 @@
 import { library, player } from "../ipc/client.js";
+import { alRecibirTipo } from "../ipc/events.js";
 import { alCambiarIdioma, t } from "../i18n/index.js";
 import { carrusel, conEspera, ponerFotoDeArtista, tarjeta, vacio } from "../ui/cards.js";
 import { filaSuelta } from "../ui/fila-suelta.js";
@@ -33,6 +34,35 @@ export function mountArtistView(contenedor, ruta) {
 	contenedor.replaceChildren(el);
 	let detalle = null;
 	const desmontadores = [];
+	let dejarBiblioteca = null;
+	let recargaTimer = 0;
+	/**
+	* En el móvil la ficha vuelve con lo que ya hay y la discografía se trae en
+	* segundo plano. Cuando termina, `libraryChanged` pide repintar; si sigue
+	* importando, se mantiene la suscripción para la siguiente tanda.
+	*/
+	function sincronizarSuscripcion() {
+		const esperando = detalle?.importing === true;
+		if (esperando && !dejarBiblioteca) {
+			dejarBiblioteca = alRecibirTipo("libraryChanged", programarRecarga);
+		} else if (!esperando && dejarBiblioteca) {
+			dejarBiblioteca();
+			dejarBiblioteca = null;
+		}
+	}
+	function programarRecarga() {
+		// Varios cambios de biblioteca seguidos (una descarga, la importación)
+		// no deben reconstruir cientos de filas una vez por evento.
+		if (recargaTimer) return;
+		recargaTimer = setTimeout(() => {
+			recargaTimer = 0;
+			void library.artistDetail(artistId).then((d) => {
+				detalle = d;
+				sincronizarSuscripcion();
+				etiquetas();
+			}).catch(() => {});
+		}, 350);
+	}
 	function filaDePista(pista, indice) {
 		// El álbum en la segunda columna: en la ficha de un artista, repetir su
 		// nombre en cada fila no dice nada que la pantalla no diga ya.
@@ -44,6 +74,10 @@ export function mountArtistView(contenedor, ruta) {
 				id: artistId
 			})
 		});
+		// Una discografía entera puede ser de cientos de filas. `content-visibility`
+		// deja que el navegador se salte las que están fuera de pantalla (y con
+		// `loading="lazy"` tampoco se piden sus portadas).
+		fila.el.classList.add("track--perezosa");
 		desmontadores.push(() => fila.destroy());
 		return fila.el;
 	}
@@ -116,6 +150,7 @@ export function mountArtistView(contenedor, ruta) {
 	}
 	void conEspera(secciones, library.artistDetail(artistId)).then((d) => {
 		detalle = d;
+		sincronizarSuscripcion();
 		etiquetas();
 	}).catch(() => {
 		secciones.replaceChildren(vacio(t("artist.empty")));
@@ -123,6 +158,8 @@ export function mountArtistView(contenedor, ruta) {
 	const dejarIdioma = alCambiarIdioma(etiquetas);
 	return { destroy() {
 		dejarIdioma();
+		dejarBiblioteca?.();
+		clearTimeout(recargaTimer);
 		for (const quitar of desmontadores.splice(0)) quitar();
 		el.remove();
 	} };

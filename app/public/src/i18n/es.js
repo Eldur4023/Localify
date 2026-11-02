@@ -83,6 +83,7 @@ export default {
 	"playlist.cover": "Cambiar la foto",
 	"playlist.cover_choose": "Elegir imagen…",
 	"playlist.cover_remove": "Quitar la foto",
+	"playlist.download": "Descargar todas las canciones",
 	"playlist.cover_failed": "No se pudo usar esa imagen",
 	"player.play": "Reproducir",
 	"player.pause": "Pausa",

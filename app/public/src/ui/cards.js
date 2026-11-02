@@ -47,6 +47,12 @@ function ponerImagen(hueco, ruta) {
 	const img = nodo("img", "portada");
 	img.alt = "";
 	img.decoding = "async";
+	// En Android el WebView sí respeta `loading="lazy"` y merece la pena: la
+	// ficha de un artista puede tener cientos de filas, y pedir todas las
+	// portadas de golpe satura el servidor local. En WebKitGTK no se usa porque
+	// calcula mal el primer pintado y las imágenes se quedan sin cargar (ver
+	// más abajo).
+	if (globalThis.AndroidBridge || /Android/i.test(navigator.userAgent)) img.loading = "lazy";
 	// Antes llevaba `loading = "lazy"` para no pedir de golpe las tarjetas
 	// fuera de pantalla. En Linux, con la ventana sin maximizar, WebKitGTK a
 	// veces calcula mal el tamaño del contenedor en el primer pintado y estas

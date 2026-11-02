@@ -7,8 +7,8 @@ import { zonaDeReordenacion, zonaDeSoltado, TIPO_PISTAS } from "../ui/dnd.js";
 import { botonIcono, icono } from "../ui/icons.js";
 import { ponerImagenDePlaylist } from "../ui/cards.js";
 import { nodo } from "../ui/dom.js";
-/** Tope de entradas que se traen de una vez. */
-const TOPE = 5e3;
+/** Entradas por página. La lista es virtualizada: no hace falta traerla entera. */
+const POR_PAGINA = 100;
 export function mountPlaylistView(contenedor, ruta) {
 	const playlistId = ruta.params[0] ?? "";
 	const el = nodo("section", "vista vista--lista");
@@ -52,7 +52,7 @@ export function mountPlaylistView(contenedor, ruta) {
 	el.append(cabecera, vacio, cuerpo);
 	contenedor.replaceChildren(el);
 	let detalle = null;
-	let entregado = false;
+	let offset = 0;
 	/** Imagen ya pintada, para no rehacerla en cada repintado. */
 	let imagenPintada = "";
 	const trackList = mountTrackList(cuerpo, {
@@ -66,21 +66,27 @@ export function mountPlaylistView(contenedor, ruta) {
 		entryIdDe: (_pista, indice) => detalle?.entries[indice]?.entryId,
 		alQuitar: () => recargar(),
 		reiniciarOrigen() {
-			entregado = false;
 			detalle = null;
+			offset = 0;
 		},
 		async cargar() {
-			if (entregado) return {
-				items: [],
-				hasMore: false
-			};
-			detalle = await api.detail(playlistId, page({ limit: TOPE }));
-			entregado = true;
+			const pagina = await api.detail(playlistId, page({
+				limit: POR_PAGINA,
+				offset
+			}));
+			if (!detalle) {
+				detalle = pagina;
+			} else {
+				detalle.entries.push(...pagina.entries);
+			}
+			// `nextOffset` avanza por las filas leídas, no por las que se pudieron
+			// resolver: una pista borrada del catálogo no debe repetir la página.
+			offset = pagina.nextOffset ?? offset + pagina.entries.length;
 			pintarCabecera();
 			vacio.hidden = detalle.entries.length > 0;
 			return {
-				items: detalle.entries.map((e) => e.track),
-				hasMore: false
+				items: pagina.entries.map((e) => e.track),
+				hasMore: pagina.hasMore === true
 			};
 		}
 	});

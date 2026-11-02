@@ -55,8 +55,24 @@ post endpoint("/api/player/media-event", Json b):
         return null
     if tipo == "position":
         int ms = jint(jget(b, "ms"), 0)
-        if ms > 0:
-            sync_deriva(ms)
-            mutar_estado("seek", "", "", ms)
+        string tid = jstr(jget(b, "trackId"), "")
+        if ms < 0:
+            ms = 0
+        if tid != "":
+            # Posición viva del <audio>: la leen posicion_viva/estado_dto sin
+            # tocar SQLite ni subir `revision` (eso rehacía la foto SSE y la
+            # interfaz cada 3 s sin que nada hubiera cambiado de verdad).
+            state.set("movil_pista", tid)
+            state.set("movil_pos_ms", str(ms))
+        sync_deriva(ms)
+        # A SQLite solo de vez en cuando (restaurar la sesión) y al pausar o
+        # saltar (`force`, lo manda web-audio.js): ahí sí interesa la posición
+        # exacta para las estadísticas.
+        bool forzar = jget(b, "force") == true
+        if tid != "" and (forzar or state.incr("movil_persist", 1, 15000) == 1):
+            await sqlite.exec("update player_state set position_ms = ? where id = 1 and track_id = ?", ms, tid)
+            EstadoCola e = leer_estado()
+            if e.track_id == tid:
+                escucha_progreso(tid, ms, e.context)
         return null
     return { "error": "invalid_type" }.status(400)

@@ -12,17 +12,22 @@ export async function iniciar() {
 	if (iniciado) return;
 	iniciado = true;
 	const { arrancarEventos } = await import("./transport.js");
-	arrancarEventos((evento) => {
-		for (const m of manejadores) {
-			// Un manejador que falle no debe impedir que los demás reciban el
-			// evento: son independientes entre sí.
-			try {
-				m(evento);
-			} catch (e) {
-				console.error("manejador de evento falló", evento.type, e);
-			}
+	arrancarEventos((evento) => repartir(evento));
+}
+/** Entrega un evento local (p. ej. la posición del `<audio>` en el móvil). */
+export function emitirLocal(tipo, extra = {}) {
+	repartir({ type: tipo, ...extra });
+}
+function repartir(evento) {
+	for (const m of manejadores) {
+		// Un manejador que falle no debe impedir que los demás reciban el
+		// evento: son independientes entre sí.
+		try {
+			m(evento);
+		} catch (e) {
+			console.error("manejador de evento falló", evento.type, e);
 		}
-	});
+	}
 }
 /** Se suscribe a todos los eventos. */
 export function alRecibir(manejador) {

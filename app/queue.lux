@@ -155,12 +155,19 @@ fn void cuear(EstadoCola e, int ms):
     e.position_ms = ms
 
 # Posición real ahora mismo: la del motor de audio si es el que tiene la
-# pista (es lo que se oye); si no, la última guardada.
+# pista (es lo que se oye); si no, la última guardada. En el móvil no hay
+# motor: manda lo que el <audio> reportó (movil.lux, `/api/player/media-event`).
 fn int posicion_viva(EstadoCola e):
     if e.track_id != "":
-        Json st = audio.status()
-        if jstr(st["trackId"], "") == e.track_id:
-            return jint(st["positionMs"], 0)
+        if en_movil():
+            if state.get("movil_pista", "") == e.track_id:
+                int vivo = int(state.get("movil_pos_ms", "0"))
+                if vivo > 0:
+                    return vivo
+        else:
+            Json st = audio.status()
+            if jstr(st["trackId"], "") == e.track_id:
+                return jint(st["positionMs"], 0)
     return e.position_ms
 
 # Mutación con reintento: recarga, aplica el cambio y compite por la escritura.

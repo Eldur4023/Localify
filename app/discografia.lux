@@ -201,6 +201,60 @@ fn void importar_album(string album_id):
     catch e:
         await sqlite.rollback()
         log.warn("discografia: no se pudo guardar el álbum " + album_id + ": " + e.message)
+    # En el móvil la ficha ya se pintó vacía y espera este aviso para volver a
+    # pedir el álbum; en escritorio es un cambio de biblioteca más.
+    tocar_biblioteca()
+
+# ─── Cola de importaciones (solo móvil) ─────────────────────────────────────
+#
+# Abrir una ficha en el móvil no puede quedarse esperando a YouTube Music:
+# resolver el canal y traer la discografía son varias peticiones de red, y la
+# vista parece colgada hasta que acaban. En su lugar se encola el trabajo y la
+# petición devuelve lo que ya hay en SQLite; al terminar, `tocar_biblioteca()`
+# avisa a la interfaz para que se repinte sola.
+
+fn bool encolar_discografia(string tipo, string id):
+    if id == "":
+        return false
+    if state.get("disc_pend:" + id, "") != "":
+        return true
+    if state.get("disc:" + id, "") != "":
+        return false
+    # Un artista puede estar ya importado bajo su canal UC aunque la ficha se
+    # abra con un id "local:"/"srv:". Sin red: solo se consulta la caché.
+    if tipo == "artista":
+        string recordado = canal_recordado(id)
+        if recordado != "" and recordado != "-" and state.get("disc:" + recordado, "") != "":
+            return false
+    state.set("disc_pend:" + id, "1", 21600000)
+    string nueva = tipo + "|" + id
+    string cola = state.get("disc_cola", "")
+    # La última ficha abierta va primero: si alguien toca tres álbumes seguidos,
+    # el que está mirando se completa antes que los dos por los que ya pasó.
+    state.set("disc_cola", cola == "" ? nueva : nueva + "\n" + cola)
+    return true
+
+# Procesa una entrada por tick. No hace falta más: importar una discografía ya
+# tarda lo suyo, y así una ráfaga de fichas abiertas no lanza diez a la vez.
+fn void discografia_tick():
+    string cola = state.get("disc_cola", "")
+    if cola == "":
+        return
+    int corte = cola.index_of("\n")
+    string primera = corte < 0 ? cola : cola.slice(0, corte)
+    state.set("disc_cola", corte < 0 ? "" : cola.slice(corte + 1))
+    int barra = primera.index_of("|")
+    if barra <= 0:
+        return
+    string tipo = primera.slice(0, barra)
+    string id = primera.slice(barra + 1)
+    state.remove("disc_pend:" + id)
+    if tipo == "album":
+        importar_album(id)
+    else:
+        string canal = canal_de_artista(id)
+        if canal != "":
+            importar_discografia(canal)
 
 # Sondeo en segundo plano: los artistas que de verdad se escuchan (o están en favoritos),
 # uno por minuto, de más a menos escuchados. Así Inicio y las fichas ya traen la discografía.

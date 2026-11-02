@@ -39,6 +39,10 @@ fn Json fichero_de_pista(string track_id):
 # ─── Estado → motor ──────────────────────────────────────────────────────────
 
 fn void motor_sincronizar(EstadoCola e):
+    # En el móvil no hay motor nativo: quien suena es el <audio> del WebView y
+    # este trabajo solo costaría una consulta + `os.is_file` por orden.
+    if en_movil():
+        return
     audio.set_volume(e.volume)
     Json st = audio.status()
     string en_motor = jstr(st["trackId"], "")
@@ -79,6 +83,8 @@ fn void motor_sincronizar(EstadoCola e):
 # crossfade); `ended`: se acabó y no había nada precargado; `error`: no pudo
 # decodificar la pista.
 fn void motor_eventos():
+    if en_movil():
+        return
     List<Json> evs = audio.take_events()
     for int i in range(0, len(evs)):
         string tipo = jstr(evs[i]["type"], "")
@@ -100,6 +106,8 @@ fn void motor_eventos():
 # relevo no tenga hueco. Solo dentro de la ventana final (cada pista precargada
 # es un ffmpeg vivo), y se rehace si la cola cambia (revision).
 fn void motor_prever(EstadoCola e):
+    if en_movil():
+        return
     if e.track_id == "" or e.status != "playing":
         return
     Json st = audio.status()
@@ -139,6 +147,8 @@ fn void motor_prever(EstadoCola e):
 # Cada ~5 s: la posición para restaurar la sesión y lo escuchado para las
 # estadísticas (se van moviendo mientras suena).
 fn void motor_persistir(EstadoCola e):
+    if en_movil():
+        return
     if e.status != "playing" or e.track_id == "":
         return
     int t = time.now()
@@ -174,6 +184,13 @@ fn void motor_aplicar_ajustes(bool con_salida):
 # ─── El tick de fondo ────────────────────────────────────────────────────────
 
 fn void motor_tick():
+    # El móvil no tiene motor nativo ni integraciones (MPRIS/Discord): con una
+    # foto por segundo basta. Las órdenes publican la suya al terminar
+    # (reproductor.lux), así que la interfaz no espera a este tick.
+    if en_movil():
+        if state.incr("movil_tick", 1, 1000) == 1:
+            publicar_snapshot_de(leer_estado())
+        return
     motor_eventos()
     EstadoCola e = leer_estado()
     motor_sincronizar(e)
@@ -186,4 +203,4 @@ fn void motor_tick():
     if t - int(state.get("integraciones_t", "0")) >= 1000:
         state.set("integraciones_t", str(t))
         publicar_integraciones()
-    publicar_snapshot()
+    publicar_snapshot_de(e)
