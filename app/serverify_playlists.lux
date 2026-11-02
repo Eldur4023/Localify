@@ -313,7 +313,7 @@ fn void srv_reconciliar():
         if sid == "":
             # ¿ya hay una mía con el mismo nombre sin enlazar (de otro equipo)? se enlaza, no se duplica
             for int j in range(0, len(lista)):
-                if sid == "" and jstr(lista[j]["owner"], "") == yo and local_de(str(lista[j]["id"])) == "" and normalizar(jstr(lista[j]["name"], "")) == normalizar(jstr(locales[i]["name"], "")) and not enlazadas.contains(str(lista[j]["id"])):
+                if sid == "" and jstr(lista[j]["owner"], "") == yo and local_de(str(lista[j]["id"])) == "" and not borradas.contains(jint(lista[j]["id"], 0)) and normalizar(jstr(lista[j]["name"], "")) == normalizar(jstr(locales[i]["name"], "")) and not enlazadas.contains(str(lista[j]["id"])):
                     sid = str(lista[j]["id"])
                     ajuste_poner("srvpl:" + plid, sid)
             if sid == "":
@@ -328,7 +328,8 @@ fn void srv_reconciliar():
             sync_portada(plid, sid, remotas[sid])
             continue
         enlazadas.add(sid)
-        if borradas.contains(int(sid)):
+        # con la lápida y la playlist aún viva en el servidor es una lápida vieja: no se borra nada
+        if borradas.contains(int(sid)) and remotas[sid] == null:
             # borrada en otro equipo (o por su dueña): se borra aquí también
             await sqlite.exec("delete from playlists where id = ?", plid)
             olvidar_playlist(plid)
