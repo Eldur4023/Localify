@@ -142,6 +142,7 @@ fn Json importar_lista_spotify(string id_sp):
         titulo = "Importada de Spotify"
     List<Json> lista = jlist(jget(entidad, "trackList"))
     string pid = nuevo_id()
+    await sqlite.begin()
     await sqlite.exec("insert into playlists(id, name, name_norm, source, source_id, created_at, updated_at) values(?, ?, ?, 'spotify_import', ?, unixepoch(), unixepoch())",
         pid, titulo, normalizar(titulo), id_sp)
     double pos = 0.0
@@ -171,4 +172,13 @@ fn Json importar_lista_spotify(string id_sp):
         await sqlite.exec("insert or ignore into playlist_items(id, playlist_id, track_id, position, added_at) values(?, ?, ?, ?, unixepoch())",
             nuevo_id(), pid, sid, pos)
         n = n + 1
+    await sqlite.commit()
+    # Las pistas de Spotify no tienen álbum (no hay mosaico): se usa la portada
+    # de la propia lista como portada propia, igual que si la hubiera subido el usuario.
+    List<Json> fuentes = jlist(jget(jget(entidad, "coverArt"), "sources"))
+    string url_portada = len(fuentes) > 0 ? jstr(fuentes[0]["url"], "") : ""
+    if url_portada != "":
+        string destino = os.path_join(covers_dir(), "playlist-" + pid + ".jpg")
+        if cachear_imagen(url_portada, destino):
+            await sqlite.exec("update playlists set cover_path = ? where id = ?", "covers/playlist-" + pid + ".jpg", pid)
     return { "id": pid, "imported": n }

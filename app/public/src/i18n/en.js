@@ -83,6 +83,7 @@ export default {
 	"playlist.cover": "Change photo",
 	"playlist.cover_choose": "Choose image…",
 	"playlist.cover_remove": "Remove photo",
+	"playlist.download": "Download all songs",
 	"playlist.cover_failed": "That image couldn't be used",
 	"player.play": "Play",
 	"player.pause": "Pause",

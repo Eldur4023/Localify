@@ -108,6 +108,12 @@ export function opcionesDePlaylist(p, reacciones = {}) {
 		}
 	];
 	menu.push({
+		clave: "download",
+		etiqueta: t("playlist.download"),
+		icono: "download",
+		ejecutar: () => void playlists.download(p.id).catch((e) => mostrarError(t("playlist.download"), String(e)))
+	});
+	menu.push({
 		clave: "share",
 		etiqueta: t("social.share"),
 		icono: "users",

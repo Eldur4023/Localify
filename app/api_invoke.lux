@@ -438,7 +438,7 @@ fn Json despachar_base(string cmd, Json args):
         tocar_playlists()
         return null
     if cmd == "playlist_detail":
-        return await cmd_playlist_detail(arg_str(args, "playlistId", ""), jget(args, "page"))
+        return await cmd_playlist_detail(arg_str(args, "playlistId", ""))
     if cmd == "playlist_add_tracks":
         await cmd_playlist_add(args)
         tocar_playlists()
@@ -467,6 +467,12 @@ fn Json despachar_base(string cmd, Json args):
         Json r = await cmd_playlist_import(arg_str(args, "urlOrId", ""))
         tocar_playlists()
         return r
+    if cmd == "playlist_download":
+        # a la cola de descargas (2 a la vez, ver promover_cola): baja poco a poco
+        List<Json> pistas = await sqlite.query("select track_id from playlist_items where playlist_id = ? order by position", arg_str(args, "playlistId", ""))
+        for int i in range(0, len(pistas)):
+            asegurar_descarga(jstr(pistas[i]["track_id"], ""), "prefetch")
+        return null
     if cmd == "playlist_set_cover":
         # el frontend pasa la ruta elegida en el diálogo nativo
         string ruta = arg_str(args, "imagePath", "")

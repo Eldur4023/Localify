@@ -55,7 +55,10 @@ struct CurlGlobal {
             static_cast<CurlGlobal*>(g)->locks[d].unlock();
         });
         curl_share_setopt(share, CURLSHOPT_USERDATA, this);
-        for (auto d : {CURL_LOCK_DATA_CONNECT,
+        // CURL_LOCK_DATA_CONNECT is not shared: libcurl 8.5 segfaults in
+        // curl_multi_perform when many threads hit one host at once (a playlist
+        // of 100 covers did it). Each thread keeps its own connection cache.
+        for (auto d : {
 #ifndef __ANDROID__
                        CURL_LOCK_DATA_DNS,
 #endif

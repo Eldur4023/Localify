@@ -219,6 +219,8 @@ export const playlists = {
 	* activo: sirve tanto para Spotify como para YouTube Music.
 	*/
 	import: (urlOrId) => invoke("playlist_import", { urlOrId }),
+	/** Encola la descarga de todas las pistas que falten. */
+	download: (playlistId) => invoke("playlist_download", { playlistId }),
 	/** Abre el selector del sistema. `null` si se cancela. */
 	pickImage: () => invoke("playlist_pick_image"),
 	setCover: (playlistId, imagePath) => invoke("playlist_set_cover", {
