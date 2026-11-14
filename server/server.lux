@@ -471,7 +471,7 @@ group("/api"):
         List<Json> r = await sqlite.query("""
             select u.username, u.display_name, u.bio,
                    (select count(*) from playlists p where p.owner_id = u.id and p.visibility = 'public') as n_playlists,
-                   (select count(*) from tracks t where t.uploaded_by = u.id) as n_tracks,
+                   (select count(*) from user_tracks ut where ut.user_id = u.id) as n_tracks,
                    u.id,
                    (select title from presence x where x.user_id = u.id and x.updated_at > unixepoch() - 150) as np_title,
                    (select artist from presence x where x.user_id = u.id and x.updated_at > unixepoch() - 150) as np_artist
