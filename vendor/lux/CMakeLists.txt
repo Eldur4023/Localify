@@ -13,18 +13,69 @@ set(CMAKE_C_STANDARD 11)
 # (lux, lux_llhttp) one by one, and the cost (PIC in the `lux` binary
 # itself, which did not need it) is negligible next to having to
 # recompile on demand.
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+if(NOT WIN32)   # PE has no PIC: the flag would only warn
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
-    message(FATAL_ERROR "Lux requires Linux: it uses epoll, sendfile(2) and SO_REUSEPORT.")
+# Linux (and Android) is the reference platform (epoll, sendfile(2), SO_REUSEPORT,
+# io_uring); Windows (MinGW-w64 / clang, UCRT) builds the same core over WSAPoll + a
+# per-OS layer (include/lux/platform.hpp, src/core/event_loop_win.cpp).
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID AND NOT WIN32)
+    message(FATAL_ERROR "Lux requires Linux or Windows (MinGW-w64): it uses epoll, sendfile(2) and SO_REUSEPORT.")
 endif()
 
 option(LUX_IO_URING "io_uring backend instead of epoll (Linux 5.1+)" OFF)
+if(WIN32 AND LUX_IO_URING)
+    message(WARNING "LUX_IO_URING is Linux-only: ignored on Windows")
+    set(LUX_IO_URING OFF CACHE BOOL "" FORCE)
+endif()
+# Optimised builds, on by default and invisible to the developer: LTO (fat objects, so the .a
+# archives still link into the .so that --native generates) plus profile-guided optimisation
+# from the profile committed in pgo/ (about -18% user CPU per request on the forum bench; SQLite
+# is half of the instructions and is built here with the same flags).  The profile is applied
+# when it exists and the compiler is GCC; code the profile never saw is compiled normally
+# (-fprofile-partial-training) and a profile older than the sources only costs the changed
+# functions their data.  -DLUX_PGO=off skips it; tools/pgo.sh regenerates pgo/ (LUX_PGO=gen builds
+# the instrumented binary).
+option(LUX_LTO "Link-time optimisation (-flto, fat objects)" ON)
+set(LUX_PGO "auto" CACHE STRING "Profile-guided build: auto (use pgo/ if present), off, gen (instrumented), use")
+set(LUX_PGO_DIR "${CMAKE_BINARY_DIR}/pgo" CACHE PATH "Where the instrumented binary writes its .gcda files")
+set(LUX_PGO_PROFILE "${CMAKE_SOURCE_DIR}/pgo" CACHE PATH "The committed profile applied by LUX_PGO=auto/use")
+set(_pgo "${LUX_PGO}")
+if(_pgo STREQUAL "" OR _pgo STREQUAL "auto")   # "" = a build dir configured before auto existed
+    file(GLOB _pgo_files "${LUX_PGO_PROFILE}/*.gcda")
+    if(_pgo_files AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_BUILD_TYPE STREQUAL "Release")
+        set(_pgo use)
+    else()
+        set(_pgo off)
+    endif()
+endif()
+if(NOT WIN32)
+    if(LUX_LTO AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")   # -flto=auto and fat objects are GCC; clang (the NDK) builds without
+        add_compile_options(-flto=auto -ffat-lto-objects)
+        add_link_options(-flto=auto)
+    endif()
+    # Profile names carry the object's path: strip the build dir so any build tree finds them.
+    if(_pgo STREQUAL "gen")
+        add_compile_options(-fprofile-generate=${LUX_PGO_DIR} -fprofile-prefix-path=${CMAKE_BINARY_DIR} -fprofile-update=prefer-atomic)
+        add_link_options(-fprofile-generate=${LUX_PGO_DIR})
+    elseif(_pgo STREQUAL "use")
+        add_compile_options(-fprofile-use=${LUX_PGO_PROFILE} -fprofile-prefix-path=${CMAKE_BINARY_DIR}
+                            -fprofile-correction -fprofile-partial-training
+                            -Wno-missing-profile -Wno-coverage-mismatch -Wno-error=coverage-mismatch)
+    elseif(NOT _pgo STREQUAL "off")
+        message(FATAL_ERROR "LUX_PGO must be auto, off, gen or use")
+    endif()
+endif()
+
 option(LUX_EXAMPLES "Build the examples in examples/"                 ON)
+# HTTPS in the server itself (tls: cert / key). Off by default: without it the
+# core links no OpenSSL and the binary keeps its size; TLS is then the proxy's job.
+option(LUX_TLS      "HTTPS: Lux terminates TLS (OpenSSL libssl)"          OFF)
 
 # Manual fuzzing harnesses -- see fuzz/chaos.hpp for why libFuzzer is not used
 # (it needs clang; this toolchain is gcc).  Off by default: it is not part of the
@@ -44,8 +95,9 @@ option(LUX_GZIP     "Native module: gzip, and deflate in zip (zlib)"  ON)
 option(LUX_IMAGE    "Native module: image (libjpeg, libpng, libwebp)" ON)
 
 # ── System dependencies ───────────────────────────────────────────────────────
-# Lux links neither OpenSSL, nghttp2 nor zlib: TLS, HTTP/2 and compression are
-# the reverse proxy's business.  Only threads are needed.
+# Lux links neither OpenSSL, nghttp2 nor zlib: HTTP/2 and compression are the
+# reverse proxy's business, and so is TLS unless built with -DLUX_TLS=ON.  Only
+# threads are needed.
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
@@ -61,7 +113,7 @@ find_package(Threads REQUIRED)
 # It is optional: without it the build proceeds and glibc's is used.
 option(LUX_JEMALLOC "Link jemalloc if available" ON)
 set(LUX_ALLOC "")
-if(LUX_JEMALLOC)
+if(LUX_JEMALLOC AND NOT WIN32)
     find_library(JEMALLOC_LIB NAMES jemalloc)
     if(JEMALLOC_LIB)
         set(LUX_ALLOC ${JEMALLOC_LIB})
@@ -92,10 +144,15 @@ set(LUX_SOURCES
     src/core/tcp_server.cpp
     src/http/http_parser.cpp
     src/http/http_connection.cpp
+    src/http/tls.cpp
 )
 
 if(LUX_IO_URING)
     list(APPEND LUX_SOURCES src/core/io_uring_loop.cpp)
+endif()
+
+if(WIN32)
+    list(APPEND LUX_SOURCES src/core/event_loop_win.cpp)
 endif()
 
 add_library(lux STATIC ${LUX_SOURCES})
@@ -110,6 +167,20 @@ target_link_libraries(lux PUBLIC
     Threads::Threads
     ${LUX_ALLOC}
 )
+
+if(WIN32)
+    # Winsock + the TransmitFile/AcceptEx family; 64-bit off_t for sendfile's offset.
+    target_link_libraries(lux PUBLIC ws2_32 mswsock)
+    target_compile_definitions(lux PUBLIC _FILE_OFFSET_BITS=64 _WIN32_WINNT=0x0A00)   # WSAPoll needs Vista+
+endif()
+
+if(LUX_TLS)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(LUX_SSL REQUIRED libssl libcrypto)
+    target_compile_definitions(lux PUBLIC LUX_TLS)
+    target_include_directories(lux PUBLIC ${LUX_SSL_INCLUDE_DIRS})
+    target_link_libraries(lux PUBLIC ${LUX_SSL_LDFLAGS})
+endif()
 
 if(LUX_IO_URING)
     # io_uring_loop.cpp calls io_uring_setup/io_uring_enter via raw
@@ -158,6 +229,8 @@ set(_lux_module_exclude
     "src/lux_script/modules/base_modules/pdf.cpp"
     "src/lux_script/modules/base_modules/http.cpp"
     "src/lux_script/modules/base_modules/mail.cpp"
+    "src/lux_script/modules/base_modules/imap.cpp"
+    "src/lux_script/modules/base_modules/mailparse.cpp"
     "src/lux_script/modules/base_modules/crypto.cpp"
     "src/lux_script/modules/base_modules/gzip.cpp"
     "src/lux_script/modules/base_modules/image.cpp")
@@ -206,6 +279,17 @@ add_library(lux_script STATIC
 target_include_directories(lux_script PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                              ${CMAKE_CURRENT_SOURCE_DIR}/src/luxp)
 target_link_libraries(lux_script PUBLIC lux ${CMAKE_DL_LIBS})
+if(WIN32)
+    target_compile_definitions(lux_script PUBLIC LUX_NO_NATIVE)
+    # bcrypt: BCryptGenRandom (crypto.cpp); advapi32: Credential Manager (keyring);
+    # ws2_32: inet_pton / sockets; shell32: CommandLineToArgvW (main.cpp).
+    target_link_libraries(lux_script PUBLIC bcrypt advapi32 ws2_32 shell32)
+    # mailparse.cpp converts charsets with iconv when <iconv.h> exists (MSYS2 libiconv).
+    find_library(LUX_ICONV_LIB NAMES iconv libiconv)
+    if(LUX_ICONV_LIB)
+        target_link_libraries(lux_script PRIVATE ${LUX_ICONV_LIB})
+    endif()
+endif()
 
 # Every module registers itself with a namespace-scope object that nothing
 # else in the project references by symbol (LUX_REGISTER_MODULE,
@@ -222,6 +306,12 @@ function(lux_link_script target)
         -Wl,--whole-archive
         lux_script
         -Wl,--no-whole-archive)
+    if(WIN32)
+        # MinGW emits the `TLS init function` of every inline thread_local
+        # (lux::detail::current_token...) as a strong symbol in each object;
+        # with the whole archive pulled in, ld reports it as multiply defined.
+        target_link_options(${target} PRIVATE -Wl,--allow-multiple-definition)
+    endif()
 endfunction()
 
 # --native (phase 4/5, routes): native_build.cpp invokes g++ as a subprocess
@@ -243,8 +333,30 @@ target_compile_definitions(lux_script PRIVATE
     LUX_NATIVE_LIB="$<TARGET_FILE:lux>")
 
 if(LUX_SQLITE)
-    find_path(SQLITE3_INC sqlite3.h)
-    find_library(SQLITE3_LIB sqlite3)
+    # SQLite is ~half of the instructions per request on a database-bound route, and the
+    # distro's libsqlite3 is a generic build outside LTO/PGO.  By default the amalgamation in
+    # third_party/sqlite is compiled here: tuned flags (no mutex per connection --Lux opens them
+    # NOMUTEX--, no memstatus, no shared cache, no deprecated API) and the same -O3/LTO/PGO as the
+    # rest.  Keeps FTS5/RTREE/math functions, the authorizer and decltype (the result cache and the
+    # BOOLEAN columns need them).  LUX_SQLITE_SYSTEM=ON links the system library instead.
+    option(LUX_SQLITE_SYSTEM "Link the system libsqlite3 instead of the vendored amalgamation" OFF)
+    if(NOT LUX_SQLITE_SYSTEM AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite/sqlite3.c)
+        add_library(lux_sqlite3 STATIC third_party/sqlite/sqlite3.c)
+        set_target_properties(lux_sqlite3 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        target_compile_definitions(lux_sqlite3 PRIVATE
+            SQLITE_THREADSAFE=2 SQLITE_DEFAULT_MEMSTATUS=0 SQLITE_OMIT_SHARED_CACHE
+            SQLITE_OMIT_DEPRECATED SQLITE_OMIT_LOAD_EXTENSION SQLITE_LIKE_DOESNT_MATCH_BLOBS
+            SQLITE_USE_ALLOC_SIZE SQLITE_MAX_EXPR_DEPTH=0 SQLITE_DEFAULT_WAL_SYNCHRONOUS=1
+            SQLITE_ENABLE_FTS5 SQLITE_ENABLE_RTREE SQLITE_ENABLE_MATH_FUNCTIONS)
+        target_compile_options(lux_sqlite3 PRIVATE -O3 -w)
+        set(SQLITE3_INC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite)
+        set(SQLITE3_LIB lux_sqlite3)
+        find_package(Threads)
+        target_link_libraries(lux_sqlite3 PUBLIC ${CMAKE_DL_LIBS} Threads::Threads m)
+    else()
+        find_path(SQLITE3_INC sqlite3.h)
+        find_library(SQLITE3_LIB sqlite3)
+    endif()
     if(SQLITE3_INC AND SQLITE3_LIB)
         target_sources(lux_script PRIVATE src/lux_script/db_sqlite.cpp src/lux_script/sqlite_replica.cpp)
         target_compile_definitions(lux_script PRIVATE LUX_SQLITE)
@@ -296,14 +408,52 @@ endif()
 # library there too, whatever the .lux being compiled uses.
 set(LUX_NATIVE_EXTRA_LIBS "")
 function(lux_optional_module option label)
-    cmake_parse_arguments(M "" "" "PACKAGES;FILES" ${ARGN})
+    cmake_parse_arguments(M "" "" "PACKAGES;FILES;WIN_HEADERS;WIN_LIBS;WIN_SYSLIBS;WIN_DEFS" ${ARGN})
     if(NOT ${option})
         return()
     endif()
-    find_package(PkgConfig QUIET)
-    message(STATUS "PKGCFG exe='${PKG_CONFIG_EXECUTABLE}' found=${PkgConfig_FOUND} ver='${PKG_CONFIG_VERSION_STRING}'")
+    # Never pkg-config when targeting Windows: it would answer with the host's (Linux) libraries.
+    if(NOT WIN32)
+        find_package(PkgConfig QUIET)
+    endif()
     if(PkgConfig_FOUND)
         pkg_check_modules(_${option} QUIET ${M_PACKAGES})
+    endif()
+    if(NOT _${option}_FOUND AND WIN32)
+        # Windows usually has no pkg-config: look the headers and libraries up directly.
+        set(_win_incs "")
+        set(_win_libs "")
+        set(_win_ok TRUE)
+        foreach(_h ${M_WIN_HEADERS})
+            string(MAKE_C_IDENTIFIER "LUX_${option}_H_${_h}" _v)
+            find_path(${_v} ${_h} PATH_SUFFIXES cairo)
+            if(${_v})
+                list(APPEND _win_incs ${${_v}})
+            else()
+                set(_win_ok FALSE)
+            endif()
+        endforeach()
+        foreach(_l ${M_WIN_LIBS})
+            string(MAKE_C_IDENTIFIER "LUX_${option}_L_${_l}" _v)
+            find_library(${_v} NAMES ${_l} lib${_l})
+            if(${_v})
+                list(APPEND _win_libs ${${_v}})
+            else()
+                set(_win_ok FALSE)
+            endif()
+        endforeach()
+        if(_win_ok)
+            set(_${option}_FOUND TRUE)
+            set(_${option}_INCLUDE_DIRS ${_win_incs})
+            set(_${option}_LIBRARIES ${_win_libs})
+            # Static libraries still need their own system libs (and defines) on Windows.
+            list(APPEND _${option}_LIBRARIES ${M_WIN_SYSLIBS})
+            set(_${option}_LDFLAGS ${_win_libs})
+            foreach(_s ${M_WIN_SYSLIBS})
+                list(APPEND _${option}_LDFLAGS -l${_s})
+            endforeach()
+            target_compile_definitions(lux_script PRIVATE ${M_WIN_DEFS})
+        endif()
     endif()
     if(NOT _${option}_FOUND)
         message(STATUS "${label} module: SKIPPED (needs ${M_PACKAGES} development files)")
@@ -319,11 +469,17 @@ function(lux_optional_module option label)
 endfunction()
 
 set(_m src/lux_script/modules/base_modules)
-lux_optional_module(LUX_PDF    "pdf"       PACKAGES cairo                  FILES ${_m}/pdf.cpp)
-lux_optional_module(LUX_HTTP   "http/mail" PACKAGES libcurl                FILES ${_m}/http.cpp ${_m}/mail.cpp)
-lux_optional_module(LUX_CRYPTO "crypto"    PACKAGES libcrypto              FILES ${_m}/crypto.cpp)
-lux_optional_module(LUX_GZIP   "gzip"      PACKAGES zlib                   FILES ${_m}/gzip.cpp)
-lux_optional_module(LUX_IMAGE  "image"     PACKAGES libjpeg libpng libwebp FILES ${_m}/image.cpp)
+lux_optional_module(LUX_PDF    "pdf"       PACKAGES cairo                  FILES ${_m}/pdf.cpp
+                    WIN_HEADERS cairo.h WIN_LIBS cairo)
+lux_optional_module(LUX_HTTP   "http/mail" PACKAGES libcurl                FILES ${_m}/http.cpp ${_m}/mail.cpp ${_m}/imap.cpp ${_m}/mailparse.cpp
+                    WIN_HEADERS curl/curl.h WIN_LIBS curl
+                    WIN_SYSLIBS ws2_32 crypt32 bcrypt secur32 normaliz iphlpapi WIN_DEFS CURL_STATICLIB)
+lux_optional_module(LUX_CRYPTO "crypto"    PACKAGES libcrypto              FILES ${_m}/crypto.cpp
+                    WIN_HEADERS openssl/evp.h WIN_LIBS crypto)
+lux_optional_module(LUX_GZIP   "gzip"      PACKAGES zlib                   FILES ${_m}/gzip.cpp
+                    WIN_HEADERS zlib.h WIN_LIBS z)
+lux_optional_module(LUX_IMAGE  "image"     PACKAGES libjpeg libpng libwebp FILES ${_m}/image.cpp
+                    WIN_HEADERS jpeglib.h png.h webp/encode.h WIN_LIBS jpeg png webp)
 target_compile_definitions(lux_script PRIVATE LUX_NATIVE_EXTRA_LIBS="${LUX_NATIVE_EXTRA_LIBS}")
 target_compile_options(lux_script PRIVATE -Wall -Wextra)
 
@@ -342,7 +498,9 @@ lux_link_script(lux-bin)
 # HTTP, not guessed ahead of time. -rdynamic exports this binary's symbols
 # into the dynamic table so the .so resolves against THOSE, instead of
 # creating its own.
-target_link_options(lux-bin PRIVATE -rdynamic)
+if(NOT WIN32)   # PE executables export nothing by default and --native is off there
+    target_link_options(lux-bin PRIVATE -rdynamic)
+endif()
 
 # Frontend development tools.
 add_executable(dump_tokens src/lux_script/tools/dump_tokens.cpp)
@@ -357,8 +515,7 @@ lux_link_script(crypto_check)
 # not an instrumented version of it.
 enable_testing()
 
-# En Android los tests shadow enlazan curl/ssl que no existen en el NDK: fuera.
-if(NOT ANDROID)
+# In-process test linked against lux_script: tests/<name>.cpp -> test_<name>.
 function(lux_script_test name)
     add_executable(test_${name} tests/${name}.cpp)
     lux_link_script(test_${name})
@@ -413,7 +570,9 @@ lux_script_test(native_route_shadow)
 # the .so), so a bytecode state.incr() and a --native one, in the SAME test,
 # incremented DIFFERENT counters -- this test caught it (sequence 1,2,1,1,2
 # instead of 1,2,3,3,3) before this comment was written.
-target_link_options(test_native_route_shadow PRIVATE -rdynamic)
+if(NOT WIN32)
+    target_link_options(test_native_route_shadow PRIVATE -rdynamic)
+endif()
 
 # The postgres placeholder translator is a pure function: it is tested without a
 # server by including the driver's .cpp, to test THE code and not a copy.
@@ -425,8 +584,6 @@ target_link_options(test_native_route_shadow PRIVATE -rdynamic)
 # this test needs it). --whole-archive would force it in regardless and
 # collide with the copy this test already carries, since this executable is
 # not exercising BuiltinModuleRegistry/module self-registration at all.
-endif()
-
 if(LUX_POSTGRES AND PQ_INC AND PQ_LIB)
     add_executable(test_placeholders tests/placeholders.cpp)
     target_include_directories(test_placeholders PRIVATE ${PQ_INC})
@@ -461,6 +618,11 @@ add_test(NAME sqlite
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_sqlite.sh $<TARGET_FILE:lux-bin>
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(sqlite PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+# The result cache: what makes a cached SELECT stale, and what must never be cached.
+add_test(NAME sqlite_cache
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_sqlite_cache.sh $<TARGET_FILE:lux-bin>
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(sqlite_cache PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
 # The single writer and `replicate` (directories; s3/sftp need real targets).
 add_test(NAME sqlite_replica
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_sqlite_replica.sh $<TARGET_FILE:lux-bin>
@@ -479,6 +641,12 @@ add_test(NAME pdf
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_pdf.sh $<TARGET_FILE:lux-bin>
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(pdf PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+
+# Orderly shutdown: idle keep-alive connections must not hold it up (fix in App's drain).
+add_test(NAME shutdown
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_shutdown.sh $<TARGET_FILE:lux-bin>
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(shutdown PROPERTIES TIMEOUT 120)
 
 # The `http` native module needs libcurl (LUX_HTTP) -- same skip-if-missing
 # pattern as pdf/sqlite/postgres/mysql above.
@@ -516,5 +684,8 @@ if(LUX_EXAMPLES AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples)
         get_filename_component(name ${src} NAME_WE)
         add_executable(${name} ${src})
         target_link_libraries(${name} PRIVATE lux)
+        if(WIN32)
+            target_link_options(${name} PRIVATE -Wl,--allow-multiple-definition)  # see lux_link_script()
+        endif()
     endforeach()
 endif()

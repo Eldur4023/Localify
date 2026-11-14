@@ -184,6 +184,8 @@ app:
     version   "1.0.0"
     port      8080
     host      "127.0.0.1"     # listen address; default 0.0.0.0
+    tls_cert  "fullchain.pem" # with tls_key: the port speaks HTTPS (needs -DLUX_TLS=ON)
+    tls_key   "privkey.pem"
     max_body  "16MB"          # request body cap (see §16 for bigger uploads)
     templates "./templates"
 
@@ -229,6 +231,22 @@ finds `/srv/blog/templates` and opens `/srv/blog/blog.db`, not a same-named one 
 whatever directory that launcher happened to start in (which, for a database file, means
 silently creating and using an empty one — no error, since a missing sqlite file is normally
 just a fresh database). An absolute path, or one built from `env(...)`, is never touched.
+
+**HTTPS.** A top-level `tls:` block, next to `app:`, makes the app's port speak HTTPS; without it the port is plain HTTP.
+
+```
+tls:
+    cert "fullchain.pem"
+    key  "privkey.pem"
+```
+
+With `cert` and `key` (PEM files; `env(...)` works) the port speaks TLS 1.2/1.3 itself,
+so no reverse proxy is needed for it. It is a build option, `cmake -DLUX_TLS=ON` (needs `libssl-dev`);
+a binary without it refuses to start with a `tls:` block instead of serving plain HTTP. Measured on 8
+cores against nginx in front: Lux alone ~125k req/s on a small route, nginx + keep-alive to Lux ~60k,
+nginx with its default `proxy_pass` ~21k. Not included: HTTP/2, a plain-HTTP-to-HTTPS redirect on
+another port (that is one `return 301` in whatever listens on 80) and certificate reload (restart
+after a renewal). A static file is encrypted in user space (pread + OpenSSL) unless the kernel's `tls` module is loaded (`sudo modprobe tls`) and the CPU has fast AES-GCM: then Lux hands the encryption to the kernel (kTLS) and the file goes out through `sendfile`, about 20% more requests per second on a 30 KB file in a local test. Without the module nothing breaks, it just stays in user space.
 
 `spa` on a static mount makes routes that are not found fall back to `index.html`. A directory
 request (`/docs` or `/docs/`) serves that directory's own `index.html` if it has one, same as
@@ -417,7 +435,7 @@ alongside `"true"`/`"false"`/`"1"`/`"0"`, since `"on"` is the literal value an H
 `<input type="checkbox">` sends when checked and given no explicit `value=`.
 
 More of the request: `request.query` (the raw query string, without the `?`), `request.host`,
-`request.scheme` (`"https"` only when a proxy on the same machine sends `X-Forwarded-Proto: https`) and
+`request.scheme` (`"https"` when Lux serves TLS itself, or when a proxy on the same machine sends `X-Forwarded-Proto: https`) and
 `request.headers` (a `Dict`, lowercase keys). A field that repeats (several checkboxes with one
 `name`) gives its last value with `form("x")` / `query("x")`; `form_list("x")` and `query_list("x")`
 return every value, in order, as a `List<string>` (empty if absent).
@@ -668,7 +686,8 @@ How much a request costs depends on the template:
 
 Diagnostics: `LUX_LUXP_VERBOSE=1` logs why a template has no plan; `LUX_LUXP_CHECK=1`
 computes every plan answer the long way too and logs any difference; `LUX_LUXP_PLAN=0` turns
-plans off.
+plans off. `LUX_LUXP_ZLEVEL=1` deflates each page's document before sending it (about half the
+bytes, ~17 µs of CPU per page): for when the connection, not the CPU, is the bottleneck.
 
 A static site, without a server:
 
@@ -935,7 +954,7 @@ production.
 
 | Module | Keys |
 |---|---|
-| `sqlite` | `file` (required), `pool`, `timeout_ms`, `replicate` (one line per replica) |
+| `sqlite` | `file` (required), `pool`, `timeout_ms`, `replicate` (one line per replica), `result_cache` (`off` to disable), `result_cache_ms`, `result_cache_mb` |
 | `postgres` | `url`, or else `host` / `port` / `database` (required) / `user` / `password`; `pool` |
 | `mysql` | `host` / `port` / `database` / `user` / `password`; `pool` |
 
@@ -951,6 +970,22 @@ unique constraint say, fails alone. Your `await` returns once its batch has **co
 a query right after it sees the write. `last_id()` is the id of **your** insert, even with
 other requests' inserts in the same batch. Transactions (`begin()`) and statements that cannot
 run inside one (`pragma`, `vacuum`, `attach`) go to the pool as before.
+
+### SQLite: the result cache
+
+A `select` whose result is asked for again is answered from memory while the tables it reads have
+not been written: no statement runs, no row is rebuilt. Lux knows which tables a statement reads
+(SQLite reports it while compiling) and moves a table to a new generation after every commit that
+touched it, so a read after your `await exec(...)` always sees the write. What is **not** cached:
+anything inside a transaction (it must see its own writes), statements with `random()`, `changes()`,
+`last_insert_rowid()` or the date and time functions, `pragma`, tables created `WITHOUT ROWID`,
+virtual tables and attached databases. Every handler gets its own copy of the rows, so editing them
+changes nothing for the next request.
+
+One thing the cache cannot see is **another process** writing the file (a script, the `sqlite3`
+shell): that is picked up when the entry reaches `result_cache_ms` (default 1000). `result_cache_mb`
+caps the memory (default 64). `result_cache off` turns the cache off; so does the environment
+variable `LUX_NO_RESULT_CACHE`.
 
 `replicate` copies every commit, within a second, somewhere else. Give it as many times as
 you want:
@@ -1176,7 +1211,8 @@ routes and their stream.
 **`origins(...)` is required**, and leaving it out is a compile error. Browsers do not apply
 the same-origin policy to the WebSocket handshake: without an allowlist, any site can open
 the connection from your user's browser and inherit their cookies. An origin outside the list
-gets a `403`.
+gets a `403`. `origins("*")` is the explicit opt-in to accept any origin
+(public, cookie-less endpoints only).
 
 ### Broadcasting to a room
 
@@ -1781,6 +1817,30 @@ What stays on bytecode today: `ws`/`sse` routes, a constructor with a body, a fu
 native route reports the route's own line in `"at"`, where bytecode reports the line inside the
 function that failed.
 
+### Tuning knobs
+
+Environment variables, read at startup:
+
+| Variable | Effect |
+|---|---|
+| `LUX_THREADS=N` | event loops and pool threads, instead of one per CPU the process may use |
+| `LUX_PIN_THREADS=1` | pins loop *i* to the *i*-th usable CPU and asks the kernel (`SO_INCOMING_CPU`) to hand it the connections whose packets arrive there. Meant for a NIC with receive-side scaling; on loopback it changes nothing and the tail gets worse, so it is off |
+| `LUX_NO_RESULT_CACHE=1` | turns the sqlite result cache off (section 12) |
+| `LUX_WAL_HIGH_PAGES=N` | the WAL size (pages, default 32000) past which each write batch waits up to 20 ms for the checkpointer |
+| `LUX_DB_CACHE_STATS=1` | logs the result cache's hits and misses at shutdown |
+
+Every normal build is already optimised: LTO plus a profile-guided pass that applies the profile
+committed in `pgo/` (no extra step for the developer). `-DLUX_PGO=off` skips the profile and
+`-DLUX_LTO=OFF` skips LTO (faster to build while hacking on the C++ core). After big changes to the hot
+paths or a compiler upgrade, regenerate it with `tools/pgo.sh build-pgo -- <training load>` and commit
+`pgo/`; code the profile never saw is compiled normally.
+
+SQLite is compiled from the amalgamation in `third_party/sqlite` (3.53.4, tuned flags: no per-connection
+mutex, no memstatus, no shared cache; FTS5, RTREE and math functions kept) instead of the distro's
+`libsqlite3`, so the profile reaches it too. On the forum bench, user CPU per request went 57.7 -> 48.4 us
+(-16%) with the result cache; without the profile the vendored build equals the system one.
+`-DLUX_SQLITE_SYSTEM=ON` links the system library again.
+
 ## 23. Native modules
 
 Beyond `sqlite`/`postgres`/`mysql`, `import` reaches the compiled-in modules below. A call is
@@ -1953,6 +2013,7 @@ The handle-based `parse`/`rows`/`columns`/`row_count`/`to_csv`/`close` still wor
 | `make_dir` `remove_file` `remove_dir(dir[, recursive])` | `remove_dir` refuses a non-empty directory unless told |
 | `disk_usage(path)` | `{total, free, used}` bytes of the filesystem holding `path` |
 | `chmod(path, mode)` `umask(mask)` | Modes are octal strings (`"640"`); `umask` returns the previous mask |
+| `name()` | `"windows"`, `"linux"`, `"android"` or `"macos"`: the platform the binary was built for |
 | `temp_dir()` `temp_file([suffix])` | A new private (0600) temporary file |
 | **await** `read_file` `write_file` `append_file` `copy_file(from, to[, overwrite])` `move(from, to)` | `move` works across filesystems |
 | **await** `run(cmd[, args, options])` | `{status, stdout, stderr}`; options `input` (stdin), `cwd`, `env` (a `null` value unsets), `timeout_ms` (default 15 s, up to 120 s) |
@@ -2102,6 +2163,38 @@ failure raises). `attachments` is a `List` of file paths or `{name, content}` fo
 on the spot (`{"name": "report.csv", "content": csv.write(rows)}`), up to 25 MB. `to`/`cc`/`bcc` take one address or a `List`; with both `text` and `html`
 the mail carries both. Every header value is stripped of line breaks, so a form field cannot
 add a header, and `bcc` never appears in the message. Built with the `http` module (libcurl).
+
+**Several accounts.** A `smtp` Dict in the message replaces the `app:` block for that call:
+`"smtp": {"host", "port", "user", "password" or "token" (OAuth2 access token), "tls", "from"}`.
+`in_reply_to` and `references` set the threading headers. **`compose(d)`** takes the same Dict
+and returns the finished message as text instead of sending it (to save it with `imap.append`).
+
+### imap
+
+Reads mail over IMAP (libcurl, like `mail`). Stateless: every call carries its own connection
+Dict, so one app can serve any number of accounts. Folder names are passed as the server spells
+them; CR/LF in any value is rejected.
+
+```lux
+import imap
+
+Json c = { "host": "imap.example.com", "user": "me", "password": pw }   # tls "tls" (993) | "starttls" | "none"
+Json g = { "host": "imap.gmail.com", "user": "me@gmail.com", "token": access_token }  # OAuth2 (XOAUTH2)
+
+List folders = await imap.list_folders(c)           # [{name, attrs: ["\\Sent", ...]}]
+Json st      = await imap.status(c, "INBOX")        # {messages, uidnext, uidvalidity, unseen}
+List msgs    = await imap.uids(c, "INBOX", 1200)    # [{uid, flags}] for uid >= 1200
+string raw   = await imap.fetch(c, "INBOX", 1203)   # whole RFC 822 message; a 4th arg "HEADER" = headers only
+await imap.set_flags(c, "INBOX", 1203, "add", ["\\Seen"])   # "add" | "remove" | "set"
+await imap.move(c, "INBOX", 1203, "Trash")          # UID MOVE, or copy + \Deleted + UID EXPUNGE
+await imap.append(c, "Sent", mail.compose({...}))   # saved as \\Seen; the new uid is not returned (see find)
+int uid = await imap.find(c, "Drafts", "<id@host>") # uid of the message with that Message-ID header, or 0
+await imap.remove(c, "Drafts", uid)                 # \\Deleted + UID EXPUNGE
+```
+
+`mail.compose({..., "draft": true})` builds a message with no recipient or body yet and keeps its Bcc, for
+saving to Drafts. A new connection is made per call; no IDLE (poll `status`/`uids` on a timer). Test:
+`tests/run_imap.sh` (against `tests/imap_fake_server.py`).
 
 ---
 

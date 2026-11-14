@@ -5,17 +5,14 @@
 #include "../../include/lux/metrics.hpp"
 #include "../../include/lux/logger.hpp"
 #include "../../include/lux/percent_encoding.hpp"
+#include "../../include/lux/tls.hpp"
+#ifdef LUX_TLS
+#include <openssl/err.h>
+#include <openssl/ssl.h>
+#endif
 
-#include <sys/epoll.h>
-#include <sys/sendfile.h>
-#include <sys/uio.h>
+#include <lux/platform.hpp>
 #include <fstream>
-#include <sys/stat.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
@@ -29,7 +26,8 @@ namespace lux::http {
 HttpConnection::HttpConnection(int fd, core::EventLoop& loop,
                                lux::DispatchFn dispatch,
                                std::shared_ptr<std::atomic<int>> conn_count,
-                               std::shared_ptr<std::atomic<int>> loop_count)
+                               std::shared_ptr<std::atomic<int>> loop_count,
+                               std::string peer_ip)
     : fd_(fd)
     , loop_(loop)
     , dispatch_(std::move(dispatch))
@@ -37,10 +35,93 @@ HttpConnection::HttpConnection(int fd, core::EventLoop& loop,
     , loop_count_(std::move(loop_count))
     , parser_([this](ParsedRequest req) { this->dispatch(std::move(req)); },
               [this]() { this->on_headers_complete(); })
+    , peer_ip_(std::move(peer_ip))
+    , peer_ip_done_(!peer_ip_.empty())
 {}
 
 void HttpConnection::start() {
+#ifdef LUX_TLS
+    if (auto* ctx = lux::tls::context()) {
+        ssl_ = SSL_new(ctx);
+        if (ssl_) {
+            // Lux reads the socket itself and hands OpenSSL the ciphertext
+            // through a memory BIO, so a short read means "drained" exactly as
+            // in plain HTTP: OpenSSL reading it would cost one more read() per
+            // request, the one that answers EAGAIN (measured: -5% CPU on small
+            // requests). OpenSSL writes straight to the socket.
+            tls_in_ = BIO_new(BIO_s_mem());
+            BIO_set_mem_eof_return(tls_in_, -1);   // empty = "want more", not EOF
+            SSL_set_bio(ssl_, tls_in_, BIO_new_socket(fd_, BIO_NOCLOSE));
+            SSL_set_accept_state(ssl_);   // the handshake runs inside the first SSL_read
+        }
+    }
+#endif
     set_deadline(kIdleTimeoutMs, kIdleMsg);
+}
+
+// ── Socket I/O: plain, or TLS with the same read(2)/write(2) convention ──────
+
+#ifdef LUX_TLS
+ssize_t HttpConnection::tls_ret(int r, bool reading) {
+    if (r > 0) return r;
+    switch (SSL_get_error(ssl_, r)) {
+        case SSL_ERROR_WANT_READ:  errno = EAGAIN; return -1;
+        case SSL_ERROR_WANT_WRITE: errno = EAGAIN; tls_want_out_ = reading; return -1;   // only a read (the handshake) parks on EPOLLOUT by itself
+        case SSL_ERROR_ZERO_RETURN: return 0;                       // the peer's close_notify
+        default: ERR_clear_error(); errno = EPROTO; return -1;      // handshake failure, bad record, reset
+    }
+}
+#endif
+
+// A TLS response is several records, each a TCP push (and, on loopback, a trip
+// through the receiver too): cork the socket so a file response leaves as full
+// segments, and uncork when it is written.
+void HttpConnection::cork(bool on) {
+    if (corked_ == on) return;
+    corked_ = on;
+    int v = on;
+#ifdef _WIN32
+    (void)v;   // no TCP_CORK on Windows: TLS records go out as they are written
+#else
+    ::setsockopt(fd_, IPPROTO_TCP, TCP_CORK, &v, sizeof v);
+#endif
+}
+
+ssize_t HttpConnection::io_read(void* buf, size_t n) {
+#ifdef LUX_TLS
+    if (ssl_) {
+        for (;;) {
+            int r = SSL_read(ssl_, buf, static_cast<int>(n));
+            if (r > 0 || SSL_get_error(ssl_, r) != SSL_ERROR_WANT_READ) return tls_ret(r, true);
+            // OpenSSL needs more ciphertext. After a short read the socket is
+            // empty (do_read() clears the flag on every new edge).
+            if (tls_drained_) { errno = EAGAIN; return -1; }
+            char raw[16384];
+            ssize_t k = plat::sock_read(fd_, raw, sizeof raw);
+            if (k <= 0) return k;   // EOF, or errno as for plain HTTP
+            tls_drained_ = static_cast<size_t>(k) < sizeof raw;
+            BIO_write(tls_in_, raw, static_cast<int>(k));
+        }
+    }
+#endif
+    return plat::sock_read(fd_, buf, n);
+}
+
+ssize_t HttpConnection::io_write(const void* buf, size_t n) {
+#ifdef LUX_TLS
+    if (ssl_) return tls_ret(SSL_write(ssl_, buf, static_cast<int>(n)), false);
+#endif
+    return plat::sock_write(fd_, buf, n);
+}
+
+void HttpConnection::free_tls() {
+#ifdef LUX_TLS
+    if (!ssl_) return;
+    if (SSL_is_init_finished(ssl_)) SSL_shutdown(ssl_);   // close_notify, best effort: the socket is non-blocking
+    SSL_free(ssl_);   // and both BIOs
+    ssl_    = nullptr;
+    tls_in_ = nullptr;
+#endif
 }
 
 void HttpConnection::arm_between_requests() {
@@ -118,7 +199,8 @@ HttpConnection::~HttpConnection() {
         if (timer_ >= 0) ::close(timer_);
 #endif
         if (file_fd_     >= 0) ::close(file_fd_);
-        ::close(fd_);
+        free_tls();
+        plat::sock_close(fd_);
     }
 }
 
@@ -136,6 +218,11 @@ void HttpConnection::on_event(uint32_t events) {
     // is the same signal do_read() already uses to route incoming bytes to the
     // WS parser instead of the HTTP one, set for the whole WS session and
     // cleared only in close().
+    if (tls_want_out_ && (events & EPOLLOUT)) {   // the handshake was waiting for the socket to drain
+        tls_want_out_ = false;
+        arm(EPOLLIN);
+        events = (events & ~uint32_t(EPOLLOUT)) | EPOLLIN;
+    }
     if (events & EPOLLOUT) {
         if (auto req = current_req_.lock(); req && req->_ws_on_data) do_ws_write();
         else                                                         do_write();
@@ -147,11 +234,15 @@ void HttpConnection::on_event(uint32_t events) {
 
 void HttpConnection::do_read() {
     char buf[16384];
+    tls_drained_ = false;   // a new edge: the socket may hold more
     while (!closed_) {
-        ssize_t n = ::read(fd_, buf, sizeof(buf));
+        ssize_t n = io_read(buf, sizeof(buf));
         if (n == 0) { close(); return; }
         if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (tls_want_out_) arm(EPOLLIN | EPOLLOUT);   // handshake: wait for the socket to be writable too
+                return;
+            }
             if (errno == EINTR) continue;
             close(); return;
         }
@@ -199,7 +290,9 @@ void HttpConnection::do_read() {
         // (EPOLLET, tcp_server.cpp) and wakes the loop again. Edge, not level:
         // level re-queued every socket just served ahead of ones still
         // waiting, and half the requests waited a round -- p90 twice p50.
-        if (static_cast<size_t>(n) < sizeof(buf)) return;
+        // (TLS: one call returns one record, and more may be decrypted already;
+        // asking again is free, io_read() does not touch a drained socket.)
+        if (!ssl_ && static_cast<size_t>(n) < sizeof(buf)) return;
     }
 }
 
@@ -277,15 +370,7 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
     if (!peer_ip_done_ &&
         ::getpeername(fd_, reinterpret_cast<sockaddr*>(&ss), &sslen) == 0) {
         peer_ip_done_ = true;
-        char ipbuf[INET6_ADDRSTRLEN]{};
-        if (ss.ss_family == AF_INET) {
-            inet_ntop(AF_INET, &reinterpret_cast<sockaddr_in*>(&ss)->sin_addr,
-                      ipbuf, sizeof(ipbuf));
-        } else if (ss.ss_family == AF_INET6) {
-            inet_ntop(AF_INET6, &reinterpret_cast<sockaddr_in6*>(&ss)->sin6_addr,
-                      ipbuf, sizeof(ipbuf));
-        }
-        peer_ip_ = ipbuf;
+        peer_ip_ = peer_ip_of(ss);
     }
     req_ptr->remote_ip = peer_ip_;
 
@@ -335,7 +420,7 @@ void HttpConnection::bind_stream(lux::Request& req) {
     auto self = std::static_pointer_cast<HttpConnection>(req._conn);
     req._raw_write = [self](const char* data, size_t len) -> ssize_t {
         if (self->closed_) { errno = EBADF; return -1; }
-        return ::write(self->fd_, data, len);
+        return self->io_write(data, len);
     };
     req._ws_queue_write = [self](std::string frame) {
         self->queue_ws_write(std::move(frame));
@@ -441,7 +526,7 @@ void HttpConnection::finish_dispatch(lux::Request& request,
     if (!response.sendfile_path().empty()) {
         // Non-TLS: open the file; do_sendfile() will stream it via sendfile(2).
         int fd = response.take_sendfile_fd();
-        if (fd < 0) fd = ::open(response.sendfile_path().c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0) fd = plat::file_open_ro(response.sendfile_path().c_str());
         if (fd < 0) {
             lux::Response err;
             err.status(500).json_text(R"({"error":"Cannot open file"})");
@@ -515,6 +600,19 @@ void HttpConnection::finish_dispatch(lux::Request& request,
     // A big body goes out with the head (writev) from where it is, not
     // copied behind it first; a small one is cheaper to copy than to split.
     std::string built = response.build_head();
+    if (file_fd_ >= 0 && file_remaining_ <= 16384) {
+        // A small file goes out with its head in one send: head + sendfile(2) is two
+        // syscalls and two segments for a few KB.
+        const size_t head = built.size(), want = file_remaining_;
+        built.resize(head + want);
+        if (plat::pread(file_fd_, built.data() + head, want, file_offset_) == static_cast<ssize_t>(want)) {
+            ::close(file_fd_);
+            file_fd_ = -1; file_offset_ = 0; file_remaining_ = 0;
+            send_response(std::move(built));
+            return;
+        }
+        built.resize(head);   // the file shrank under us: the sendfile path deals with it
+    }
     if (request.method != "HEAD" && response.sendfile_path().empty()) {
         if (response.body().size() < 16384) {
             built += response.body();
@@ -553,13 +651,14 @@ void HttpConnection::finish_dispatch(lux::Request& request,
 
 void HttpConnection::send_response(std::string data, const std::string* body) {
     if (closed_) return;
+    // TLS encrypts from one buffer: no writev of head + body.
+    if (ssl_ && body && !body->empty()) { data += *body; body = nullptr; }
     // No size cap here: the response is already whole in memory, so one
     // saves nothing -- it only dropped every response over 16 MB, however
     // fast the client read. A slow reader is the write timeout's job.
     const size_t total = data.size() + (body ? body->size() : 0);
     if (body && !body->empty()) {
-        iovec iov[2] = {{data.data(), data.size()}, {const_cast<char*>(body->data()), body->size()}};
-        const ssize_t n = ::writev(fd_, iov, 2);
+        const ssize_t n = plat::sock_writev2(fd_, data.data(), data.size(), body->data(), body->size());
         if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) { close(); return; }
         const size_t written = n < 0 ? 0 : static_cast<size_t>(n);
         if (written == total) { on_write_complete(); return; }
@@ -575,8 +674,9 @@ void HttpConnection::send_response(std::string data, const std::string* body) {
     // an offset and arm EPOLLOUT only (EPOLLIN dropped until it completes).
     // Headers with a file behind them wait for it (MSG_MORE): one segment
     // for both instead of a small one of their own.
-    ssize_t n = file_fd_ >= 0 ? ::send(fd_, data.data(), data.size(), MSG_MORE)
-                              : ::write(fd_, data.data(), data.size());
+    if (ssl_ && file_fd_ >= 0) cork(true);
+    ssize_t n = file_fd_ >= 0 && !ssl_ ? plat::sock_send_more(fd_, data.data(), data.size())
+                                       : io_write(data.data(), data.size());
     if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
         close(); return;
     }
@@ -592,17 +692,17 @@ void HttpConnection::send_response(std::string data, const std::string* body) {
     arm(EPOLLOUT);
 }
 
-void HttpConnection::do_write() {
+bool HttpConnection::drain() {
     while (write_offset_ < write_buf_.size()) {
-        ssize_t n = ::write(fd_, write_buf_.data() + write_offset_,
-                            write_buf_.size() - write_offset_);
+        ssize_t n = io_write(write_buf_.data() + write_offset_,
+                             write_buf_.size() - write_offset_);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 arm(EPOLLOUT);
-                return;
+                return false;
             }
             if (errno == EINTR) continue;
-            close(); return;
+            close(); return false;
         }
         write_offset_ += static_cast<size_t>(n);
         // Forward progress on a slow client's socket buffer — see the
@@ -611,6 +711,11 @@ void HttpConnection::do_write() {
         // the buffer should not be cut off partway through a large response.
         refresh_request_timeout();
     }
+    return true;
+}
+
+void HttpConnection::do_write() {
+    if (!drain()) return;
 
     // All header/body bytes sent — reset buffer
     write_buf_.clear();
@@ -631,9 +736,8 @@ void HttpConnection::do_write() {
 
 void HttpConnection::do_ws_write() {
     while (ws_write_offset_ < ws_write_buf_.size()) {
-        ssize_t n = ::write(fd_,
-                            ws_write_buf_.data() + ws_write_offset_,
-                            ws_write_buf_.size() - ws_write_offset_);
+        ssize_t n = io_write(ws_write_buf_.data() + ws_write_offset_,
+                             ws_write_buf_.size() - ws_write_offset_);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) return;  // EPOLLOUT stays armed
             if (errno == EINTR) continue;
@@ -674,7 +778,7 @@ void HttpConnection::queue_ws_write(std::string frame) {
         return;
     }
 
-    ssize_t n = ::write(fd_, frame.data(), frame.size());
+    ssize_t n = io_write(frame.data(), frame.size());
     if (n < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
             ws_write_buf_    = std::move(frame);
@@ -696,10 +800,45 @@ void HttpConnection::queue_ws_write(std::string frame) {
 }
 
 void HttpConnection::do_sendfile() {
+    // Over TLS the bytes are encrypted in user space: pread a chunk into
+    // write_buf_ and drain it (do_write() comes back here when it blocks).
+    // With kTLS on transmit (tls.cpp enables it where the kernel's AES-GCM is
+    // fast) the file goes through the kernel as plaintext, like plain HTTP.
+#if defined(LUX_TLS) && !defined(OPENSSL_NO_KTLS)
+    if (ssl_ && BIO_get_ktls_send(SSL_get_wbio(ssl_))) {
+        while (file_remaining_ > 0) {
+            ssize_t n = tls_ret(static_cast<int>(SSL_sendfile(ssl_, file_fd_, file_offset_,
+                                    std::min(file_remaining_, size_t{1024 * 1024}), 0)), false);
+            if (n < 0) {
+                if (errno == EAGAIN) { arm(EPOLLOUT); return; }
+                close(); return;
+            }
+            if (n == 0) break;
+            file_offset_    += n;
+            file_remaining_ -= static_cast<size_t>(n);
+            refresh_request_timeout();
+        }
+        ::close(file_fd_);
+        file_fd_ = -1; file_offset_ = 0; file_remaining_ = 0;
+        on_write_complete();
+        return;
+    }
+#endif
+    while (ssl_ && file_remaining_ > 0) {
+        write_buf_.resize(std::min(file_remaining_, size_t{64 * 1024}));
+        ssize_t r = plat::pread(file_fd_, write_buf_.data(), write_buf_.size(), file_offset_);
+        if (r <= 0) { close(); return; }   // the file shrank under us
+        write_buf_.resize(static_cast<size_t>(r));
+        file_offset_    += r;
+        file_remaining_ -= static_cast<size_t>(r);
+        write_offset_ = 0;
+        if (!drain()) return;
+        write_buf_.clear();
+    }
     // Zero-copy kernel transfer, plaintext only.
     while (file_remaining_ > 0) {
-        ssize_t n = ::sendfile(fd_, file_fd_, &file_offset_,
-                               std::min(file_remaining_, size_t{256 * 1024}));
+        ssize_t n = plat::sendfile(fd_, file_fd_, &file_offset_,
+                               std::min(file_remaining_, size_t{1024 * 1024}));
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 arm(EPOLLOUT); // socket buffer full — resume when drains
@@ -724,6 +863,7 @@ void HttpConnection::do_sendfile() {
 }
 
 void HttpConnection::on_write_complete() {
+    cork(false);
     // Cancel the request timeout — response delivered successfully
     deadline_msg_ = nullptr;
     in_flight_ = false;
@@ -836,7 +976,8 @@ void HttpConnection::close() {
     deadline_msg_ = nullptr;
     if (timer_ >= 0) { loop_.cancel_timer(timer_); timer_ = -1; }
     loop_.remove(fd_);
-    ::close(fd_);
+    free_tls();
+    plat::sock_close(fd_);
     if (file_fd_ >= 0) { ::close(file_fd_); file_fd_ = -1; }
     if (conn_count_) conn_count_->fetch_sub(1, std::memory_order_relaxed);
     if (loop_count_) loop_count_->fetch_sub(1, std::memory_order_relaxed);

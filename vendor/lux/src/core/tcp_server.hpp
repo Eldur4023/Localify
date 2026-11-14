@@ -23,6 +23,10 @@ public:
     // max_connections: maximum simultaneous open connections (default 10 000).
     // Excess connections are immediately closed with 503.
     //
+    // listen_here: false = join the group without opening a listener (Windows,
+    // where SO_REUSEPORT does not exist: one server accepts and the group's
+    // handoff spreads the connections).
+    //
     // conn_count: optional shared counter — pass the same one to every
     // TcpServer instance so the limit is enforced globally across all threads.
     // If nullptr, a per-instance counter is created (single-thread behaviour).
@@ -30,7 +34,8 @@ public:
               EventLoop& loop, lux::DispatchFn dispatch,
               int max_connections = 10'000,
               std::shared_ptr<std::atomic<int>> conn_count = nullptr,
-              std::shared_ptr<Group> group = nullptr);
+              std::shared_ptr<Group> group = nullptr,
+              bool listen_here = true);
     ~TcpServer();
 
     // Stop accepting new connections without shutting down the event loop.
@@ -39,6 +44,9 @@ public:
     // ONLY from its own loop's thread: it touches the handler map, which the
     // loop is reading in its epoll_wait.  From outside, use request_stop().
     void stop_accepting();
+    // Linux: this listener is the one the kernel prefers for connections whose packets arrive on `cpu` (SO_INCOMING_CPU
+    // on a SO_REUSEPORT group). Meant for loop threads pinned to that cpu; a no-op elsewhere.
+    void prefer_cpu(int cpu);
 
     // The same, requested from another thread.
     //
@@ -72,7 +80,7 @@ private:
     bool stopping_ = false;
 
     void on_accept();
-    void adopt(int client_fd);
+    void adopt(int client_fd, std::string peer_ip);
     void register_listen_fd();
 };
 

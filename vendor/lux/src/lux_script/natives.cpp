@@ -1,6 +1,8 @@
 #include <chrono>
 #include <unordered_set>
 #include <lux_script/natives.hpp>
+#include <lux/tls.hpp>
+#include <lux/http_cache.hpp>
 #include <lux_script/luxp_serve.hpp>
 #include <lux_script/template.hpp>
 #include <lux_script/crypto.hpp>
@@ -23,9 +25,16 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
+#include <lux_script/platform_os.hpp>
+#ifdef _WIN32
+#  include <io.h>
+#  include <fcntl.h>
+#  include <sys/stat.h>
+#else
+#  include <fcntl.h>
+#  include <unistd.h>
+#  include <sys/stat.h>
+#endif
 
 namespace lux_script {
 
@@ -182,30 +191,18 @@ std::string percent(const std::string& s) {
     }
     return out;
 }
-
-// Is `etag` listed in an If-None-Match value ("*", or a comma list, W/ ignored)?
-bool etag_listed(const std::string& header, const std::string& etag) {
-    if (header == "*") return true;
-    size_t pos = 0;
-    while (pos < header.size()) {
-        size_t comma = header.find(',', pos);
-        if (comma == std::string::npos) comma = header.size();
-        std::string t = header.substr(pos, comma - pos);
-        t.erase(0, t.find_first_not_of(' '));
-        t.erase(t.find_last_not_of(' ') + 1);
-        if (t.rfind("W/", 0) == 0) t.erase(0, 2);
-        if (t == etag) return true;
-        pos = comma + 1;
-    }
-    return false;
-}
 } // namespace
 
 } // namespace (the file-wide anonymous one: send_file_checked is public)
 
 void send_file_checked(lux::Request& req, lux::Response& res, const std::string& path,
                        const std::string* root, const std::string& filename, bool inline_) {
+#ifndef _WIN32
+    struct stat st{};
+    if (root) res.serve_file_from(*root, path, &st); else res.send_file_stat(path, st);
+#else
     if (root) res.serve_file_from(*root, path); else res.send_file(path);
+#endif
     const std::string file = res.sendfile_path();
     if (file.empty()) return;   // an error response (403, 404, ...)
 
@@ -213,17 +210,25 @@ void send_file_checked(lux::Request& req, lux::Response& res, const std::string&
         res.header("Content-Disposition", std::string(inline_ ? "inline" : "attachment") +
                    "; filename=" + quoted(filename) + "; filename*=UTF-8''" + percent(filename));
 
-    struct stat st{};
-    if (::stat(file.c_str(), &st) != 0) return;
     char buf[64];
+#ifdef _WIN32
+    std::error_code ec;
+    const auto mtime = std::filesystem::last_write_time(plat::to_path(file), ec);
+    const auto fsize = ec ? 0 : std::filesystem::file_size(plat::to_path(file), ec);
+    if (ec) return;
+    std::snprintf(buf, sizeof buf, "\"%llx-%llx\"",
+                  static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(mtime.time_since_epoch()).count()),
+                  static_cast<unsigned long long>(fsize));
+#else
     std::snprintf(buf, sizeof buf, "\"%llx-%llx\"",
                   static_cast<unsigned long long>(st.st_mtim.tv_sec) * 1000000000ull + static_cast<unsigned long long>(st.st_mtim.tv_nsec),
                   static_cast<unsigned long long>(st.st_size));
+#endif
     const std::string etag = buf;
     res.header("ETag", etag);
     if (!res.header_value("Cache-Control")) res.header("Cache-Control", "no-cache");   // revalidate with the ETag every time
     const std::string* inm = req.header("if-none-match");
-    if (inm && etag_listed(*inm, etag)) {
+    if (inm && lux::etag_listed(*inm, etag)) {
         res.take_body();
         res.status(304).send("");
     }
@@ -637,9 +642,10 @@ Value fn_req_host(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return Value::str(hdr(ctx, "host"));
 }
 
-// "https" only when a proxy on this machine says so (TLS ends at the proxy):
-// from anyone else the header is just a claim.
+// "https" when Lux itself terminates TLS (a tls: block); otherwise only when
+// a proxy on this machine says so: from anyone else the header is just a claim.
 Value fn_req_scheme(NativeCtx& ctx, std::vector<Value>&, std::string&) {
+    if (lux::tls::enabled()) return Value::str("https");
     const auto& ip = ctx.req.remote_ip;
     const bool local = ip == "127.0.0.1" || ip == "::1";
     return Value::str(local && hdr(ctx, "x-forwarded-proto") == "https" ? "https" : "http");
@@ -852,7 +858,7 @@ Value stub(NativeCtx&, std::vector<Value>&, std::string& error) {
     return Value::null();
 }
 const NativeDef kNatives[] = {
-#define LUX_BROWSER_NATIVE(name, min, max, impl) {name, min, max, stub},
+#define LUX_BROWSER_NATIVE(name, min, max, impl, is_async) {name, min, max, stub, is_async},
 #include <lux_script/browser_api.inc>
 };
 struct Member { const char* object; const char* member; const char* native; };
@@ -862,7 +868,7 @@ const Member kMembers[] = {
 };
 struct Method { const char* type; BuiltinMethod m; };
 const Method kMethods[] = {
-#define LUX_BROWSER_METHOD(type, name, min, max, ret) {type, {name, min, max, ret}},
+#define LUX_BROWSER_METHOD_X(type, name, min, max, ret, async_native) {type, {name, min, max, ret, async_native}},
 #include <lux_script/browser_api.inc>
 };
 
@@ -883,6 +889,8 @@ const std::vector<BuiltinMethod>* methods(const std::string& type) {
 }
 } // namespace browser
 } // namespace
+
+bool browser_profile_active() { return t_browser; }
 
 BrowserProfile::BrowserProfile() : prev_(t_browser) { t_browser = true; }
 BrowserProfile::~BrowserProfile() { t_browser = prev_; }
@@ -1464,7 +1472,7 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
             if (!dir.empty() && dir.back() != '/') dir += "/";
 
             std::error_code ec;
-            std::filesystem::create_directories(dir, ec);
+            std::filesystem::create_directories(plat::to_path(dir), ec);
 
             // `filename` is whatever the client sent: two uploads can
             // legitimately pick the same name, and an attacker can pick one
@@ -1502,8 +1510,13 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
                     }
                     candidate = stem + "-" + crypto::hex_encode(suffix) + ext;
                 }
+#ifdef _WIN32
+                fd = _wopen(plat::widen(dir + candidate).c_str(),
+                            _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY | _O_NOINHERIT, _S_IREAD | _S_IWRITE);
+#else
                 fd = ::open((dir + candidate).c_str(),
                             O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0644);
+#endif
                 if (fd >= 0) { final_name = candidate; break; }
                 if (errno != EEXIST) {
                     error = "cannot write to " + dir + candidate + ": " + std::strerror(errno);
@@ -1518,7 +1531,11 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
             std::string_view bytes = (*ctx.parts)[i].body;
             size_t written = 0;
             while (written < bytes.size()) {
+#ifdef _WIN32
+                long n = _write(fd, bytes.data() + written, static_cast<unsigned>(std::min<size_t>(bytes.size() - written, 1u << 30)));
+#else
                 ssize_t n = ::write(fd, bytes.data() + written, bytes.size() - written);
+#endif
                 if (n < 0) {
                     if (errno == EINTR) continue;
                     ::close(fd);

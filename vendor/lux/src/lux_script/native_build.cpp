@@ -2,8 +2,16 @@
 #include <lux_script/native_gen.hpp>
 #include <lux_script/template.hpp>
 
-#include <dlfcn.h>
+// The --native backend shells out to g++ and dlopen()s the result: Linux only.
+// On Windows (or with LUX_NO_NATIVE) compile_native() reports it is unavailable
+// and the module runs on the bytecode VM.
+#if defined(_WIN32) || defined(LUX_NO_NATIVE)
+#  define LUX_NATIVE_UNAVAILABLE 1
+#else
+#  include <dlfcn.h>
+#endif
 
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <set>
@@ -14,7 +22,9 @@
 namespace lux_script {
 
 NativeModule::~NativeModule() {
+#ifndef LUX_NATIVE_UNAVAILABLE
     if (handle_) dlclose(handle_);
+#endif
 }
 
 NativeModule::NativeModule(NativeModule&& o) noexcept
@@ -26,7 +36,9 @@ NativeModule::NativeModule(NativeModule&& o) noexcept
 
 NativeModule& NativeModule::operator=(NativeModule&& o) noexcept {
     if (this != &o) {
+#ifndef LUX_NATIVE_UNAVAILABLE
         if (handle_) dlclose(handle_);
+#endif
         por_indice             = std::move(o.por_indice);
         error_message          = o.error_message;
         rutas_por_indice       = std::move(o.rutas_por_indice);
@@ -36,6 +48,57 @@ NativeModule& NativeModule::operator=(NativeModule&& o) noexcept {
         o.handle_              = nullptr;
     }
     return *this;
+}
+
+namespace {
+
+// Ahead-of-time apps (the Android APK, where there is no g++ to run): the generated .cpp is built into the
+// binary or library itself and exports `lux_native_manifest`, a text listing its symbols. Written by
+// LUX_NATIVE_EMIT (below); read here instead of generating, compiling and dlopen()ing at start-up.
+//   line 1:  fingerprint of the program (function names and routes) the code was generated for
+//   then:    "F <function index> <symbol>", "R <route index> <symbol>", "A <route index> <symbol>" (async)
+#ifndef LUX_NATIVE_UNAVAILABLE
+void* prebuilt_handle() {
+    if (void* h = dlopen(nullptr, RTLD_NOW)) {
+        if (dlsym(h, "lux_native_manifest")) return h;
+        dlclose(h);
+    }
+    // The executable did not export it: the library this code lives in (libluxlocal.so, loaded RTLD_LOCAL by
+    // System.loadLibrary, so invisible from the main program's handle).
+    Dl_info info;
+    if (dladdr(reinterpret_cast<void*>(&prebuilt_handle), &info) && info.dli_fname)
+        if (void* h = dlopen(info.dli_fname, RTLD_NOW | RTLD_NOLOAD)) {
+            if (dlsym(h, "lux_native_manifest")) return h;
+            dlclose(h);
+        }
+    return nullptr;
+}
+
+// FNV-1a, not std::hash: the value is computed on the build host and compared on the phone.
+std::string huella(const Program& prog, const std::vector<std::string>& nombres) {
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&](const std::string& s) {
+        for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; }
+        h ^= 0xff; h *= 1099511628211ull;
+    };
+    for (const auto& n : nombres) mix(n);
+    for (const auto& r : prog.routes) { mix(r.method); mix(r.pattern); }
+    std::ostringstream o;
+    o << "luxnative1:" << std::hex << h;
+    return o.str();
+}
+#endif
+
+} // namespace
+
+bool native_prebuilt_available() {
+#ifdef LUX_NATIVE_UNAVAILABLE
+    return false;
+#else
+    void* h = prebuilt_handle();
+    if (h) dlclose(h);
+    return h != nullptr;
+#endif
 }
 
 size_t NativeModule::compiled() const {
@@ -98,6 +161,11 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
                                               const FunctionTable* chunks,
                                               const EnumSigs* enums) {
     aviso.clear();
+#ifdef LUX_NATIVE_UNAVAILABLE
+    (void)prog; (void)sigs; (void)clases_sig; (void)cache_dir; (void)informe; (void)chunks; (void)enums;
+    aviso = "--native: native compilation is not available on Windows yet; running on the bytecode VM";
+    return nullptr;
+#else
     if (informe) informe->rutas.assign(prog.routes.size(), "");
 
     std::vector<std::string> nombre_por_indice(sigs.size());
@@ -142,6 +210,66 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     std::string               rutas_cuerpos;
     std::string               registros;     // record structs, before templates and routes
     std::set<std::string>     render_keys;   // render() keys, see generate_native_template
+
+    // Everything below the `resolver` call turns `handle`'s symbols into the NativeModule.
+    const std::string huella_prog = huella(prog, nombre_por_indice);
+    auto resolver = [&](void* handle) -> std::unique_ptr<NativeModule> {
+        auto out = std::make_unique<NativeModule>();
+        out->handle_ = handle;
+        out->por_indice.assign(nombre_por_indice.size(), nullptr);
+        out->rutas_por_indice.assign(prog.routes.size(), nullptr);
+        out->rutas_async_por_indice.assign(prog.routes.size(), nullptr);
+
+        out->error_message =
+            reinterpret_cast<ErrorMessageFn>(dlsym(handle, "lux_native_error_message"));
+
+        out->bind = reinterpret_cast<NativeModule::BindFn>(dlsym(handle, "lux_native_bind"));
+
+        std::string simbolos_sin_resolver;
+        for (const auto& g : generadas) {
+            void* sym = dlsym(handle, g.simbolo_abi.c_str());
+            if (!sym) { simbolos_sin_resolver += " " + g.simbolo_abi; continue; }
+            out->por_indice[g.indice] = reinterpret_cast<CompiledFn>(sym);
+        }
+        for (const auto& g : rutas_generadas) {
+            void* sym = dlsym(handle, g.simbolo.c_str());
+            if (!sym) { simbolos_sin_resolver += " " + g.simbolo; continue; }
+            out->rutas_por_indice[g.indice] = reinterpret_cast<NativeModule::RouteFn>(sym);
+        }
+        for (const auto& g : rutas_async_generadas) {
+            void* sym = dlsym(handle, g.simbolo.c_str());
+            if (!sym) { simbolos_sin_resolver += " " + g.simbolo; continue; }
+            out->rutas_async_por_indice[g.indice] = reinterpret_cast<NativeModule::RouteFnAsync>(sym);
+        }
+        if (!out->error_message) simbolos_sin_resolver += " lux_native_error_message";
+        if (!out->bind) simbolos_sin_resolver += " lux_native_bind";
+        if (!simbolos_sin_resolver.empty())
+            aviso = "--native: unresolved symbol(s) after compiling (served with bytecode):" +
+                    simbolos_sin_resolver;
+        return out;
+    };
+
+    // Built into this binary ahead of time: no codegen, no g++, no dlopen of a new file.
+    if (void* self = prebuilt_handle()) {
+        std::istringstream man(static_cast<const char*>(dlsym(self, "lux_native_manifest")));
+        std::string linea;
+        std::getline(man, linea);
+        if (linea != huella_prog) {
+            dlclose(self);
+            aviso = "--native: the code built into this binary is for another version of the app "
+                    "(rebuild it); served with bytecode";
+            return nullptr;
+        }
+        while (std::getline(man, linea)) {
+            std::istringstream ln(linea);
+            char tipo = 0; size_t i = 0; std::string simbolo;
+            if (!(ln >> tipo >> i >> simbolo)) continue;
+            if (tipo == 'F') generadas.push_back({i, simbolo});
+            else if (tipo == 'R') rutas_generadas.push_back({i, simbolo});
+            else if (tipo == 'A') rutas_async_generadas.push_back({i, simbolo});
+        }
+        return resolver(self);
+    }
 
     // A check's Peticiones: a return or parameter becomes a Value (Json),
     // and the whole set is generated again. Each is one type turned into
@@ -386,6 +514,20 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
         codigo += rutas_cuerpos;
     }
 
+    // LUX_NATIVE_EMIT=<file>: write the generated code, with its manifest, and stop. The file is then compiled
+    // into the binary by the build (see Lux-Local's CMakeLists.txt) and found by prebuilt_handle() at run time.
+    if (const char* emit = std::getenv("LUX_NATIVE_EMIT"); emit && *emit) {
+        std::ofstream out(emit, std::ios::trunc);
+        out << codigo << "\nextern \"C\" __attribute__((visibility(\"default\"))) const char lux_native_manifest[] =\n"
+            << "    \"" << huella_prog << "\\n\"\n";
+        for (const auto& g : generadas) out << "    \"F " << g.indice << " " << g.simbolo_abi << "\\n\"\n";
+        for (const auto& g : rutas_generadas) out << "    \"R " << g.indice << " " << g.simbolo << "\\n\"\n";
+        for (const auto& g : rutas_async_generadas) out << "    \"A " << g.indice << " " << g.simbolo << "\\n\"\n";
+        out << "    ;\n";
+        aviso = std::string("--native: wrote ") + emit + " (not compiled or loaded here)";
+        return nullptr;
+    }
+
     std::error_code ec;
     std::filesystem::create_directories(cache_dir, ec);
     if (ec) {
@@ -479,8 +621,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     for (const char* dep : {LUX_NATIVE_SCRIPT_LIB, LUX_NATIVE_LIB, "/proc/self/exe"}) {
         std::error_code e1, e2;
         const auto p = std::filesystem::canonical(dep, e1);
-        clave += '\0' + std::to_string(static_cast<unsigned long long>(e1 ? 0 : std::filesystem::file_size(p, e2))) + ':' +
-                 std::to_string(static_cast<long long>(e1 ? 0 : std::filesystem::last_write_time(p, e2).time_since_epoch().count()));
+        clave += '\0' + std::to_string(e1 ? 0 : std::filesystem::file_size(p, e2)) + ':' +
+                 std::to_string(e1 ? 0LL : static_cast<long long>(std::filesystem::last_write_time(p, e2).time_since_epoch().count()));
     }
     const std::string clave_hash = std::to_string(std::hash<std::string>{}(clave));
     std::string clave_previa;
@@ -516,40 +658,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
         return nullptr;
     }
 
-    auto out = std::make_unique<NativeModule>();
-    out->handle_ = handle;
-    out->por_indice.assign(nombre_por_indice.size(), nullptr);
-    out->rutas_por_indice.assign(prog.routes.size(), nullptr);
-    out->rutas_async_por_indice.assign(prog.routes.size(), nullptr);
-
-    out->error_message =
-        reinterpret_cast<ErrorMessageFn>(dlsym(handle, "lux_native_error_message"));
-
-    out->bind = reinterpret_cast<NativeModule::BindFn>(dlsym(handle, "lux_native_bind"));
-
-    std::string simbolos_sin_resolver;
-    for (const auto& g : generadas) {
-        void* sym = dlsym(handle, g.simbolo_abi.c_str());
-        if (!sym) { simbolos_sin_resolver += " " + g.simbolo_abi; continue; }
-        out->por_indice[g.indice] = reinterpret_cast<CompiledFn>(sym);
-    }
-    for (const auto& g : rutas_generadas) {
-        void* sym = dlsym(handle, g.simbolo.c_str());
-        if (!sym) { simbolos_sin_resolver += " " + g.simbolo; continue; }
-        out->rutas_por_indice[g.indice] = reinterpret_cast<NativeModule::RouteFn>(sym);
-    }
-    for (const auto& g : rutas_async_generadas) {
-        void* sym = dlsym(handle, g.simbolo.c_str());
-        if (!sym) { simbolos_sin_resolver += " " + g.simbolo; continue; }
-        out->rutas_async_por_indice[g.indice] = reinterpret_cast<NativeModule::RouteFnAsync>(sym);
-    }
-    if (!out->error_message) simbolos_sin_resolver += " lux_native_error_message";
-    if (!out->bind) simbolos_sin_resolver += " lux_native_bind";
-    if (!simbolos_sin_resolver.empty())
-        aviso = "--native: unresolved symbol(s) after compiling (served with bytecode):" +
-                simbolos_sin_resolver;
-
-    return out;
+    return resolver(handle);
+#endif // LUX_NATIVE_UNAVAILABLE
 }
 
 } // namespace lux_script
