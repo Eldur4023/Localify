@@ -20,8 +20,8 @@ android {
         applicationId = "es.localify.app"
         minSdk = 28                          // posix_spawn / getrandom need API 28
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 20200
+        versionName = "2.2.0"
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild {
             cmake {
