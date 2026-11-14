@@ -40,6 +40,52 @@ class MainActivity : Activity() {
             PlaybackService.actualizar(titulo, artista, duracionMs, sonando, posicionMs, arteUrl)
         }
 
+        /**
+         * Actualización: baja el APK de la release y se lo da al instalador del sistema (PackageInstaller), que
+         * pide confirmación al usuario. Sin librerías: no hace falta FileProvider.
+         */
+        @JavascriptInterface
+        fun installApk(url: String) {
+            if (!url.startsWith("https://")) return
+            if (!activity.packageManager.canRequestPackageInstalls()) {
+                // primera vez: el usuario tiene que permitir "instalar apps desconocidas" para Localify
+                activity.runOnUiThread {
+                    activity.startActivity(Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + activity.packageName)))
+                }
+                return
+            }
+            Thread {
+                try {
+                    val instalador = activity.packageManager.packageInstaller
+                    val sesion = instalador.openSession(instalador.createSession(
+                        android.content.pm.PackageInstaller.SessionParams(android.content.pm.PackageInstaller.SessionParams.MODE_FULL_INSTALL)))
+                    val conexion = java.net.URL(url).openConnection().apply { connectTimeout = 15000; readTimeout = 30000 }
+                    conexion.getInputStream().use { entrada ->
+                        sesion.openWrite("localify.apk", 0, -1).use { salida -> entrada.copyTo(salida); sesion.fsync(salida) }
+                    }
+                    val accion = activity.packageName + ".UPDATE"
+                    val receptor = object : android.content.BroadcastReceiver() {
+                        override fun onReceive(c: android.content.Context, i: Intent) {
+                            if (i.getIntExtra(android.content.pm.PackageInstaller.EXTRA_STATUS, -1) ==
+                                android.content.pm.PackageInstaller.STATUS_PENDING_USER_ACTION) {
+                                @Suppress("DEPRECATION")
+                                (i.getParcelableExtra<Intent>(Intent.EXTRA_INTENT))?.let { c.startActivity(it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                            }
+                        }
+                    }
+                    val filtro = android.content.IntentFilter(accion)
+                    if (Build.VERSION.SDK_INT >= 33) activity.registerReceiver(receptor, filtro, android.content.Context.RECEIVER_NOT_EXPORTED)
+                    else activity.registerReceiver(receptor, filtro)
+                    val pendiente = android.app.PendingIntent.getBroadcast(activity, 0, Intent(accion).setPackage(activity.packageName),
+                        android.app.PendingIntent.FLAG_MUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT)
+                    sesion.commit(pendiente.intentSender)
+                } catch (e: Throwable) {
+                    android.util.Log.e("luxdesktop", "actualización: $e")
+                    activity.runOnUiThread { activity.web.evaluateJavascript("alert(${org.json.JSONObject.quote("No se pudo actualizar: $e")})", null) }
+                }
+            }.start()
+        }
+
         // El servicio vive mientras viva la tarea (descargas y servidor incluidos),
         // no solo mientras suena algo: pausar ya no lo para.
         @JavascriptInterface

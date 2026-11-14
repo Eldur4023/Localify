@@ -8,7 +8,7 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 B=$ROOT/build-win
-VERSION=${1:-0.0.0}
+VERSION=${1:-$(tr -d "[:space:]" < "$ROOT/app/version.txt")}
 FFMPEG_DIR=${FFMPEG_DIR:-$ROOT/../Homeflix-Local/build-win}
 command -v makensis >/dev/null || { echo "falta makensis: sudo apt install nsis" >&2; exit 1; }
 [ -x "$ROOT/build/respack" ] || { echo "falta build/respack: compila la versión Linux primero (cmake --build build)" >&2; exit 1; }

@@ -20,8 +20,11 @@ android {
         applicationId = "es.localify.app"
         minSdk = 28                          // posix_spawn / getrandom need API 28
         targetSdk = 34
-        versionCode = 20200
-        versionName = "2.2.0"
+        // una sola fuente: app/version.txt (también la leen la app, para avisar de versiones nuevas, y los scripts de empaquetado)
+        val ver = file("../app/version.txt").readText().trim()
+        val (ma, mi, pa) = ver.split(".").map { it.toInt() }
+        versionCode = ma * 10000 + mi * 100 + pa
+        versionName = ver
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild {
             cmake {

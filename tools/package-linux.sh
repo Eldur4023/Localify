@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Genera en dist/ el binario suelto (localify-<versión>-linux-x86_64) y el paquete .deb. Todo en local.
-#   tools/package-linux.sh <versión>        (compila antes: cmake --build build)
+#   tools/package-linux.sh [versión]        (por defecto app/version.txt; compila antes: cmake --build build)
 # Necesita dpkg-deb. El icono sale de app/icon.png (128x128).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-VERSION=${1:?uso: tools/package-linux.sh <versión>}
+VERSION=${1:-$(tr -d "[:space:]" < "$ROOT/app/version.txt")}
 BIN=$ROOT/build/localify
 [ -x "$BIN" ] || { echo "falta $BIN: compila antes (cmake --build build --target localify)" >&2; exit 1; }
 command -v dpkg-deb >/dev/null || { echo "falta dpkg-deb" >&2; exit 1; }

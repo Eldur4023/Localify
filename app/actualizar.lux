@@ -1,0 +1,158 @@
+# actualizar.lux — Aviso de versión nueva (releases de GitHub) y actualización automática.
+#
+# Cada 6 h (y al abrir) se pregunta a la API de GitHub por la última release. Si es más nueva que la
+# instalada, la interfaz enseña un aviso; "Actualizar" descarga el instalador de ESTA plataforma y lo
+# aplica: Windows (installer.exe /S y reabre), Linux (.deb con pkexec, o sustituye el binario si está en
+# una carpeta del usuario) y Android (la interfaz llama al puente nativo: lo instala el sistema).
+# La versión instalada es app/version.txt (una sola fuente: también la leen los scripts de empaquetado y Gradle).
+
+fn string version_actual():
+    string c = state.get("version_actual", "")
+    if c != "":
+        return c
+    string v = os.is_file("version.txt") ? (await os.read_file("version.txt")).trim() : "0.0.0"
+    state.set("version_actual", v)
+    return v
+
+# "v2.10.1" -> [2, 10, 1]
+fn List<int> partes_version(string v0):
+    string v = v0.trim()
+    if v.starts_with("v") or v.starts_with("V"):
+        v = v.slice(1)
+    List<int> out = []
+    List<string> trozos = v.split(".")
+    for int i in range(0, len(trozos)):
+        out.add(int(trozos[i]))
+    return out
+
+fn bool es_mas_nueva(string candidata, string actual):
+    List<int> a = partes_version(candidata)
+    List<int> b = partes_version(actual)
+    for int i in range(0, 4):
+        int x = i < len(a) ? a[i] : 0
+        int y = i < len(b) ? b[i] : 0
+        if x != y:
+            return x > y
+    return false
+
+fn string url_releases():
+    # sobreescribible (pruebas): ajuste "update_url"
+    string u = ajuste("update_url", "")
+    return u != "" ? u : "https://api.github.com/repos/Eldur4023/Localify/releases/latest"
+
+# Binario del escritorio Linux: /usr/... (instalado con el .deb) o una carpeta del usuario (copia suelta)
+fn string ruta_ejecutable():
+    if es_windows():
+        return ""
+    # sh es hijo directo de esta app: su $PPID es nuestro pid (con readlink a secas saldría el propio readlink)
+    Json r = await os.run("sh", ["-c", "readlink -f /proc/$PPID/exe"])
+    return jstr(jget(r, "stdout"), "").trim()
+
+fn bool instalado_con_deb():
+    return ruta_ejecutable().starts_with("/usr/")
+
+# Copia suelta que se puede sustituir sola: ~/.local/bin. Un binario compilado en otra carpeta (build/...) no se toca.
+fn bool en_carpeta_usuario():
+    return ruta_ejecutable().starts_with(os.getenv("HOME", "/nonexistent") + "/.local/bin/")
+
+# Qué se descarga en ESTA plataforma de los assets de la release
+fn string nombre_asset(List<Json> assets):
+    for int i in range(0, len(assets)):
+        string n = jstr(assets[i]["name"], "")
+        if en_movil():
+            if n.ends_with(".apk"):
+                return n
+        elif es_windows():
+            if n == "installer.exe":
+                return n
+        elif instalado_con_deb():
+            if n.ends_with("_amd64.deb"):
+                return n
+        elif en_carpeta_usuario() and n.ends_with("-linux-x86_64"):
+            return n
+    return ""
+
+# Pregunta a GitHub y deja el resultado en ajustes ("update_info", JSON). `forzar` ignora las 6 h.
+fn void actualizar_comprobar(bool forzar):
+    if ajuste("update_auto", "1") == "0" and not forzar:
+        return
+    int ahora = time.now()
+    if not forzar and ahora - int(ajuste("update_check_at", "0")) < 6 * 3600 * 1000:
+        return
+    ajuste_poner("update_check_at", str(ahora))
+    try:
+        Json r = await http.get(url_releases(), { "User-Agent": "Localify", "Accept": "application/vnd.github+json" }, { "timeout_ms": 15000 })
+        if jint(r["status"], 0) != 200:
+            return
+        Json rel = r["body"]
+        string tag = jstr(jget(rel, "tag_name"), "")
+        if tag == "" or jget(rel, "draft") == true:
+            return
+        List<Json> assets = jlist(jget(rel, "assets"))
+        string asset = nombre_asset(assets)
+        string url = ""
+        for int i in range(0, len(assets)):
+            if jstr(assets[i]["name"], "") == asset:
+                url = jstr(assets[i]["browser_download_url"], "")
+        ajuste_poner("update_info", json.stringify({
+            "version": tag.starts_with("v") ? tag.slice(1) : tag, "asset": asset, "url": url,
+            "page": jstr(jget(rel, "html_url"), ""), "notes": jstr(jget(rel, "body"), "").slice(0, 600),
+            "prerelease": jget(rel, "prerelease") == true }))
+    catch e:
+        log.warn("actualizaciones: no se pudo consultar GitHub: " + str(e))
+
+fn Json update_status():
+    string actual = version_actual()
+    Json? info = parse_json(ajuste("update_info", "{}"))
+    string nueva = info == null ? "" : jstr(jget(info, "version"), "")
+    bool hay = nueva != "" and es_mas_nueva(nueva, actual)
+    # Android lo instala la interfaz (puente nativo); el resto necesita un asset para esta plataforma
+    bool auto = hay and info != null and jstr(jget(info, "url"), "") != ""
+    return { "current": actual, "latest": nueva, "available": hay, "canInstall": auto,
+             "url": info == null ? "" : jstr(jget(info, "url"), ""), "asset": info == null ? "" : jstr(jget(info, "asset"), ""),
+             "page": info == null ? "" : jstr(jget(info, "page"), ""), "notes": info == null ? "" : jstr(jget(info, "notes"), "") }
+
+# Escritorio: lanza un script DESACOPLADO que descarga, instala y vuelve a abrir la app, y responde al
+# instante (un instalador de 100+ MB tarda más que el máximo de 120 s de una llamada http de Lux).
+# Devuelve { ok, message }; si el script falla, la app sigue abierta y la interfaz vuelve a ofrecer el botón.
+fn Json update_install():
+    Json st = update_status()
+    if not (st["available"] == true and st["canInstall"] == true):
+        return { "ok": false, "message": "no hay actualización" }
+    string url = jstr(st["url"], "")
+    # solo https (GitHub); http únicamente con la URL de releases sobreescrita (pruebas, ajuste update_url)
+    bool seguro = url.starts_with("https://") or (ajuste("update_url", "") != "" and url.starts_with("http://"))
+    if not seguro or url.contains("'") or url.contains("\""):
+        return { "ok": false, "message": "url no válida" }
+    if es_windows():
+        # installer.exe /S: pide permisos (UAC), cierra esta app, reinstala y vuelve a abrirla
+        List<string> pasos = [
+            "$ProgressPreference='SilentlyContinue'", "$f = Join-Path $env:TEMP 'localify-installer.exe'",
+            "Invoke-WebRequest -UseBasicParsing -Uri '" + url + "' -OutFile $f",
+            "if ((Get-Item $f).Length -lt 100000) { exit 1 }",
+            "Start-Process -FilePath $f -ArgumentList '/S' -Verb RunAs -Wait",
+            "Start-Process -FilePath (Join-Path $env:ProgramFiles 'Localify\\localify.exe')"]
+        string guion = pasos.join("; ")
+        proc.start("powershell", ["-NoProfile", "-WindowStyle", "Hidden", "-Command", guion])
+        return { "ok": true, "message": "instalando" }
+    string exe = ruta_ejecutable()
+    string baja = "f=$(mktemp --suffix=.upd) && curl -fsSL --retry 3 -o \"$f\" '" + url + "' && [ \"$(stat -c %s \"$f\")\" -gt 100000 ]"
+    string reabre = "{ pkill -x localify; sleep 1; setsid '" + exe + "' >/dev/null 2>&1 & }"
+    if instalado_con_deb():
+        # .deb: dpkg necesita root (pkexec pregunta por la contraseña); el .upd se renombra para que dpkg lo acepte
+        proc.start("sh", ["-c", baja + " && mv \"$f\" \"$f.deb\" && pkexec dpkg -i \"$f.deb\" && " + reabre])
+    else:
+        # copia suelta en ~/.local/bin: se sustituye el binario (mv sobre el actual) y se relanza
+        proc.start("sh", ["-c", baja + " && chmod 755 \"$f\" && mv -f \"$f\" '" + exe + "' && " + reabre])
+    return { "ok": true, "message": "instalando" }
+
+fn Json cmd_actualizar(string cmd, Json args):
+    if cmd == "update_status":
+        await actualizar_comprobar(false)
+        return update_status()
+    if cmd == "update_check":
+        await actualizar_comprobar(true)
+        return update_status()
+    if cmd == "update_install":
+        return await update_install()
+    return null

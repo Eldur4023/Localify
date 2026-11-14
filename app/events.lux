@@ -59,6 +59,8 @@ every "1s":
 every "1m":
     recomendaciones_tick()
     sondeo_artistas_tick()
+    # versión nueva en GitHub (como mucho cada 6 h; ajuste update_auto = 0 lo desactiva)
+    actualizar_comprobar(false)
 
 # Reproducción sincronizada entre equipos (sync.lux): envía lo pendiente y pregunta cada segundo.
 every "500ms":

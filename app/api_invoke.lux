@@ -299,6 +299,10 @@ fn Json despachar_base(string cmd, Json args):
     if cmd.starts_with("server_") or cmd.starts_with("social_"):
         return await cmd_social(cmd, args)
 
+    # ── actualizaciones (release nueva en GitHub) ──
+    if cmd.starts_with("update_"):
+        return await cmd_actualizar(cmd, args)
+
     # ── cola ──
     if cmd == "queue_get":
         return cola_dto()

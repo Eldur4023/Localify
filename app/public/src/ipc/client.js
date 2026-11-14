@@ -316,6 +316,12 @@ get: () => invoke("stats_get") };
 * Servidor común opcional (Serverify). Todo es opcional: sin servidor o sin
 * sesión el backend responde con un error tipado y la app sigue siendo local.
 */
+/** Avisos de versión nueva (releases de GitHub). */
+export const actualizaciones = {
+	status: () => invoke("update_status"),
+	check: () => invoke("update_check"),
+	install: () => invoke("update_install")
+};
 export const social = {
 	status: () => invoke("server_status"),
 	connect: (host, port) => invoke("server_connect", {

@@ -27,6 +27,7 @@ import { mountPlaylistView } from "./views/playlist.js";
 import { mountSearchView } from "./views/search.js";
 import { alCambiarIdioma, t } from "./i18n/index.js";
 import { instalarCapturaDeErrores, mostrarError } from "./ui/error-overlay.js";
+import { vigilarActualizaciones } from "./ui/actualizacion.js";
 /**
 * Quita el menú contextual del navegador donde no hay uno propio.
 *
@@ -115,6 +116,7 @@ function main() {
 	// En el móvil quien suena es el WebView (no hay motor nativo): el shim se
 	// activa solo si /api/capabilities lo dice.
 	void arrancarAudioWeb();
+	vigilarActualizaciones();
 	const router = crearRouter(vista, {
 		home: (c) => mountHomeView(c),
 		search: (c, r) => mountSearchView(c, r),
