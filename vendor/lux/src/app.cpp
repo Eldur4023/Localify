@@ -38,6 +38,13 @@
 
 #include <lux/mime.hpp>
 
+// Static mounts open files with openat2 (RESOLVE_BENEATH). Not on Windows (no such call) nor Android:
+// the seccomp profile of Android 16 does not just refuse the syscall, it kills the process with SIGSYS,
+// so the "ENOSYS/EPERM -> portable path" fallback below never gets to run. Localify patch.
+#if !defined(_WIN32) && !defined(__ANDROID__)
+#define LUX_HAS_OPENAT2 1
+#endif
+
 namespace lux {
 
 namespace {
@@ -95,7 +102,7 @@ static const App::StaticMount* mount_for(const std::vector<App::StaticMount>& mo
     return nullptr;
 }
 
-#ifndef _WIN32   // openat2 is Linux-only: Windows serves statics through the portable path below
+#ifdef LUX_HAS_OPENAT2   // openat2: Linux only; Windows and Android serve statics through the portable path below
 
 // root/rel resolved by the kernel without leaving root: openat2's
 // RESOLVE_BENEATH refuses any "..", absolute path or symlink that would
@@ -136,7 +143,7 @@ static int root_fd_for(const App::StaticMount& m) {
     return cache.back().fd;
 }
 
-#endif // !_WIN32
+#endif // LUX_HAS_OPENAT2
 
 // Cache-Control, Content-Type, ETag and the 304, then the file itself.
 // `fd`, if not -1, is the file already open, and is taken over.
@@ -232,7 +239,7 @@ static void serve_from_mount(const App::StaticMount& m, const Request& req, Resp
             }
         }
 
-#ifndef _WIN32
+#ifdef LUX_HAS_OPENAT2
         if (const int root_fd = root_fd_for(m); root_fd >= 0) {
             struct stat st{};
             int fd = -1;
