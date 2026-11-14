@@ -35,9 +35,13 @@ fn bool es_mas_nueva(string candidata, string actual):
             return x > y
     return false
 
-fn string url_releases():
-    # sobreescribible (pruebas): ajuste "update_url"
+# URL de releases sobreescrita (solo pruebas): ajuste "update_url" o variable LOCALIFY_UPDATE_URL
+fn string url_sobreescrita():
     string u = ajuste("update_url", "")
+    return u != "" ? u : os.getenv("LOCALIFY_UPDATE_URL", "")
+
+fn string url_releases():
+    string u = url_sobreescrita()
     return u != "" ? u : "https://api.github.com/repos/Eldur4023/Localify/releases/latest"
 
 # Binario del escritorio Linux: /usr/... (instalado con el .deb) o una carpeta del usuario (copia suelta)
@@ -121,7 +125,7 @@ fn Json update_install():
         return { "ok": false, "message": "no hay actualización" }
     string url = jstr(st["url"], "")
     # solo https (GitHub); http únicamente con la URL de releases sobreescrita (pruebas, ajuste update_url)
-    bool seguro = url.starts_with("https://") or (ajuste("update_url", "") != "" and url.starts_with("http://"))
+    bool seguro = url.starts_with("https://") or (url_sobreescrita() != "" and url.starts_with("http://"))
     if not seguro or url.contains("'") or url.contains("\""):
         return { "ok": false, "message": "url no válida" }
     if es_windows():
