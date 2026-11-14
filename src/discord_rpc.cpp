@@ -24,13 +24,25 @@
 #include <iostream>
 #include <mutex>
 #include <optional>
-#include <poll.h>
+#include <cstdio>
 #include <sstream>
 #include <string>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <sys/un.h>
-#include <unistd.h>
+#include <thread>
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#else
+#  include <poll.h>
+#  include <sys/socket.h>
+#  include <sys/types.h>
+#  include <sys/un.h>
+#  include <unistd.h>
+#endif
 
 using lux_script::Value;
 using Clock = std::chrono::steady_clock;
@@ -63,9 +75,73 @@ struct Activity {
     }
 };
 
+// Transport: Unix socket on Linux, named pipe \\.\pipe\discord-ipc-N on
+// Windows (blocking handle; readability is polled with PeekNamedPipe so the
+// timeouts behave like poll()). -1 = no connection in both cases.
+using Conn = long long;
+
+#ifdef _WIN32
+void conn_close(Conn c) { CloseHandle(reinterpret_cast<HANDLE>(c)); }
+long long this_pid() { return static_cast<long long>(GetCurrentProcessId()); }
+
+bool conn_write(Conn c, const char* data, size_t len) {
+    while (len) {
+        DWORD n = 0;
+        if (!WriteFile(reinterpret_cast<HANDLE>(c), data, static_cast<DWORD>(len), &n, nullptr) || n == 0)
+            return false;
+        data += n; len -= n;
+    }
+    return true;
+}
+
+// 1 = data available, 0 = timeout, -1 = pipe closed/broken.
+int conn_wait(Conn c, int timeout_ms) {
+    auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
+    for (;;) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(reinterpret_cast<HANDLE>(c), nullptr, 0, nullptr, &avail, nullptr)) return -1;
+        if (avail) return 1;
+        if (Clock::now() >= deadline) return 0;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
+
+long long conn_read(Conn c, char* buf, size_t len) {
+    DWORD n = 0;
+    if (!ReadFile(reinterpret_cast<HANDLE>(c), buf, static_cast<DWORD>(len), &n, nullptr)) return -1;
+    return n;
+}
+#else
+void conn_close(Conn c) { ::close(static_cast<int>(c)); }
+long long this_pid() { return static_cast<long long>(::getpid()); }
+
+bool conn_write(Conn c, const char* data, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = ::send(static_cast<int>(c), data + sent, len - sent, MSG_NOSIGNAL);
+        if (n <= 0) return false;
+        sent += static_cast<size_t>(n);
+    }
+    return true;
+}
+
+int conn_wait(Conn c, int timeout_ms) {
+    pollfd p{static_cast<int>(c), POLLIN, 0};
+    int r = ::poll(&p, 1, timeout_ms);
+    if (r < 0) return -1;
+    if (r == 0) return 0;
+    if (p.revents & (POLLHUP | POLLERR)) return -1;
+    return 1;
+}
+
+long long conn_read(Conn c, char* buf, size_t len) {
+    return ::recv(static_cast<int>(c), buf, len, 0);
+}
+#endif
+
 struct State {
     std::mutex mutex;
-    int fd = -1;
+    Conn fd = -1;
     std::string connected_client_id;
     // What Discord currently shows (as far as we know) and what it should
     // show. `published_known` is false right after (re)connecting: Discord's
@@ -83,7 +159,7 @@ struct State {
 State& state() { static State s; return s; }
 
 void close_fd_locked(State& s) {
-    if (s.fd >= 0) { ::close(s.fd); s.fd = -1; }
+    if (s.fd >= 0) { conn_close(s.fd); s.fd = -1; }
     s.connected_client_id.clear();
     s.published_known = false;
 }
@@ -128,30 +204,19 @@ std::string fit_text(std::string s) {
     return s;
 }
 
-bool write_all(int fd, const char* data, size_t len) {
-    size_t sent = 0;
-    while (sent < len) {
-        ssize_t n = ::send(fd, data + sent, len - sent, MSG_NOSIGNAL);
-        if (n <= 0) return false;
-        sent += static_cast<size_t>(n);
-    }
-    return true;
-}
-
-bool send_frame(int fd, std::int32_t opcode, const std::string& json) {
+bool send_frame(Conn fd, std::int32_t opcode, const std::string& json) {
     char header[8];
     std::memcpy(header, &opcode, 4);
     std::int32_t len = static_cast<std::int32_t>(json.size());
     std::memcpy(header + 4, &len, 4);
-    return write_all(fd, header, 8) && write_all(fd, json.data(), json.size());
+    return conn_write(fd, header, 8) && conn_write(fd, json.data(), json.size());
 }
 
-bool read_exact(int fd, char* buf, size_t len, int timeout_ms) {
+bool read_exact(Conn fd, char* buf, size_t len, int timeout_ms) {
     size_t got = 0;
     while (got < len) {
-        pollfd p{fd, POLLIN, 0};
-        if (::poll(&p, 1, timeout_ms) <= 0) return false;
-        ssize_t n = ::recv(fd, buf + got, len - got, 0);
+        if (conn_wait(fd, timeout_ms) <= 0) return false;
+        long long n = conn_read(fd, buf + got, len - got);
         if (n <= 0) return false;
         got += static_cast<size_t>(n);
     }
@@ -159,7 +224,7 @@ bool read_exact(int fd, char* buf, size_t len, int timeout_ms) {
 }
 
 // Reads one frame. `false` = timeout, closed socket or garbage.
-bool read_frame(int fd, int timeout_ms, std::int32_t& op, std::string& payload) {
+bool read_frame(Conn fd, int timeout_ms, std::int32_t& op, std::string& payload) {
     char header[8];
     if (!read_exact(fd, header, 8, timeout_ms)) return false;
     std::uint32_t len;
@@ -172,12 +237,10 @@ bool read_frame(int fd, int timeout_ms, std::int32_t& op, std::string& payload) 
 
 // Drains whatever Discord sent that nobody read yet (answers to earlier
 // commands). `false` if the socket turned out to be closed.
-bool drain(int fd) {
+bool drain(Conn fd) {
     for (;;) {
-        pollfd p{fd, POLLIN, 0};
-        int r = ::poll(&p, 1, 0);
-        if (r <= 0) return true;
-        if (p.revents & (POLLHUP | POLLERR)) return false;
+        const int w = conn_wait(fd, 0);
+        if (w <= 0) return w == 0;
         std::int32_t op;
         std::string payload;
         if (!read_frame(fd, 100, op, payload)) return false;
@@ -187,7 +250,29 @@ bool drain(int fd) {
 
 // Every place a Discord build (stable, Canary, Flatpak, Snap) may put its
 // socket -- the same list the original integration tried.
-std::optional<int> connect_and_handshake(const std::string& client_id) {
+std::optional<Conn> connect_and_handshake(const std::string& client_id) {
+    auto handshake = [&](Conn fd) -> bool {
+        std::string hs = "{\"v\":1,\"client_id\":\"" + json_escape(client_id) + "\"}";
+        std::int32_t op = -1;
+        std::string reply;
+        if (!send_frame(fd, OP_HANDSHAKE, hs) || !read_frame(fd, 2000, op, reply) || op != OP_FRAME) {
+            // op == OP_CLOSE here is Discord refusing the handshake,
+            // typically a wrong Application ID -- say so once.
+            if (op == OP_CLOSE) std::cerr << "discord: handshake rejected: " << reply << "\n";
+            conn_close(fd);
+            return false;
+        }
+        return true;
+    };
+#ifdef _WIN32
+    for (int i = 0; i < 10; ++i) {
+        std::wstring path = L"\\\\.\\pipe\\discord-ipc-" + std::to_wstring(i);
+        HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        Conn fd = reinterpret_cast<Conn>(h);
+        if (handshake(fd)) return fd;
+    }
+#else
     const char* bases_env[] = {"XDG_RUNTIME_DIR", "TMPDIR"};
     std::string bases[3];
     int nb = 0;
@@ -210,22 +295,11 @@ std::optional<int> connect_and_handshake(const std::string& client_id) {
                     ::close(fd);
                     continue;
                 }
-                std::string hs = "{\"v\":1,\"client_id\":\"" + json_escape(client_id) + "\"}";
-                std::int32_t op = -1;
-                std::string reply;
-                if (!send_frame(fd, OP_HANDSHAKE, hs) || !read_frame(fd, 2000, op, reply) ||
-                    op != OP_FRAME) {
-                    // op == OP_CLOSE here is Discord refusing the handshake,
-                    // typically a wrong Application ID -- say so once.
-                    if (op == OP_CLOSE)
-                        std::cerr << "discord: handshake rejected: " << reply << "\n";
-                    ::close(fd);
-                    continue;
-                }
-                return fd;
+                if (handshake(fd)) return fd;
             }
         }
     }
+#endif
     return std::nullopt;
 }
 
@@ -301,7 +375,7 @@ void flush_locked(State& s, const std::string& client_id) {
     }
     if (s.published_known && same) return;
 
-    std::string args = "{\"pid\":" + std::to_string(static_cast<long long>(::getpid()));
+    std::string args = "{\"pid\":" + std::to_string(this_pid());
     if (s.desired) args += ",\"activity\":" + activity_json(*s.desired);
     args += "}";
     std::string nonce = "localify-" + std::to_string(++s.nonce);
@@ -378,7 +452,7 @@ void discord_shutdown() {
     std::lock_guard<std::mutex> lk(s.mutex);
     if (s.fd >= 0) {
         send_frame(s.fd, OP_FRAME, "{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":" +
-            std::to_string(static_cast<long long>(::getpid())) + "},\"nonce\":\"localify-bye\"}");
+            std::to_string(this_pid()) + "},\"nonce\":\"localify-bye\"}");
     }
     close_fd_locked(s);
 }

@@ -64,11 +64,9 @@ android {
             signingConfig = signingConfigs.findByName("release")
             // -Pperfil: release depurable (misma firma, conserva datos) para medir con chrome://inspect
             isDebuggable = project.hasProperty("perfil")
-            // R8: casi todo classes.dex era la stdlib de Kotlin sin usar. Las reglas por defecto ya
-            // conservan los métodos @JavascriptInterface (AndroidBridge) y los `external` (JNI).
             isMinifyEnabled = true
             isShrinkResources = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }

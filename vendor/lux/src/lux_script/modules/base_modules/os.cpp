@@ -114,13 +114,16 @@ Value fn_file_size(NativeCtx&, std::vector<Value>& a, std::string&) {
 }
 
 Value fn_mtime_ms(NativeCtx&, std::vector<Value>& a, std::string&) {
+#ifdef __ANDROID__
+    // libc++ del NDK no tiene clock_cast: stat(2) directo
+    struct ::stat st;
+    if (::stat(a[0].as_str().c_str(), &st) != 0) return Value::integer(-1);
+    return Value::integer(static_cast<long long>(st.st_mtim.tv_sec) * 1000 +
+                          st.st_mtim.tv_nsec / 1000000);
+#else
     std::error_code ec;
     auto t = fs::last_write_time(P(a[0].as_str()), ec);
     if (ec) return Value::integer(-1);
-#ifdef __ANDROID__
-    // libc++ (NDK) has no clock_cast; its file_clock counts from the Unix epoch on Linux/Android.
-    return Value::integer(std::chrono::duration_cast<std::chrono::milliseconds>(t.time_since_epoch()).count());
-#else
     return Value::integer(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::clock_cast<std::chrono::system_clock>(t).time_since_epoch()).count());
 #endif
@@ -374,10 +377,6 @@ Value fn_remove_dir(NativeCtx&, std::vector<Value>& a, std::string& error) {
         return ec ? fail(error, "remove_dir", ec.message()) : Value::boolean(n > 0);
     }
     const bool removed = fs::remove(P(path), ec);
-#ifdef _WIN32
-    // MinGW/Wine report a non-empty dir as access denied, not ENOTEMPTY.
-    if (ec) { std::error_code e2; if (!fs::is_empty(P(path), e2) && !e2) ec = std::make_error_code(std::errc::directory_not_empty); }
-#endif
     if (ec == std::errc::directory_not_empty)
         return fail(error, "remove_dir", "'" + path + "' is not empty -- pass true as the second argument to remove it and everything inside");
     return ec ? fail(error, "remove_dir", ec.message()) : Value::boolean(removed);
@@ -388,13 +387,6 @@ Value fn_copy_file(NativeCtx&, std::vector<Value>& a, std::string& error) {
     std::error_code ec;
     if (!fs::is_regular_file(P(a[0].as_str()), ec)) return fail(error, "copy_file", "'" + a[0].as_str() + "' is not a regular file");
     const auto mode = a.size() > 2 && a[2].as_bool() ? fs::copy_options::overwrite_existing : fs::copy_options::none;
-#ifdef _WIN32
-    // MinGW's copy_file(overwrite_existing) fails with EEXIST on an existing target.
-    if (mode == fs::copy_options::overwrite_existing) {
-        const bool okc = CopyFileW(P(a[0].as_str()).c_str(), P(a[1].as_str()).c_str(), FALSE) != 0;
-        return okc ? Value::boolean(true) : fail(error, "copy_file", "could not copy (error " + std::to_string(GetLastError()) + ")");
-    }
-#endif
     const bool copied = fs::copy_file(P(a[0].as_str()), P(a[1].as_str()), mode, ec);
     return ec ? fail(error, "copy_file", ec.message()) : Value::boolean(copied);
 }
@@ -563,7 +555,7 @@ Value fn_run(NativeCtx&, std::vector<Value>& a, std::string& error) {
 LUX_MODULE(os, {
     {"getenv",        "s|x",  fn_getenv},
     {"cwd",           "",     fn_cwd},
-    {"name",          ">s",     fn_name},
+    {"name",          ">s",   fn_name},
     {"path_join",     "x*>s",   fn_path_join},
     {"path_basename", "s>s",    fn_path_basename},
     {"path_dirname",  "s>s",    fn_path_dirname},

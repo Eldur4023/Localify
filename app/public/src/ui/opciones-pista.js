@@ -165,7 +165,7 @@ export function opcionesDePista(pista, ctx) {
 		separar: true,
 		etiqueta: t("menu.reassign_metadata"),
 		ejecutar: async () => {
-			const elegido = await elegirCandidato(pista.title);
+			const elegido = await (await import("./reasignar-metadatos.js")).elegirCandidato(pista.title);
 			if (!elegido) return;
 			await library.assignMetadata(pista.id, elegido);
 			ctx.alCambiar?.();

@@ -36,14 +36,17 @@
   align-items: center;
   box-sizing: border-box;
 
-  /* La fila se mueve con `transform`, así que se promociona a su propia capa.
-     Sin esto, cada desplazamiento repintaría la lista entera. */
-  will-change: transform;
-
+  /* Sin `will-change`: el scroller ya es una capa compuesta (contain: strict)
+     y 30 capas extra cuestan memoria de GPU en móviles. */
   /* Contiene su diseño: el contenido de una fila no puede afectar a las demás. */
   contain: layout style;
 }
 
 .vlist__row[hidden] {
   display: none;
+}
+
+/* Sin fundido de portadas en listas recicladas: cada reciclado lo relanzaría. */
+.vlist .portada {
+  transition: none;
 }

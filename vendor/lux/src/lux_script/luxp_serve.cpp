@@ -1,5 +1,5 @@
-#include <lux/atomic_shared.hpp>
 #include <lux_script/luxp_serve.hpp>
+#include <lux_script/platform_os.hpp>
 
 #include <lux/logger.hpp>
 #include <lux/request.hpp>
@@ -12,7 +12,6 @@
 
 #include <atomic>
 #include <filesystem>
-#include <list>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -33,8 +32,29 @@ using luxium::page::blob_plain;
 using luxium::page::PageSections;
 namespace li = luxp_internal;
 
-lux::atomic_shared_ptr<const std::vector<StaticMount>> g_statics{
+#ifdef __ANDROID__
+// libc++ del NDK no soporta std::atomic<shared_ptr>: un mutex (solo ahí; en el resto de
+// plataformas se mantiene la lectura sin cerrojo de siempre).
+std::mutex g_statics_mutex;
+std::shared_ptr<const std::vector<StaticMount>> g_statics{
     std::make_shared<const std::vector<StaticMount>>()};
+
+std::shared_ptr<const std::vector<StaticMount>> g_statics_load() {
+    std::lock_guard<std::mutex> lock(g_statics_mutex);
+    return g_statics;
+}
+
+void g_statics_store(std::shared_ptr<const std::vector<StaticMount>> v) {
+    std::lock_guard<std::mutex> lock(g_statics_mutex);
+    g_statics = std::move(v);
+}
+#else
+std::atomic<std::shared_ptr<const std::vector<StaticMount>>> g_statics{
+    std::make_shared<const std::vector<StaticMount>>()};
+
+std::shared_ptr<const std::vector<StaticMount>> g_statics_load() { return g_statics.load(); }
+void g_statics_store(std::shared_ptr<const std::vector<StaticMount>> v) { g_statics.store(std::move(v)); }
+#endif
 
 std::optional<std::string> read_disk(const fs::path& p) {
     std::ifstream in(p, std::ios::binary);
@@ -54,14 +74,14 @@ std::optional<std::string> fetch_static(const std::string& url, const std::strin
         const size_t slash = page_path.rfind('/');
         abs = (slash == std::string::npos ? "/" : page_path.substr(0, slash + 1)) + abs;
     }
-    abs = fs::path(abs.substr(0, abs.find_first_of("?#"))).lexically_normal().generic_string();
-    const auto mounts = g_statics.load();
+    abs = plat::to_path(abs.substr(0, abs.find_first_of("?#"))).lexically_normal().generic_string();
+    const auto mounts = g_statics_load();
     for (const auto& m : *mounts) {
         std::string prefix = m.url_prefix;
         if (!prefix.ends_with('/')) prefix += '/';
         if (!abs.starts_with(prefix)) continue;
-        const fs::path root = fs::path(m.fs_root).lexically_normal();
-        const fs::path file = (root / abs.substr(prefix.size())).lexically_normal();
+        const fs::path root = plat::to_path(m.fs_root).lexically_normal();
+        const fs::path file = (root / plat::to_path(abs.substr(prefix.size()))).lexically_normal();
         if (file.lexically_relative(root).generic_string().starts_with("..")) return std::nullopt;
         if (auto bytes = read_disk(file)) {
             if (file_out) *file_out = file;
@@ -77,8 +97,8 @@ constexpr const char* kUsesJavaScript = "the page uses JavaScript";
 // The stylesheet and the program are what the page's <style>/<link> and
 // <script> say, whatever the data is.  Cached by that source; a sheet is also
 // dropped when a file it came from changes (checked at most once a second).
-// Both are bounded, least recently used out first: they only fill up if requests keep carrying
-// different scripts or stylesheets (a {{ }} inside a <script>, say).
+// ponytail: bounded by clearing, not LRU -- these only fill up if every
+// request carries a different script or stylesheet.
 
 struct ProgramEntry {
     Blob        blob;        // empty: no script
@@ -90,41 +110,10 @@ struct SheetEntry {
     int64_t checked = 0;
 };
 
-constexpr size_t kCacheEntries = 256;
-
-template <class V>
-class Lru {
-public:
-    V* find(const std::string& key) {
-        const auto it = index_.find(key);
-        if (it == index_.end()) return nullptr;
-        items_.splice(items_.begin(), items_, it->second);
-        return &it->second->second;
-    }
-    void erase(const std::string& key) {
-        const auto it = index_.find(key);
-        if (it == index_.end()) return;
-        items_.erase(it->second);
-        index_.erase(it);
-    }
-    void put(const std::string& key, V value) {
-        erase(key);
-        items_.emplace_front(key, std::move(value));
-        index_[key] = items_.begin();
-        if (items_.size() > kCacheEntries) { index_.erase(items_.back().first); items_.pop_back(); }
-    }
-    void clear() { items_.clear(); index_.clear(); }
-private:
-    std::list<std::pair<std::string, V>> items_;
-    std::unordered_map<std::string, typename std::list<std::pair<std::string, V>>::iterator> index_;
-};
-
 std::mutex g_cache_m;
-Lru<std::shared_ptr<const ProgramEntry>> g_programs;
-Lru<SheetEntry> g_sheets;
-// Misses of the program cache per page path, to say once that a page's script keeps changing.
-std::unordered_map<std::string, unsigned> g_program_misses;
-constexpr unsigned kMissesBeforeWarning = 16;
+std::unordered_map<std::string, std::shared_ptr<const ProgramEntry>> g_programs;
+std::unordered_map<std::string, SheetEntry> g_sheets;
+constexpr size_t kCacheEntries = 256;
 
 bool typed_luxscript(luxium::dom::Node& doc) {
     for (const auto* s : doc.find_all("script"))
@@ -132,11 +121,12 @@ bool typed_luxscript(luxium::dom::Node& doc) {
     return false;
 }
 
-std::shared_ptr<const ProgramEntry> program_for(luxium::dom::Node& doc, const std::string& url_path) {
+std::shared_ptr<const ProgramEntry> program_for(luxium::dom::Node& doc) {
     const std::string key = luxium::page::scripts_key(doc);
     {
         std::lock_guard<std::mutex> lk(g_cache_m);
-        if (auto* hit = g_programs.find(key)) return *hit;
+        auto it = g_programs.find(key);
+        if (it != g_programs.end()) return it->second;
     }
     auto entry = std::make_shared<ProgramEntry>();
     luxium::page::ScriptsResult r = luxium::page::translate_scripts(doc);
@@ -152,16 +142,11 @@ std::shared_ptr<const ProgramEntry> program_for(luxium::dom::Node& doc, const st
             entry->error = kUsesJavaScript;
         }
     } else if (r.program) {
-        const std::string plain = luxium::script::serialize(*r.program);
-        entry->blob = blob_deflate(plain, 1);   // rebuilt per script: speed over size
-        entry->blob.id = luxium::page::block_id(plain);
+        entry->blob = blob_deflate(luxium::script::serialize(*r.program));
     }
     std::lock_guard<std::mutex> lk(g_cache_m);
-    if (g_program_misses.size() >= kCacheEntries) g_program_misses.clear();
-    if (++g_program_misses[url_path] == kMissesBeforeWarning)
-        lux::log().warn("luxp: the <script> of ", url_path, " is different on every request (a {{ }} inside it?): "
-                        "each one is compiled again, keep data out of the script");
-    g_programs.put(key, entry);
+    if (g_programs.size() >= kCacheEntries) g_programs.clear();
+    g_programs[key] = entry;
     return entry;
 }
 
@@ -172,15 +157,17 @@ std::shared_ptr<const li::SheetData> sheet_for(luxium::dom::Node& doc, const std
     const int64_t now = li::now_ms();
     {
         std::lock_guard<std::mutex> lk(g_cache_m);
-        if (SheetEntry* hit = g_sheets.find(key)) {
-            if (now - hit->checked < 1000) return hit->data;
-            if (!li::sheet_stale(*hit->data)) { hit->checked = now; return hit->data; }
-            g_sheets.erase(key);
+        auto it = g_sheets.find(key);
+        if (it != g_sheets.end()) {
+            if (now - it->second.checked < 1000) return it->second.data;
+            if (!li::sheet_stale(*it->second.data)) { it->second.checked = now; return it->second.data; }
+            g_sheets.erase(it);
         }
     }
-    auto data = li::build_sheet(doc, url_path);   // level 9: cached per sheet, and its bytes go out on every response
+    auto data = li::build_sheet(doc, url_path);
     std::lock_guard<std::mutex> lk(g_cache_m);
-    g_sheets.put(key, {data, now});
+    if (g_sheets.size() >= kCacheEntries) g_sheets.clear();
+    g_sheets[key] = {data, now};
     return data;
 }
 
@@ -188,7 +175,7 @@ std::shared_ptr<const li::SheetData> sheet_for(luxium::dom::Node& doc, const std
 
 namespace luxp_internal {
 
-std::shared_ptr<const SheetData> build_sheet(luxium::dom::Node& doc, const std::string& url_path, bool* relative_used, int deflate_level) {
+std::shared_ptr<const SheetData> build_sheet(luxium::dom::Node& doc, const std::string& url_path, bool* relative_used) {
     auto data = std::make_shared<SheetData>();
     luxium::page::StylesResult styles = luxium::page::translate_styles(doc, [&](const std::string& url) {
         if (relative_used && (url.empty() || url[0] != '/') && url.find(':') == std::string::npos) *relative_used = true;
@@ -198,37 +185,7 @@ std::shared_ptr<const SheetData> build_sheet(luxium::dom::Node& doc, const std::
         return bytes;
     });
     data->plain = luxium::page::encode_sheet(styles.rules);
-    size_t from = 0;
-    for (size_t end : styles.ends) {   // one block per source; a source with no rules adds none
-        if (end == from) continue;
-        const std::vector<luxium::style::Rule> part(styles.rules.begin() + from, styles.rules.begin() + end);
-        const std::string plain = luxium::page::encode_sheet(part);
-        luxium::page::Blob b = blob_deflate(plain, deflate_level);
-        b.id = luxium::page::block_id(plain);
-        data->blobs.push_back(std::move(b));
-        from = end;
-    }
-    if (const char* v = std::getenv("LUX_LUXP_CHECK"); v && *v == '1' && data->blobs.size() > 1) {
-        // The blocks, decoded the way a client does and put together, must be the sheet written whole.
-        luxium::page::PageSections sections;
-        std::string why;
-        std::vector<luxium::style::Rule> rules;
-        size_t from2 = 0;
-        for (size_t end : styles.ends) {
-            if (end == from2) continue;
-            const std::string plain = luxium::page::encode_sheet(std::vector<luxium::style::Rule>(styles.rules.begin() + from2, styles.rules.begin() + end));
-            if (sections.sheet.empty()) sections.sheet = plain; else sections.more_sheets.push_back(plain);
-            from2 = end;
-        }
-        if (!luxium::page::decode_page_sheet(sections, rules, &why) || luxium::page::encode_sheet(rules) != data->plain)
-            lux::log().error("luxp: a page's stylesheet blocks do not add up to its sheet (", why, ")");
-    }
-    if (data->blobs.empty()) {   // no stylesheet at all: an empty one
-        const std::string plain = luxium::page::encode_sheet({});
-        luxium::page::Blob b = blob_deflate(plain, deflate_level);
-        b.id = luxium::page::block_id(plain);
-        data->blobs.push_back(std::move(b));
-    }
+    data->blob = blob_deflate(data->plain);
     return data;
 }
 
@@ -273,35 +230,33 @@ bool wants_luxp(const lux::Request& req) {
 }
 
 void set_luxp_statics(const std::vector<StaticMount>& mounts) {
-    g_statics.store(std::make_shared<const std::vector<StaticMount>>(mounts));
+    g_statics_store(std::make_shared<const std::vector<StaticMount>>(mounts));
     std::lock_guard<std::mutex> lk(g_cache_m);   // what was built from the old mounts is stale
     g_programs.clear();
     g_sheets.clear();
 }
 
 std::optional<std::string> html_to_luxp(const std::string& html, const std::string& url_path,
-                                        std::string* err, const luxium::page::HaveSet* have) {
+                                        std::string* err) {
     luxium::page::ParsedPage page = luxium::page::parse_page(html);
     luxium::dom::Node& doc = *page.document;
 
-    auto program = program_for(doc, url_path);
+    auto program = program_for(doc);
     if (!program->error.empty()) {
         if (err) *err = program->error;
         return std::nullopt;
     }
     auto sheet = sheet_for(doc, url_path);
     return luxium::page::encode_single_page("index.html", blob_plain(luxium::page::encode_document(doc)),
-                                            sheet->blobs, program->blob, have);
+                                            sheet->blob, program->blob);
 }
 
 void send_page(const lux::Request& req, lux::Response& res, const std::string& html, bool allow_luxp) {
-    res.header("Vary", "Accept, X-Luxp-Have");   // one URL, two representations (and which blocks it carries)
+    res.header("Vary", "Accept");   // one URL, two representations
     if (allow_luxp && wants_luxp(req)) {
         std::string err;
-        luxium::page::HaveSet have;
-        if (const std::string* h = req.header("x-luxp-have")) have = luxium::page::parse_have(*h);
-        if (auto luxp = html_to_luxp(html, req.path, &err, &have)) {
-            li::send_luxp(req, res, std::move(*luxp), luxium::page::kLuxpMime);
+        if (auto luxp = html_to_luxp(html, req.path, &err)) {
+            res.header("Content-Type", luxium::page::kLuxpMime).send(std::move(*luxp));
             return;
         }
         if (err != kUsesJavaScript) lux::log().warn("luxp: ", req.path, " answered as HTML: ", err);
@@ -386,7 +341,7 @@ bool pack_site(const std::string& entry_html, const std::string& out_path, std::
         *report += "  resource  " + c.resources.back().first + "\n";
     }
     const std::string bytes = luxium::page::encode_container(c);
-    std::ofstream f(out_path, std::ios::binary);
+    std::ofstream f(plat::to_path(out_path), std::ios::binary);
     if (!f.write(bytes.data(), std::streamsize(bytes.size()))) return fail("cannot write " + out_path);
     *report += out_path + ": " + std::to_string(c.pages.size()) + " page(s), " +
                std::to_string(c.resources.size()) + " resource(s), " + std::to_string(bytes.size()) + " bytes\n";

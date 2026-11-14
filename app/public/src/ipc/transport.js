@@ -28,12 +28,12 @@ function emitir(type, extra = {}) {
 /** Diferencia dos snapshots y emite los eventos del bus original que correspondan. */
 function diferir(antes, ahora) {
 	if (!antes) return;
-	if (ahora.revision !== antes.revision) emitir("queueChanged", { revision: ahora.revision });
-	if (ahora.trackId !== antes.trackId) emitir("trackChanged", { trackId: ahora.trackId, source: ahora.source ?? "queue" });
-	if (ahora.status !== antes.status) emitir("playStatusChanged", { status: ahora.status });
-	if (ahora.volume !== antes.volume) emitir("volumeChanged", { volume: ahora.volume });
-	if (ahora.repeat !== antes.repeat) emitir("repeatModeChanged", { mode: ahora.repeat });
-	if (ahora.shuffle !== antes.shuffle) emitir("shuffleChanged", { enabled: ahora.shuffle });
+	if (ahora.revision !== antes.revision) emitir("queueChanged", { revision: ahora.revision, estado: ahora.estado });
+	if (ahora.trackId !== antes.trackId) emitir("trackChanged", { trackId: ahora.trackId, source: ahora.source ?? "queue", estado: ahora.estado });
+	if (ahora.status !== antes.status) emitir("playStatusChanged", { status: ahora.status, estado: ahora.estado });
+	if (ahora.volume !== antes.volume) emitir("volumeChanged", { volume: ahora.volume, estado: ahora.estado });
+	if (ahora.repeat !== antes.repeat) emitir("repeatModeChanged", { mode: ahora.repeat, estado: ahora.estado });
+	if (ahora.shuffle !== antes.shuffle) emitir("shuffleChanged", { enabled: ahora.shuffle, estado: ahora.estado });
 
 	// descargas: progreso, completado (→ disponibilidad) y fallo
 	const previas = new Map(antes.downloads.map((d) => [d.trackId, d]));
@@ -64,6 +64,7 @@ function diferir(antes, ahora) {
 		}
 	}
 	for (const [tid, p] of previas) {
+		if (!vistas.has(tid)) moduleState.delete("throttle:" + tid);
 		if (!vistas.has(tid) && p.state !== "failed") {
 			// el trabajo desapareció: o terminó bien (se borra la fila al
 			// finalizar) o lo borró un wipe
@@ -75,7 +76,7 @@ function diferir(antes, ahora) {
 		}
 	}
 
-	if (ahora.libraryStamp !== antes.libraryStamp) emitir("libraryChanged", {});
+	if (ahora.libraryStamp !== antes.libraryStamp) emitir("libraryChanged", { scope: "tracks" });
 	if (ahora.playlistStamp !== antes.playlistStamp) emitir("playlistChanged", { kind: ahora.playlistChangeKind ?? "" });
 	if (ahora.settingsStamp !== antes.settingsStamp) emitir("settingsChanged", {});
 	if (ahora.statsStamp !== antes.statsStamp) emitir("statsChanged", {});

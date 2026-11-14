@@ -1,3 +1,4 @@
+import { arrancarEventos } from "./transport.js";
 const CANAL_EVENTOS = "localify://event";
 const manejadores = new Set();
 let iniciado = false;
@@ -8,10 +9,9 @@ let iniciado = false;
 * El backend empuja una foto de su estado por SSE (`/api/events/stream`) y el transporte sintetiza
 * los eventos por diferencias. Ver `ipc/transport.js`.
 */
-export async function iniciar() {
+export function iniciar() {
 	if (iniciado) return;
 	iniciado = true;
-	const { arrancarEventos } = await import("./transport.js");
 	arrancarEventos((evento) => repartir(evento));
 }
 /** Entrega un evento local (p. ej. la posición del `<audio>` en el móvil). */

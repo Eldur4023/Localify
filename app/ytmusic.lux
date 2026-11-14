@@ -59,10 +59,11 @@ fn Json? ytm_navegar(string browse_id, string params = ""):
 # buscar_todos: todos los nodos bajo la clave `nombre`, a cualquier
 # profundidad (la ruta canónica cambia según el diseño que sirva YouTube).
 
-fn void buscar_todos_rec(Json nodo, string nombre, List<Json> out):
+# `tope`: se corta al pasar de tantos hallazgos (buscar_uno: 0 = al primero).
+fn void buscar_todos_rec(Json nodo, string nombre, List<Json> out, int tope = 400):
     if nodo == null:
         return
-    if len(out) > 400:
+    if len(out) > tope:
         return
     # el nodo puede ser Dict, List o un valor hoja: el lenguaje no tiene
     # typeof, así que el tipo se descubre por despacho en runtime y el
@@ -72,13 +73,17 @@ fn void buscar_todos_rec(Json nodo, string nombre, List<Json> out):
             Json v = nodo[clave]
             if clave == nombre:
                 out.add(v)
-            buscar_todos_rec(v, nombre, out)
+            buscar_todos_rec(v, nombre, out, tope)
+            if len(out) > tope:
+                return
     catch e:
         try:
             int n = len(nodo)
             for int i in range(0, n):
                 Json v = nodo[i]
-                buscar_todos_rec(v, nombre, out)
+                buscar_todos_rec(v, nombre, out, tope)
+                if len(out) > tope:
+                    return
         catch e2:
             int hoja = 0
 
@@ -88,7 +93,8 @@ fn List<Json> buscar_todos(Json raiz, string nombre):
     return out
 
 fn Json? buscar_uno(Json raiz, string nombre):
-    List<Json> todos = buscar_todos(raiz, nombre)
+    List<Json> todos = []
+    buscar_todos_rec(raiz, nombre, todos, 0)
     if len(todos) == 0:
         return null
     return todos[0]

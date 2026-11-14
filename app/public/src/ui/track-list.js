@@ -76,6 +76,10 @@ function fechaCorta(segundos) {
 * biblioteca de cincuenta mil canciones sería ruido, no información.
 */
 function pintarDisponibilidad(el, a) {
+	// Mismo estado que ya está pintado: no se toca el DOM (salvo el % de descarga).
+	const clave = a.kind === "failed" ? `failed:${a.reasonKey}` : a.kind === "downloading" || a.kind === "local" ? a.kind : "absent";
+	if (clave === el._clave && clave !== "downloading") return;
+	el._clave = clave;
 	switch (a.kind) {
 		case "downloading":
 			pintarProgreso(el, a.progress);
@@ -90,20 +94,31 @@ function pintarDisponibilidad(el, a) {
 	}
 }
 function pintarProgreso(el, percent) {
+	el._clave = "downloading";
 	el.onclick = null;
 	el.className = "track__state track__state--downloading";
 	el.textContent = `${Math.round(percent * 100)}%`;
 	el.title = "";
 }
+const svgCache = new Map();
+/** Un SVG por (nombre, tamaño) construido una vez; cada fila recibe un clon. */
+function iconoClonado(nombre, tam) {
+	const k = `${nombre}:${tam}`;
+	let svg = svgCache.get(k);
+	if (!svg) svgCache.set(k, svg = icono(nombre, tam));
+	return svg.cloneNode(true);
+}
 function pintarDescargada(el) {
+	el._clave = "local";
 	el.onclick = null;
 	el.className = "track__state track__state--local";
-	el.replaceChildren(icono("cloud-download", 16));
+	el.replaceChildren(iconoClonado("cloud-download", 16));
 	el.title = t("tracks.downloaded");
 }
 function pintarFallida(el, reasonKey) {
+	el._clave = `failed:${reasonKey}`;
 	el.className = "track__state track__state--failed";
-	el.replaceChildren(icono("refresh", 16));
+	el.replaceChildren(iconoClonado("refresh", 16));
 	el.title = `${t(reasonKey)} — ${t("tracks.redownload")}`;
 	// Un clic vuelve a descargarla: la fila pasa a "0 %" y los eventos de descarga la llevan
 	// hasta el final (o de vuelta a fallida)
@@ -117,13 +132,13 @@ function pintarFallida(el, reasonKey) {
 	};
 }
 function pintarAusente(el) {
+	el._clave = "absent";
 	el.onclick = null;
 	el.className = "track__state";
 	el.replaceChildren();
 	el.title = "";
 }
 export function mountTrackList(contenedor, opciones) {
-	const desmontadores = [];
 	let activa = -1;
 	/**
 	* Piezas de cada fila, por fila.
@@ -145,6 +160,7 @@ export function mountTrackList(contenedor, opciones) {
 	const lista = mountVirtualList(cuerpo, {
 		rowHeight: ALTO_FILA,
 		createRow() {
+			const limpiezas = [];
 			const fila = nodo("div", "track");
 			fila.setAttribute("role", "option");
 			// Los hijos se crean una vez; `renderRow` solo cambia su contenido.
@@ -186,9 +202,9 @@ export function mountTrackList(contenedor, opciones) {
 			mas.tabIndex = -1;
 			mas.append(icono("more", 16));
 			fila.append(mas);
-			desmontadores.push(arrastrable(fila, () => [fila.dataset["trackId"] ?? ""]));
+			limpiezas.push(arrastrable(fila, () => [fila.dataset["trackId"] ?? ""]));
 			if (opciones.playlistId) {
-				desmontadores.push(reordenable(fila, () => fila.dataset["entryId"] ?? ""));
+				limpiezas.push(reordenable(fila, () => fila.dataset["entryId"] ?? ""));
 			}
 			fila.addEventListener("contextmenu", (e) => {
 				e.preventDefault();
@@ -210,7 +226,7 @@ export function mountTrackList(contenedor, opciones) {
 				marcar(i);
 				reproducir(i);
 			});
-			return fila;
+			return { el: fila, limpiar: () => { for (const q of limpiezas.splice(0)) q(); } };
 		},
 		renderRow(fila, pista, indice) {
 			const p = piezas.get(fila);
@@ -278,9 +294,15 @@ export function mountTrackList(contenedor, opciones) {
 		return Number(fila.dataset["indice"] ?? "-1");
 	}
 	function marcar(indice) {
+		const anterior = activa;
 		activa = indice;
 		lista.el.setAttribute("aria-activedescendant", `pista-${indice}`);
-		lista.refresh();
+		for (const [i, on] of [[anterior, false], [indice, true]]) {
+			const f = lista.el.querySelector(`#pista-${i}`);
+			if (!f) continue;
+			f.classList.toggle("is-active", on);
+			f.setAttribute("aria-selected", String(on));
+		}
 	}
 	function reproducir(indice) {
 		const pista = lista.items[indice];
@@ -399,7 +421,6 @@ export function mountTrackList(contenedor, opciones) {
 			lista.el.removeEventListener("keydown", alTeclear);
 			dejarProgreso();
 			dejarDisponibilidad();
-			for (const quitar of desmontadores.splice(0)) quitar();
 			lista.destroy();
 		}
 	};

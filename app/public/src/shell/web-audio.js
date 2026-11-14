@@ -102,10 +102,12 @@ export async function arrancarAudioWeb() {
 	};
 
 	// ── MediaSession web ──
-	const ponerMetadata = async (trackId) => {
+	// `pista`: la fila de pista del estado (snapshot) si ya se tiene; evita /api/track-meta.
+	const ponerMetadata = async (trackId, pista) => {
 		try {
-			const info = await fetch(`/api/track-meta/${encodeURIComponent(trackId)}`)
-				.then((r) => (r.ok ? r.json() : null));
+			const info = pista?.id === trackId && pista.title !== undefined
+				? { title: pista.title, artist: pista.artistDisplay, album: pista.albumTitle, durationMs: pista.durationMs }
+				: await fetch(`/api/track-meta/${encodeURIComponent(trackId)}`).then((r) => (r.ok ? r.json() : null));
 			if ("mediaSession" in navigator) navigator.mediaSession.metadata = new MediaMetadata({
 				title: info?.title || "Localify",
 				artist: info?.artist || "",
@@ -156,7 +158,7 @@ export async function arrancarAudioWeb() {
 				if (!ev.trackId) break;
 				pistaActual = ev.trackId;
 				audio.src = `/audio/${encodeURIComponent(ev.trackId)}`;
-				void ponerMetadata(ev.trackId);
+				void ponerMetadata(ev.trackId, ev.estado?.track);
 				if (quererSonar) void audio.play().catch(() => {});
 				break;
 			}
@@ -208,7 +210,7 @@ export async function arrancarAudioWeb() {
 		audio.src = `/audio/${encodeURIComponent(id)}`;
 		const ms = estado.positionMs ?? 0;
 		if (ms > 0) audio.addEventListener("loadedmetadata", () => { audio.currentTime = ms / 1000; }, { once: true });
-		void ponerMetadata(id);
+		void ponerMetadata(id, estado.track);
 		// (una app recién abierta no empieza a sonar sola: el backend pasa a pausa lo que quedó
 		// "sonando" al arrancar, ver events.lux)
 	}).catch(() => {});
@@ -225,9 +227,11 @@ export async function arrancarAudioWeb() {
 
 	// La barra de progreso y la letra ya no dependen de que el backend empuje
 	// una foto 5 veces por segundo: en el móvil la posición es local.
+	// Oculta no hay nada que repintar: se omite y se emite una vez al volver.
 	window.setInterval(() => {
-		if (!audio.paused && !audio.ended) emitirPosicion();
+		if (!document.hidden && !audio.paused && !audio.ended) emitirPosicion();
 	}, 250);
+	document.addEventListener("visibilitychange", () => { if (!document.hidden) emitirPosicion(); });
 
 	// Seek fino: client.js avisa aquí antes de mandar el comando al backend,
 	// para que el `<audio>` (la única realidad sonora en el móvil) salte a la

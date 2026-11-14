@@ -6,7 +6,6 @@
 // server timezone: `time.format(ts, fmt, 60)` is CET, `time.format(ts, fmt, "Europe/Madrid")` follows DST.
 #include <lux_script/builtin_module.hpp>
 #include <lux_script/platform_os.hpp>
-#include <lux_script/tz.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -29,13 +28,21 @@ long long now_ms() {
 // set for a name it does not know.
 struct Zone {
     long long fixed_ms = 0;
-    const lux_tz::time_zone* tz = nullptr;
+    // Android (libc++ del NDK): sin tz database de C++20 — solo offsets fijos;
+    // un nombre IANA queda marcado como "bad".
+#ifndef __ANDROID__
+    const std::chrono::time_zone* tz = nullptr;
+#endif
     bool bad = false;
 
     long long at(long long utc_ms) const {
+#ifndef __ANDROID__
         if (!tz) return fixed_ms;
         return std::chrono::duration_cast<std::chrono::milliseconds>(
             tz->get_info(std::chrono::sys_time<std::chrono::milliseconds>(std::chrono::milliseconds(utc_ms))).offset).count();
+#else
+        return fixed_ms;
+#endif
     }
     // The UTC instant of a wall-clock reading in this zone.
     long long to_utc(long long local_ms) const {
@@ -49,8 +56,12 @@ Zone zone_arg(const std::vector<Value>& a, size_t i) {
     Zone z;
     if (a.size() <= i || a[i].is_null()) return z;
     if (a[i].is_int()) { z.fixed_ms = a[i].as_int() * 60'000; return z; }
-    try { z.tz = lux_tz::locate(a[i].to_string()); }
+#ifndef __ANDROID__
+    try { z.tz = std::chrono::get_tzdb().locate_zone(a[i].to_string()); }
     catch (const std::exception&) { z.bad = true; }
+#else
+    if (!a[i].is_null()) z.bad = true;   // sin tzdb: nombres IANA no soportados
+#endif
     return z;
 }
 

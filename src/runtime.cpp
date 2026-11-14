@@ -18,21 +18,21 @@
 #include <lux_script/window_config.hpp>
 #include <lux/logger.hpp>
 
-#include <arpa/inet.h>
+#include "net_compat.hpp"
+
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <csignal>
-#include <fcntl.h>
-#include <sched.h>
 #include <fstream>
 #include <iostream>
 #include <mutex>
-#include <netinet/in.h>
-#include <sys/file.h>
-#include <sys/socket.h>
 #include <thread>
-#include <unistd.h>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sched.h>
+#include <sys/file.h>
+#endif
 
 namespace fs = std::filesystem;
 using namespace luxdesktop;
@@ -100,6 +100,14 @@ void extract_resources(const fs::path& dir) {
 // safer than trying to make concurrent instances share one work_dir.
 bool acquire_single_instance_lock(const fs::path& dir) {
     fs::path lock_path = dir / ".lock";
+#ifdef _WIN32
+    // Share mode 0: a second open of the same file fails while this handle
+    // lives (leaked on purpose, the OS closes it when the process exits).
+    HANDLE h = CreateFileW(lock_path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return GetLastError() != ERROR_SHARING_VIOLATION;
+    return true;
+#else
     int fd = ::open(lock_path.c_str(), O_CREAT | O_RDWR, 0644);
     if (fd < 0) return true; // can't even open it: don't block startup over this
     if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
@@ -109,6 +117,7 @@ bool acquire_single_instance_lock(const fs::path& dir) {
     // Leaked on purpose: the lock must outlive this function, and the OS
     // reclaims the fd (and the flock with it) when the process exits.
     return true;
+#endif
 }
 
 // Called when the lock above says another instance already owns work_dir:
@@ -124,11 +133,10 @@ bool ask_running_instance_to_show(const fs::path& work_dir) {
     std::ifstream in(work_dir / "port");
     uint16_t port = 0;
     if (!(in >> port) || port == 0) return false;
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return false;
-    timeval tv{1, 0};
-    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    net_init();
+    sock_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd == kBadSock) return false;
+    set_timeouts(fd, 1);
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
     addr.sin_port        = htons(port);
@@ -143,14 +151,19 @@ bool ask_running_instance_to_show(const fs::path& work_dir) {
         char buf[64];
         while (::recv(fd, buf, sizeof(buf), 0) > 0) {}
     }
-    ::close(fd);
+    sock_close(fd);
     return answered;
 }
 
 fs::path xdg_data_home() {
+#ifdef _WIN32
+    if (const char* ad = std::getenv("APPDATA"); ad && *ad) return fs::path(ad);
+    return fs::path(".");
+#else
     if (const char* xdg = std::getenv("XDG_DATA_HOME"); xdg && *xdg) return fs::path(xdg);
     const char* home = std::getenv("HOME");
     return fs::path(home ? home : ".") / ".local" / "share";
+#endif
 }
 
 // Installs a .desktop launcher for THIS exact binary into the current
@@ -160,6 +173,12 @@ fs::path xdg_data_home() {
 // actual desktop environment (~/.local/share/applications), so it needs to
 // be asked for explicitly.
 int install_desktop(const std::shared_ptr<lux_script::Module>& mod, const fs::path& work_dir) {
+#ifdef _WIN32
+    // TODO: Start Menu shortcut (IShellLink). Not needed for a portable .exe.
+    (void)mod; (void)work_dir;
+    std::cerr << "luxdesktop: --install-desktop is Linux only\n";
+    return 1;
+#else
     char exe_path[4096];
     ssize_t n = ::readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
     if (n <= 0) {
@@ -206,6 +225,7 @@ int install_desktop(const std::shared_ptr<lux_script::Module>& mod, const fs::pa
     std::cout << "luxdesktop: installed " << desktop_file.string() << "\n"
               << "            find \"" << display_name << "\" in your application menu.\n";
     return 0;
+#endif
 }
 
 } // namespace
@@ -228,7 +248,12 @@ int main(int argc, char** argv) {
     // restarts. Re-extracting on every boot only overwrites the read-only
     // resources themselves (app.lux, templates/, public/); ./data/ is never
     // part of the embedded set (CMakeLists.txt excludes it from respack).
+#ifdef _WIN32
+    // %APPDATA%\Localify: the data dir the app's .lux files expect on Windows.
+    fs::path work_dir = xdg_data_home() / "Localify";
+#else
     fs::path work_dir = xdg_data_home() / "lux-desktop" / LUXDESKTOP_APP_ID;
+#endif
     fs::create_directories(work_dir);
     if (!acquire_single_instance_lock(work_dir)) {
         if (ask_running_instance_to_show(work_dir)) {
@@ -300,11 +325,13 @@ int main(int argc, char** argv) {
 
     // Before the server starts: `on start:` blocks and the first `every` ticks already call audio.*.
     install_audio_hooks();
+    install_console_ctrl_handler();
 
     // Server stopped by itself (SIGTERM from systemd, CTRL+C...): close the window too.
     std::thread server_thread([&lux_argv] {
         // Lux levanta un bucle y un pool por cada CPU que ve; para un solo usuario sobran 4.
         // Los hilos heredan la afinidad del que los crea, así que basta fijarla aquí.
+#ifndef _WIN32
         cpu_set_t mask;
         if (::sched_getaffinity(0, sizeof(mask), &mask) == 0 && CPU_COUNT(&mask) > 4) {
             cpu_set_t four;
@@ -313,6 +340,7 @@ int main(int argc, char** argv) {
                 if (CPU_ISSET(c, &mask)) { CPU_SET(c, &four); ++n; }
             ::sched_setaffinity(0, sizeof(four), &four);
         }
+#endif
         lux_main(5, lux_argv);
         std::lock_guard<std::mutex> lk(g_window_mutex);
         if (g_window) {

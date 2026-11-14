@@ -86,6 +86,7 @@ fn void consolidar(string tid):
 
 # Fusiona todos los duplicados que haya (los mismos que se funden al arrancar).
 fn Json cmd_fusionar_duplicados():
+    reparar_titulos_repetidos()   # en el arranque ya no (migración 5)
     return { "merged": fusionar_duplicados() }
 
 # ── Detección ────────────────────────────────────────────────────────────────
@@ -151,7 +152,6 @@ fn List<Json> parejas_duplicadas():
 # Fusiona todas las parejas; devuelve cuántas filas desaparecieron. Barato con
 # bibliotecas reales (unos cientos de pistas), así que corre en cada arranque.
 fn int fusionar_duplicados():
-    reparar_titulos_repetidos()
     int fusionadas = 0
     List<Json> parejas = parejas_duplicadas()
     for int i in range(0, len(parejas)):

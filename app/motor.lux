@@ -89,7 +89,7 @@ fn void motor_eventos():
     for int i in range(0, len(evs)):
         string tipo = jstr(evs[i]["type"], "")
         string pista = jstr(evs[i]["trackId"], "")
-        EstadoCola antes = leer_estado()
+        EstadoCola antes = leer_estado_ligero()
         log.info("motor de audio: " + tipo + " " + pista)
         if tipo == "error":
             log.error("motor de audio: no se pudo reproducir " + pista)
@@ -102,6 +102,7 @@ fn void motor_eventos():
             "__entra": tipo == "handoff" ? pista : ""
         })
 
+# (e puede ser ligero: no se usan sus listas hasta tener que precargar.)
 # Precarga la siguiente pista cuando la actual está por acabar, para que el
 # relevo no tenga hueco. Solo dentro de la ventana final (cada pista precargada
 # es un ffmpeg vivo), y se rehace si la cola cambia (revision).
@@ -129,7 +130,9 @@ fn void motor_prever(EstadoCola e):
         return
     state.set("prever_clave", clave)
 
-    string siguiente = pista_siguiente_natural(e)
+    # Aquí sí hacen falta las colas (e viene ligero): solo dentro de la ventana
+    # final y una vez por cambio de revisión.
+    string siguiente = pista_siguiente_natural(leer_estado())
     if siguiente == "":
         audio.preload("", "", 0)
         state.set("prever_pendiente", "")
@@ -161,7 +164,7 @@ fn void motor_persistir(EstadoCola e):
     await sqlite.exec("update player_state set position_ms = ? where id = 1 and cue = ?", jint(st["positionMs"], 0), e.cue)
     # Otra vez el cue: una orden que cambió de pista mientras tanto ya cerró
     # esta escucha, y esto la reabriría duplicada.
-    if leer_estado().cue == e.cue:
+    if leer_estado_ligero().cue == e.cue:
         escucha_progreso(e.track_id, jint(st["listenedMs"], 0), e.context)
 
 # ─── Ajustes de audio ────────────────────────────────────────────────────────
@@ -179,7 +182,7 @@ fn void motor_aplicar_ajustes(bool con_salida):
         state.set("crossfade_ms", str(xf))
         if con_salida:
             audio.set_device(jstr(jget(cfg, "outputDeviceId"), ""))
-    audio.set_volume(leer_estado().volume)
+    audio.set_volume(leer_estado_ligero().volume)
 
 # ─── El tick de fondo ────────────────────────────────────────────────────────
 
@@ -188,11 +191,14 @@ fn void motor_tick():
     # foto por segundo basta. Las órdenes publican la suya al terminar
     # (reproductor.lux), así que la interfaz no espera a este tick.
     if en_movil():
-        if state.incr("movil_tick", 1, 1000) == 1:
-            publicar_snapshot_de(leer_estado())
+        # Una foto por segundo si hay algo vivo (suena, descargas, búsqueda remota, sync);
+        # parado sin nada, cada 3 s: ahorra batería. Las órdenes publican la suya aparte.
+        bool vivo = state.get("snap_suena", "0") == "1" or state.get("dl_activos", "1") != "0" or state.get("remote_query", "") != "" or state.get("remote_ready", "") != "" or ajuste("sync_playback", "0") == "1"
+        if state.incr("movil_tick", 1, vivo ? 1000 : 3000) == 1:
+            publicar_snapshot_de(leer_estado_ligero())
         return
     motor_eventos()
-    EstadoCola e = leer_estado()
+    EstadoCola e = leer_estado_ligero()
     motor_sincronizar(e)
     motor_prever(e)
     motor_persistir(e)

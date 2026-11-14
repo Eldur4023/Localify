@@ -1,8 +1,6 @@
 #include <chrono>
 #include <unordered_set>
 #include <lux_script/natives.hpp>
-#include <lux/tls.hpp>
-#include <lux/http_cache.hpp>
 #include <lux_script/luxp_serve.hpp>
 #include <lux_script/template.hpp>
 #include <lux_script/crypto.hpp>
@@ -191,18 +189,30 @@ std::string percent(const std::string& s) {
     }
     return out;
 }
+
+// Is `etag` listed in an If-None-Match value ("*", or a comma list, W/ ignored)?
+bool etag_listed(const std::string& header, const std::string& etag) {
+    if (header == "*") return true;
+    size_t pos = 0;
+    while (pos < header.size()) {
+        size_t comma = header.find(',', pos);
+        if (comma == std::string::npos) comma = header.size();
+        std::string t = header.substr(pos, comma - pos);
+        t.erase(0, t.find_first_not_of(' '));
+        t.erase(t.find_last_not_of(' ') + 1);
+        if (t.rfind("W/", 0) == 0) t.erase(0, 2);
+        if (t == etag) return true;
+        pos = comma + 1;
+    }
+    return false;
+}
 } // namespace
 
 } // namespace (the file-wide anonymous one: send_file_checked is public)
 
 void send_file_checked(lux::Request& req, lux::Response& res, const std::string& path,
                        const std::string* root, const std::string& filename, bool inline_) {
-#ifndef _WIN32
-    struct stat st{};
-    if (root) res.serve_file_from(*root, path, &st); else res.send_file_stat(path, st);
-#else
     if (root) res.serve_file_from(*root, path); else res.send_file(path);
-#endif
     const std::string file = res.sendfile_path();
     if (file.empty()) return;   // an error response (403, 404, ...)
 
@@ -220,6 +230,8 @@ void send_file_checked(lux::Request& req, lux::Response& res, const std::string&
                   static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(mtime.time_since_epoch()).count()),
                   static_cast<unsigned long long>(fsize));
 #else
+    struct stat st{};
+    if (::stat(file.c_str(), &st) != 0) return;
     std::snprintf(buf, sizeof buf, "\"%llx-%llx\"",
                   static_cast<unsigned long long>(st.st_mtim.tv_sec) * 1000000000ull + static_cast<unsigned long long>(st.st_mtim.tv_nsec),
                   static_cast<unsigned long long>(st.st_size));
@@ -228,7 +240,7 @@ void send_file_checked(lux::Request& req, lux::Response& res, const std::string&
     res.header("ETag", etag);
     if (!res.header_value("Cache-Control")) res.header("Cache-Control", "no-cache");   // revalidate with the ETag every time
     const std::string* inm = req.header("if-none-match");
-    if (inm && lux::etag_listed(*inm, etag)) {
+    if (inm && etag_listed(*inm, etag)) {
         res.take_body();
         res.status(304).send("");
     }
@@ -642,10 +654,9 @@ Value fn_req_host(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return Value::str(hdr(ctx, "host"));
 }
 
-// "https" when Lux itself terminates TLS (a tls: block); otherwise only when
-// a proxy on this machine says so: from anyone else the header is just a claim.
+// "https" only when a proxy on this machine says so (TLS ends at the proxy):
+// from anyone else the header is just a claim.
 Value fn_req_scheme(NativeCtx& ctx, std::vector<Value>&, std::string&) {
-    if (lux::tls::enabled()) return Value::str("https");
     const auto& ip = ctx.req.remote_ip;
     const bool local = ip == "127.0.0.1" || ip == "::1";
     return Value::str(local && hdr(ctx, "x-forwarded-proto") == "https" ? "https" : "http");
@@ -858,7 +869,7 @@ Value stub(NativeCtx&, std::vector<Value>&, std::string& error) {
     return Value::null();
 }
 const NativeDef kNatives[] = {
-#define LUX_BROWSER_NATIVE(name, min, max, impl, is_async) {name, min, max, stub, is_async},
+#define LUX_BROWSER_NATIVE(name, min, max, impl) {name, min, max, stub},
 #include <lux_script/browser_api.inc>
 };
 struct Member { const char* object; const char* member; const char* native; };
@@ -868,7 +879,7 @@ const Member kMembers[] = {
 };
 struct Method { const char* type; BuiltinMethod m; };
 const Method kMethods[] = {
-#define LUX_BROWSER_METHOD_X(type, name, min, max, ret, async_native) {type, {name, min, max, ret, async_native}},
+#define LUX_BROWSER_METHOD(type, name, min, max, ret) {type, {name, min, max, ret}},
 #include <lux_script/browser_api.inc>
 };
 
@@ -889,8 +900,6 @@ const std::vector<BuiltinMethod>* methods(const std::string& type) {
 }
 } // namespace browser
 } // namespace
-
-bool browser_profile_active() { return t_browser; }
 
 BrowserProfile::BrowserProfile() : prev_(t_browser) { t_browser = true; }
 BrowserProfile::~BrowserProfile() { t_browser = prev_; }

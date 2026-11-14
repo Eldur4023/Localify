@@ -26,7 +26,9 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 #ifndef LUXDESKTOP_APP_DIR
 #error "LUXDESKTOP_APP_DIR must be set at compile time (see CMakeLists.txt)"
@@ -186,6 +188,7 @@ int main() {
 
     // Before the server starts: `on start:` blocks and the first `every` ticks already call audio.*.
     install_audio_hooks();
+    install_console_ctrl_handler();
 
     std::thread server_thread([&app, port] { app.run("127.0.0.1", port); });
     if (!wait_for_server(port, std::chrono::milliseconds(5000)))

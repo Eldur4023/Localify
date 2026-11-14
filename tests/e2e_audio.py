@@ -275,7 +275,7 @@ def prueba_biblioteca():
         db.commit()
         s.stop()
 
-        s = Server(tmp)   # al arrancar: fusión de duplicados y reparación de títulos
+        s = Server(tmp)   # al arrancar: fusión de duplicados
         ids = {r[0] for r in db.execute("select id from tracks")}
         check("SPOTIFYID00000000000001" in ids and "ytREPETIDA1" not in ids, f"no se fusionó la repetida: {sorted(ids)}")
         check(db.execute("select count(*) from play_history where track_id = 'SPOTIFYID00000000000001'").fetchone()[0] == 6,
@@ -283,6 +283,8 @@ def prueba_biblioteca():
         check(db.execute("select count(*) from favorites where track_id = 'SPOTIFYID00000000000001'").fetchone()[0] == 1, "el me gusta no pasó a la que queda")
         check(db.execute("select track_id from playlist_items where id = 'i1'").fetchone()[0] == "SPOTIFYID00000000000001", "la playlist sigue apuntando a la borrada")
         check(os.path.exists(os.path.join(tmp, "app", "data", "localify.antes-de-fusionar.db")), "no se hizo la copia de seguridad")
+        # La reparación de títulos ya no corre en cada arranque (migración 5 + guardar_pista): sigue disponible a mano.
+        s.invoke("library_merge_duplicates")
         titulo = db.execute("select title from tracks where id = 'ytDOBLETITU'").fetchone()[0]
         check(titulo == "TITULO (“EN DIRECTO”)", f"título repetido sin reparar: {titulo!r}")
 

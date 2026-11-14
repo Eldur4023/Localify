@@ -97,14 +97,21 @@ class MainActivity : Activity() {
             // (más lentas en una instalación limpia): cargar antes dejaría el
             // WebView clavado en ese error.
             if (port > 0) {
+                // Sondeo cada 30 ms (antes 150): el cuerpo se lee entero para que el
+                // pool de HttpURLConnection reutilice el socket keep-alive.
                 val limite = System.currentTimeMillis() + 60_000
+                val url = java.net.URL("http://127.0.0.1:$port/api/ready")
                 while (System.currentTimeMillis() < limite) {
                     val ok = try {
-                        (java.net.URL("http://127.0.0.1:$port/api/ready").openConnection() as java.net.HttpURLConnection)
-                            .run { connectTimeout = 1000; readTimeout = 1000; responseCode == 200 }
+                        (url.openConnection() as java.net.HttpURLConnection).run {
+                            connectTimeout = 1000; readTimeout = 1000
+                            val c = responseCode
+                            (if (c == 200) inputStream else errorStream)?.use { it.readBytes() }
+                            c == 200
+                        }
                     } catch (e: Exception) { false }
                     if (ok) break
-                    Thread.sleep(150)
+                    Thread.sleep(30)
                 }
             }
             runOnUiThread {

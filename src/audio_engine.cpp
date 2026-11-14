@@ -24,12 +24,22 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
-#include <spawn.h>
-#include <sys/wait.h>
 #include <thread>
-#include <unistd.h>
 #include <unordered_map>
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#else
+#  include <fcntl.h>
+#  include <spawn.h>
+#  include <sys/wait.h>
+#  include <unistd.h>
+#endif
 
 #define MA_NO_DECODING
 #define MA_NO_ENCODING
@@ -38,8 +48,12 @@
 #define MA_NO_NODE_GRAPH
 #define MA_NO_ENGINE
 #define MA_ENABLE_ONLY_SPECIFIC_BACKENDS
+#ifdef _WIN32
+#define MA_ENABLE_WASAPI
+#else
 #define MA_ENABLE_PULSEAUDIO
 #define MA_ENABLE_ALSA
+#endif
 #define MA_ENABLE_NULL
 #define MINIAUDIO_IMPLEMENTATION
 #pragma GCC diagnostic push
@@ -52,7 +66,9 @@
 #include "miniaudio/miniaudio.h"
 #pragma GCC diagnostic pop
 
+#ifndef _WIN32
 extern char** environ;
+#endif
 
 namespace luxdesktop {
 
@@ -112,8 +128,13 @@ struct AudioEngine::Voice {
     std::atomic<bool>     dead{false};  // el hilo de audio ya no la usa
 
     // Solo del lado de la API:
+#ifdef _WIN32
+    HANDLE      hproc = nullptr;       // ffmpeg.exe
+    HANDLE      hread = nullptr;       // extremo de lectura de su stdout
+#else
     pid_t       pid = -1;
     int         fd  = -1;
+#endif
     std::thread th;
     bool        seen_dead = false;
     std::chrono::steady_clock::time_point seen_at;
@@ -122,13 +143,22 @@ struct AudioEngine::Voice {
     ~Voice() {
         shutdown();
         if (th.joinable()) th.join();
+#ifdef _WIN32
+        if (hread) CloseHandle(hread);
+        if (hproc) { WaitForSingleObject(hproc, INFINITE); CloseHandle(hproc); }
+#else
         if (fd >= 0) ::close(fd);
         if (pid > 0) ::waitpid(pid, nullptr, 0);
+#endif
     }
 
     void shutdown() {
         stop.store(true, std::memory_order_release);
+#ifdef _WIN32
+        if (hproc) TerminateProcess(hproc, 1);   // cierra la tuberia: el ReadFile del hilo falla y sale
+#else
         if (pid > 0) ::kill(pid, SIGKILL);
+#endif
     }
 
     // Lanza ffmpeg y el hilo que vuelca su salida al anillo.
@@ -141,6 +171,9 @@ struct AudioEngine::Voice {
         char frac[8];
         std::snprintf(frac, sizeof(frac), "%03llu", ms % 1000);
         std::string ss = std::to_string(ms / 1000) + "." + frac;
+#ifdef _WIN32
+        if (!start_win(bin && *bin ? bin : nullptr, ss)) { eof.store(true); return; }
+#else
         std::vector<const char*> argv = {bin && *bin ? bin : "ffmpeg", "-nostdin", "-v", "quiet", "-threads", "1"};
         if (start_frame > 0) { argv.push_back("-ss"); argv.push_back(ss.c_str()); }
         for (const char* a : {"-i", path.c_str(), "-vn", "-sn", "-dn", "-ac", "2", "-ar", "48000",
@@ -160,8 +193,78 @@ struct AudioEngine::Voice {
         ::close(p[1]);
         if (rc != 0) { pid = -1; ::close(p[0]); eof.store(true); return; }
         fd = p[0];
+#endif
         th = std::thread([this] { decode_loop(); });
     }
+
+#ifdef _WIN32
+    static std::wstring widen(const std::string& u) {
+        if (u.empty()) return {};
+        int n = MultiByteToWideChar(CP_UTF8, 0, u.data(), (int)u.size(), nullptr, 0);
+        std::wstring w(n, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, u.data(), (int)u.size(), w.data(), n);
+        return w;
+    }
+    // Comillas al estilo CommandLineToArgvW.
+    static void quote_arg(std::wstring& cl, const std::wstring& a) {
+        if (!cl.empty()) cl += L' ';
+        if (!a.empty() && a.find_first_of(L" \t\"") == std::wstring::npos) { cl += a; return; }
+        cl += L'"';
+        size_t bs = 0;
+        for (wchar_t c : a) {
+            if (c == L'\\') { ++bs; continue; }
+            if (c == L'"') cl.append(bs * 2 + 1, L'\\');
+            else cl.append(bs, L'\\');
+            bs = 0;
+            cl += c;
+        }
+        cl.append(bs * 2, L'\\');
+        cl += L'"';
+    }
+    // LUX_FFMPEG, luego ffmpeg.exe junto al ejecutable, luego el PATH.
+    static std::wstring ffmpeg_path(const char* env) {
+        if (env) return widen(env);
+        wchar_t me[MAX_PATH];
+        DWORD n = GetModuleFileNameW(nullptr, me, MAX_PATH);
+        if (n > 0 && n < MAX_PATH) {
+            std::wstring dir(me, n);
+            dir.resize(dir.find_last_of(L"\\/") + 1);
+            dir += L"ffmpeg.exe";
+            if (GetFileAttributesW(dir.c_str()) != INVALID_FILE_ATTRIBUTES) return dir;
+        }
+        return L"ffmpeg.exe";
+    }
+
+    bool start_win(const char* env_bin, const std::string& ss) {
+        SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+        HANDLE rd = nullptr, wr = nullptr;
+        if (!CreatePipe(&rd, &wr, &sa, 1 << 16)) return false;
+        SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+        HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                 &sa, OPEN_EXISTING, 0, nullptr);
+        std::wstring exe = ffmpeg_path(env_bin), cl;
+        quote_arg(cl, exe);
+        for (const char* a : {"-nostdin", "-v", "quiet", "-threads", "1"}) quote_arg(cl, widen(a));
+        if (start_frame > 0) { quote_arg(cl, L"-ss"); quote_arg(cl, widen(ss)); }
+        quote_arg(cl, L"-i"); quote_arg(cl, widen(path));
+        for (const char* a : {"-vn", "-sn", "-dn", "-ac", "2", "-ar", "48000", "-f", "f32le", "pipe:1"})
+            quote_arg(cl, widen(a));
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdInput = nul; si.hStdOutput = wr; si.hStdError = nul;
+        PROCESS_INFORMATION pi{};
+        BOOL ok = CreateProcessW(nullptr, cl.data(), nullptr, nullptr, TRUE,
+                                 CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+        CloseHandle(wr);
+        if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+        if (!ok) { CloseHandle(rd); return false; }
+        CloseHandle(pi.hThread);
+        hproc = pi.hProcess;
+        hread = rd;
+        return true;
+    }
+#endif
 
     void decode_loop() {
         constexpr size_t kChunkFrames = 8192;
@@ -172,9 +275,15 @@ struct AudioEngine::Voice {
             const uint64_t space = kCap - (h - tail.load(std::memory_order_acquire));
             if (space < 2048) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); continue; }
             const size_t want = std::min<uint64_t>(space, kChunkFrames) * 8 - carry;
+#ifdef _WIN32
+            DWORD got = 0;
+            if (!ReadFile(hread, tmp.data() + carry, (DWORD)want, &got, nullptr) || got == 0) break;
+            const long long n = got;
+#else
             const ssize_t n = ::read(fd, tmp.data() + carry, want);
             if (n < 0) { if (errno == EINTR) continue; break; }
             if (n == 0) break;
+#endif
             const size_t bytes = carry + static_cast<size_t>(n);
             const size_t frames = bytes / 8;
             carry = bytes % 8;
@@ -237,8 +346,16 @@ struct AudioEngine::Impl {
     // ajustes de antes del motor nativo.
     std::string id_text(const ma_device_id& id) const {
         switch (ctx.backend) {
+#ifdef _WIN32
+            case ma_backend_wasapi: {
+                char u[256];
+                int n = WideCharToMultiByte(CP_UTF8, 0, id.wasapi, -1, u, sizeof(u), nullptr, nullptr);
+                return n > 0 ? std::string(u, n - 1) : std::string();
+            }
+#else
             case ma_backend_pulseaudio: return id.pulse;
             case ma_backend_alsa:       return id.alsa;
+#endif
             default:                    return std::to_string(id.nullbackend);
         }
     }
@@ -246,10 +363,18 @@ struct AudioEngine::Impl {
     bool open_context(const std::string& app) {
         if (ctx_ok) return true;
         ma_context_config cc = ma_context_config_init();
+#ifndef _WIN32
         cc.pulse.pApplicationName = app.c_str();
+#else
+        (void)app;
+#endif
         std::vector<ma_backend> backends;
         if (const char* nul = std::getenv("LUX_AUDIO_NULL"); nul && *nul == '1') backends = {ma_backend_null};
+        #ifdef _WIN32
+        else backends = {ma_backend_wasapi};
+#else
         else backends = {ma_backend_pulseaudio, ma_backend_alsa};
+#endif
         if (ma_context_init(backends.data(), static_cast<ma_uint32>(backends.size()), &cc, &ctx) != MA_SUCCESS)
             return false;
         ctx_ok = true;
@@ -522,7 +647,9 @@ bool AudioEngine::start_device(const std::string& device_id, const std::string& 
     cfg.performanceProfile       = ma_performance_profile_conservative;
     cfg.dataCallback      = Impl::data_callback;
     cfg.pUserData         = this;
+#ifndef _WIN32
     cfg.pulse.pStreamNamePlayback = app_name.c_str();
+#endif
 
     ma_device_id chosen{};
     if (!device_id.empty()) {

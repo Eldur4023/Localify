@@ -36,8 +36,14 @@ fn bool es_video_id(string id):
 # `yt-dlp -U`; el del sistema suele ir años por detrás y YouTube deja de dar audio
 # con versiones viejas), si no el del PATH.
 fn string ytdlp_bin():
-    string propio = os.path_join(os.getenv("HOME", ""), ".local", "bin", "yt-dlp")
+    # Windows: <datos>\bin\yt-dlp.exe si existe; si no "yt-dlp", que CreateProcess busca junto
+    # al ejecutable de la app y luego en el PATH.
+    string propio = es_windows() ? os.path_join(os.cwd(), "bin", "yt-dlp.exe") : os.path_join(os.getenv("HOME", ""), ".local", "bin", "yt-dlp")
     return os.is_file(propio) ? propio : "yt-dlp"
+
+# Windows define OS=Windows_NT en el entorno de todo proceso (os no expone un os.name()).
+fn bool es_windows():
+    return os.getenv("OS", "") == "Windows_NT"
 
 # Las versiones nuevas resuelven YouTube con un runtime de JavaScript y solo activan
 # deno por defecto: si hay node, se le dice que lo use.
@@ -82,6 +88,7 @@ fn void asegurar_descarga(string track_id, string prioridad):
             priority = case when excluded.priority = 'immediate' then 'immediate' else download_jobs.priority end,
             updated_at = unixepoch()
         """, track_id, prioridad, video == "" ? null : video)
+    state.set("dl_activos", "1")   # despierta al tick y a la foto
 
 # ─── Promoción de la cola ────────────────────────────────────────────────────
 
@@ -110,6 +117,28 @@ fn void iniciar_descarga(string tid, string vid):
         return
     descargar_iniciar(tid, vid)
 
+# Descargas del servidor común pendientes (las marca promover_cola): una por pasada, en su
+# propio bloque `every` (events.lux) para que los 120 s de timeout no frenen el resto del tick.
+fn void srv_descargas_tick():
+    if state.get("dl_activos", "1") == "0":
+        return
+    List<Json> p = await sqlite.query("select track_id, video_id from download_jobs where state = 'downloading' order by updated_at limit 8")
+    for int i in range(0, len(p)):
+        string tid = jstr(p[i]["track_id"], "")
+        if state.get("srv_pend:" + tid, "") == "":
+            continue
+        string vid = jstr(p[i]["video_id"], "")
+        state.remove("srv_pend:" + tid)
+        bool del_servidor = srv_obtener(tid)
+        if not del_servidor:
+            # el servidor no la tiene: de vuelta al flujo de siempre
+            if vid != "":
+                iniciar_descarga(tid, vid)
+            else:
+                await sqlite.exec("update download_jobs set state = 'matching', updated_at = unixepoch() where track_id = ?", tid)
+        state.remove("dlh:" + tid)
+        return
+
 fn void promover_cola():
     int MAX_CONCURRENTES = 2
     while activos_descarga() < MAX_CONCURRENTES:
@@ -136,17 +165,10 @@ fn void promover_cola():
             if srv_activo():
                 int tocado = await sqlite.exec("update download_jobs set state = 'downloading', started_at = unixepoch(), updated_at = unixepoch() where track_id = ? and state = 'queued'", tid)
                 if tocado == 1:
+                    # La descarga del servidor (hasta 120 s) NO corre aquí, en el tick de 1 s:
+                    # la hace srv_descargas_tick en su propio bloque `every`.
                     state.set("dlh:" + tid, "srv")
-                    bool del_servidor = srv_obtener(tid)
-                    state.remove("dlh:" + tid)
-                    if del_servidor:
-                        promovido = true
-                        break
-                    # el servidor no la tiene: de vuelta al flujo de siempre
-                    if vid != "":
-                        iniciar_descarga(tid, vid)
-                    else:
-                        await sqlite.exec("update download_jobs set state = 'matching', updated_at = unixepoch() where track_id = ?", tid)
+                    state.set("srv_pend:" + tid, "1")
                     promovido = true
                     break
                 continue
@@ -699,13 +721,12 @@ fn string seleccionar_youtube_id(string tid):
 fn bool ffprobe_disponible():
     if state.get("ffprobe_ok", "") != "":
         return state.get("ffprobe_ok", "") == "1"
-    Json r = await os.run("which", ["ffprobe"])
-    bool ok = jint(r["status"], 1) == 0 and jstr(r["stdout"], "").trim() != ""
+    bool ok = hay_binario("ffprobe")
     state.set("ffprobe_ok", ok ? "1" : "0")
     return ok
 
 fn bool hay_binario(string nombre):
-    Json r = await os.run("which", [nombre])
+    Json r = await os.run(es_windows() ? "where" : "which", [nombre])
     return jint(r["status"], 1) == 0 and jstr(r["stdout"], "").trim() != ""
 
 fn Json? ffprobe_info(string ruta):
@@ -718,10 +739,16 @@ fn Json? ffprobe_info(string ruta):
 
 # ─── El tick ─────────────────────────────────────────────────────────────────
 
-fn List<Json> tick_descargas():
+fn void tick_descargas():
+    # Sin nada que hacer (lo normal) basta UNA consulta por segundo, no ocho.
+    List<Json> n = await sqlite.query("select count(*) as n from download_jobs where state in ('queued','matching','downloading','finalizing')")
+    int activos = jint(n[0]["n"], 0)
+    state.set("dl_activos", str(activos))
+    if activos == 0:
+        return
 
     # trabajos en marcha sin handle (la app se reinició): reencolar o fallar
-    List<Json> zombis = await sqlite.query("select track_id, state, attempts from download_jobs where state in ('matching','downloading')")
+    List<Json> zombis = await sqlite.query("select track_id, state, attempts from download_jobs where state in ('matching','downloading') and updated_at < unixepoch() - 3")
     for int i in range(0, len(zombis)):
         string tid = jstr(zombis[i]["track_id"], "")
         if state.get("dlh:" + tid, "") == "":
@@ -757,5 +784,3 @@ fn List<Json> tick_descargas():
     List<Json> finalizando = await sqlite.query("select track_id from download_jobs where state = 'finalizing' order by updated_at limit 4")
     for int i in range(0, len(finalizando)):
         finalizar(jstr(finalizando[i]["track_id"], ""))
-
-    return descargas_activas()

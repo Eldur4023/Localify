@@ -27,25 +27,15 @@
 #include <lux/app.hpp>
 #include <lux/middleware.hpp>
 #include <lux/logger.hpp>
-#include <lux/tls.hpp>
 #include <lux/openapi.hpp>
 
 #include <atomic>
 #include <chrono>
 #include <cstring>
-#include <functional>
 #include <iostream>
 #include <thread>
 
 namespace fs = std::filesystem;
-
-#ifdef LUX_EMBEDDED
-// Hooks of the embedding shell (Lux-Local's Android boot): `vet` sees the app's declaration once compiled and
-// returns an error text to refuse it (so the shell need not compile the app a second time); `listening` fires on
-// the main loop as soon as the server accepts connections (so the shell need not poll the port).
-std::function<std::string(const lux_script::AppDecl&)> lux_embedded_vet;
-std::function<void()>                                  lux_embedded_listening;
-#endif
 
 namespace {
 
@@ -370,16 +360,16 @@ static void run_tests(const lux_script::Module& m, lux::DispatchFn dispatch, std
     std::_Exit(g_test_rc.load());
 }
 
-// Desktop apps (Drive Sync, Calendar, Mail): their shell links this file with LUX_EMBEDDED and
-// calls lux_main() on a thread, so it serves the app exactly as `lux` does
-// (every:, on start:, limits...) instead of keeping a second copy of this wiring.
+// Desktop apps (Localify, Drive Sync, Calendar, Mail): their shell links this
+// file with LUX_EMBEDDED and calls lux_main() on a thread, so it serves the
+// app exactly as `lux` does (every:, on start:, limits...) instead of keeping
+// a second copy of this wiring.
 #ifdef LUX_EMBEDDED
 int lux_main(int argc, char** argv) {
 #else
 int main(int argc, char** argv) {
 #endif
-#ifdef _WIN32
-#ifndef LUX_EMBEDDED   // the embedding shell owns its argv and its console
+#if defined(_WIN32) && !defined(LUX_EMBEDDED)   // embedded: the shell passes its own argv and owns the console
     // LuxScript strings are UTF-8: take the arguments from the wide command line, put the
     // console in UTF-8 and keep stdio byte-exact ("\n" stays "\n", as on Linux).
     std::vector<std::string> utf8_argv;
@@ -400,7 +390,6 @@ int main(int argc, char** argv) {
     _setmode(_fileno(stdin),  _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);
-#endif
 #else
     // glibc mmaps every allocation past 128 KB and unmaps it when freed: a
     // file read into a string or a big response paid a fresh zeroed mapping
@@ -408,11 +397,11 @@ int main(int argc, char** argv) {
     // shootdown). Up to 1 MB is served, and reused, from the heap.
     // ponytail: each arena may keep up to 8 MB of freed memory; lower
     // M_TRIM_THRESHOLD if resident size matters more than those faults.
-#ifndef __ANDROID__   // glibc tuning knobs; bionic's allocator has neither
+#ifdef __GLIBC__
     mallopt(M_MMAP_THRESHOLD, 1 << 20);
     mallopt(M_TRIM_THRESHOLD, 8 << 20);
 #endif
-#endif   // _WIN32
+#endif
     if (argc >= 2 && std::string(argv[1]) == "restore")
         return lux_script::restore_main({argv + 2, argv + argc});
 
@@ -547,11 +536,6 @@ int main(int argc, char** argv) {
     publish_module(mod);
 
     const lux_script::AppDecl& cfg = mod->program.app;
-#ifdef LUX_EMBEDDED
-    if (lux_embedded_vet)
-        if (std::string why = lux_embedded_vet(cfg); !why.empty()) { std::cerr << "lux: " << why << "\n"; return 1; }
-#endif
-    const lux_script::TlsDecl& tls = mod->program.tls;
     lux::App app;
     // One line per request, with its flush, costs close to 25% of the
     // throughput and multiplies median latency by 2.6: it is opt-in.
@@ -691,10 +675,6 @@ int main(int argc, char** argv) {
             std::thread(run_tests, std::cref(*mod), lux::DispatchFn(dispatch), filter).detach();
         };
     }
-#ifdef LUX_EMBEDDED
-    if (lux_embedded_listening)
-        boot = [inner = std::move(boot)](lux::core::EventLoop& loop) { if (inner) inner(loop); lux_embedded_listening(); };
-#endif
     if (boot) app.on_start(boot);
 
     // See App::set_route_probe's comment: router_ only ever holds the two
@@ -731,13 +711,6 @@ int main(int argc, char** argv) {
         }).detach();
     }
 
-    if (!test_mode && tls.present) {
-        std::string tls_err = "tls: needs both cert and key for HTTPS";
-        if (tls.cert.empty() || tls.key.empty() || !lux::tls::init(tls.cert, tls.key, tls_err)) {
-            std::cerr << "https: " << tls_err << "\n";
-            return 1;
-        }
-    }
     lux::http::g_max_body_size = cfg.max_body;
     lux::global_headers() = cfg.headers;
     app.run(test_mode ? std::string("127.0.0.1") : cfg.host, port_override ? static_cast<uint16_t>(port_override)

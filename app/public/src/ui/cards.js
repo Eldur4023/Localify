@@ -17,12 +17,20 @@ import { nodo } from "./dom.js";
 * no hay portada de verdad (404: ni el álbum la tiene, ni hay nada que
 * cachear).
 */
-function asignarSrcConRespaldo(img, ruta, siFallaDelTodo) {
+/**
+* `pequena`: miniatura de <= 64 px. Añade `s=s`, que el backend puede usar para servir una
+* variante reducida; si no la conoce, ignora el parámetro y sirve la imagen de siempre.
+* Único sitio donde se decide la URL de una portada.
+*/
+function urlDePortada(ruta, pequena) {
+	return `/api/cover/${ruta}${pequena ? (ruta.includes("?") ? "&" : "?") + "s=s" : ""}`;
+}
+function asignarSrcConRespaldo(img, ruta, siFallaDelTodo, pequena = false) {
 	img.onerror = () => {
 		img.onerror = null;
 		siFallaDelTodo();
 	};
-	img.src = `/api/cover/${ruta}`;
+	img.src = urlDePortada(ruta, pequena);
 }
 /** Filas de tarjetas, con desplazamiento horizontal. */
 export function carrusel(titulo) {
@@ -43,7 +51,7 @@ export function carrusel(titulo) {
 * o el álbum no la tiene. Quitarlo al empezar la carga dejaría un rectángulo
 * vacío parpadeando en cada tarjeta.
 */
-function ponerImagen(hueco, ruta) {
+function ponerImagen(hueco, ruta, pequena = false) {
 	const img = nodo("img", "portada");
 	img.alt = "";
 	img.decoding = "async";
@@ -64,12 +72,12 @@ function ponerImagen(hueco, ruta) {
 	// un parpadeo intermedio. Si falla de verdad —ni portada, ni problema de
 	// plataforma—, se queda el icono y ya está.
 	img.addEventListener("load", () => img.classList.add("is-lista"));
-	asignarSrcConRespaldo(img, ruta, () => img.remove());
+	asignarSrcConRespaldo(img, ruta, () => img.remove(), pequena);
 	hueco.append(img);
 }
-export function ponerPortada(hueco, albumId) {
+export function ponerPortada(hueco, albumId, pequena = false) {
 	if (!albumId) return;
-	ponerImagen(hueco, encodeURIComponent(albumId));
+	ponerImagen(hueco, encodeURIComponent(albumId), pequena);
 }
 /**
 * Portada de una canción.
@@ -85,8 +93,8 @@ export function ponerPortada(hueco, albumId) {
 * que sí puede: usa la miniatura que el catálogo da para esa canción y, si no
 * hay, cae a la portada de su álbum. Aquí no hay nada que elegir.
 */
-export function ponerPortadaDePista(hueco, trackId) {
-	ponerImagen(hueco, `track/${encodeURIComponent(trackId)}`);
+export function ponerPortadaDePista(hueco, trackId, pequena = false) {
+	ponerImagen(hueco, `track/${encodeURIComponent(trackId)}`, pequena);
 }
 /**
 * Coloca la foto de un artista, con las mismas reglas que una portada.
@@ -105,9 +113,9 @@ export function ponerPortadaDePista(hueco, trackId) {
 * Los identificadores de álbum y de artista tienen la misma forma. Sin el
 * prefijo, el backend no podría saber cuál le están pidiendo.
 */
-export function ponerFotoDeArtista(hueco, artistId) {
+export function ponerFotoDeArtista(hueco, artistId, pequena = false) {
 	if (!artistId) return;
-	ponerImagen(hueco, `artist/${encodeURIComponent(artistId)}`);
+	ponerImagen(hueco, `artist/${encodeURIComponent(artistId)}`, pequena);
 }
 /**
 * Comienzo de una fila de pista: botón de reproducir y portada.
@@ -138,8 +146,8 @@ export function comienzoDePista(albumId, trackId) {
 	arte.append(icono("music", 16));
 	// Con identificador de pista, la portada la resuelve el backend por la
 	// canción. Sin él —los sitios que aún no lo pasan— se cae al álbum.
-	if (trackId) ponerPortadaDePista(arte, trackId);
-	else ponerPortada(arte, albumId);
+	if (trackId) ponerPortadaDePista(arte, trackId, true);
+	else ponerPortada(arte, albumId, true);
 	frag.append(play, arte);
 	return frag;
 }
@@ -163,17 +171,17 @@ export function comienzoDePista(albumId, trackId) {
 * Una playlist recién creada no tiene canciones, así que no tiene portadas.
 * Queda el icono del hueco, que es la respuesta correcta: todavía no hay nada.
 */
-function ponerMosaico(hueco, albumes) {
+function ponerMosaico(hueco, albumes, pequena = false) {
 	if (albumes.length === 0) return;
 	if (albumes.length === 1) {
-		ponerPortada(hueco, albumes[0]);
+		ponerPortada(hueco, albumes[0], pequena);
 		return;
 	}
 	const rejilla = nodo("div", "mosaico");
 	const cuatro = albumes.length === 3 ? [...albumes, albumes[0] ?? ""] : albumes.slice(0, 4);
 	for (const album of cuatro) {
 		const celda = nodo("span", "mosaico__celda");
-		ponerPortada(celda, album);
+		ponerPortada(celda, album, true);
 		rejilla.append(celda);
 	}
 	hueco.append(rejilla);
@@ -192,17 +200,17 @@ function ponerMosaico(hueco, albumes) {
 * marca de tiempo de la playlist hace que sea otra URL, y el WebView la pide de
 * nuevo en vez de enseñar la anterior hasta reiniciar.
 */
-export function ponerImagenDePlaylist(hueco, p) {
+export function ponerImagenDePlaylist(hueco, p, pequena = false) {
 	if (p.hasOwnCover) {
 		const img = nodo("img", "portada");
 		img.alt = "";
 		img.decoding = "async";
 		img.addEventListener("load", () => img.classList.add("is-lista"));
-		asignarSrcConRespaldo(img, `playlist/${encodeURIComponent(p.id)}?v=${p.updatedAt}`, () => img.remove());
+		asignarSrcConRespaldo(img, `playlist/${encodeURIComponent(p.id)}?v=${p.updatedAt}`, () => img.remove(), pequena);
 		hueco.append(img);
 		return;
 	}
-	ponerMosaico(hueco, p.coverAlbums);
+	ponerMosaico(hueco, p.coverAlbums, pequena);
 }
 /**
 * Igual que [`comienzoDePista`], pero para listas virtualizadas.
@@ -255,7 +263,7 @@ export function comienzoReciclable() {
 			// canción. `asignarSrcConRespaldo` reemplaza `onerror` en cada llamada,
 			// así que reciclar el nodo para otra pista no arrastra el fallo del
 			// anterior.
-			asignarSrcConRespaldo(img, ruta, () => img.classList.remove("is-lista"));
+			asignarSrcConRespaldo(img, ruta, () => img.classList.remove("is-lista"), true);
 		}
 	};
 }

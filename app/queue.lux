@@ -67,6 +67,12 @@ class EstadoCola:
     # Ver motor.lux: cada cue es una orden "carga/colócate aquí" que el motor
     # de audio aplica una sola vez.
     int cue
+    # ligero: leído sin las listas (leer_estado_ligero): guardar_estado solo
+    # escribe los escalares, nunca pisa las listas con vacías.
+    bool ligero
+    # Las listas pesadas (cola de contexto + orden) solo se reescriben si un
+    # mutador las tocó: pausar/volumen/avanzar no deben reescribir 20k ids.
+    bool ctx_sucio
 
 fn List<string> parsear_ids(string json_texto):
     List<string> out = []
@@ -104,12 +110,8 @@ fn List<int> parsear_orden(string json_texto):
         out.add(jint(items[i], 0))
     return out
 
-fn EstadoCola leer_estado():
-    List<Json> filas = await sqlite.query("select track_id, position_ms, volume, status, repeat_mode, shuffle, shuffle_seed, context, context_queue, play_order, queue_index, user_queue, history, revision, cue from player_state where id = 1")
-    EstadoCola e = EstadoCola("", 0, 1.0, "stopped", "off", false, 0, "null", [], [], 0, [], [], 0, 0)
-    if len(filas) == 0:
-        return e
-    Json f = filas[0]
+fn EstadoCola estado_de_fila(Json f, int nivel):
+    EstadoCola e = EstadoCola("", 0, 1.0, "stopped", "off", false, 0, "null", [], [], 0, [], [], 0, 0, nivel == 2, false)
     e.track_id = jstr(f["track_id"], "")
     e.position_ms = jint(f["position_ms"], 0)
     e.volume = jdbl(f["volume"], 1.0)
@@ -118,14 +120,44 @@ fn EstadoCola leer_estado():
     e.shuffle = jint(f["shuffle"], 0) == 1
     e.shuffle_seed = jint(f["shuffle_seed"], 0)
     e.context = jstr(f["context"], "null")
-    e.context_queue = parsear_ids(jstr(f["context_queue"], ""))
-    e.play_order = parsear_orden(jstr(f["play_order"], ""))
     e.queue_index = jint(f["queue_index"], 0)
-    e.user_queue = parsear_entries(jstr(f["user_queue"], ""))
-    e.history = parsear_ids(jstr(f["history"], ""))
     e.revision = jint(f["revision"], 0)
     e.cue = jint(f["cue"], 0)
+    if nivel == 0:
+        e.context_queue = parsear_ids(jstr(f["context_queue"], ""))
+        e.play_order = parsear_orden(jstr(f["play_order"], ""))
+    if nivel < 2:
+        e.user_queue = parsear_entries(jstr(f["user_queue"], ""))
+        e.history = parsear_ids(jstr(f["history"], ""))
     return e
+
+# Lectura completa: parsea las listas (la cola de contexto de una biblioteca
+# grande son miles de ids). Solo para quien las necesita: mutar la cola,
+# precargar la siguiente, publicar la ventana de sync, devolver la cola.
+fn EstadoCola leer_estado():
+    List<Json> filas = await sqlite.query("select track_id, position_ms, volume, status, repeat_mode, shuffle, shuffle_seed, context, context_queue, play_order, queue_index, user_queue, history, revision, cue from player_state where id = 1")
+    if len(filas) == 0:
+        return EstadoCola("", 0, 1.0, "stopped", "off", false, 0, "null", [], [], 0, [], [], 0, 0, false, false)
+    return estado_de_fila(filas[0], 0)
+
+# Escalares + cola de usuario + historial (pequeños), SIN la cola de contexto
+# ni su orden (vienen vacías): para quien solo toca la cola de usuario o el
+# historial. guardar_estado no reescribe las listas de contexto salvo que el
+# mutador las asigne (ctx_sucio).
+fn EstadoCola leer_estado_medio():
+    List<Json> filas = await sqlite.query("select track_id, position_ms, volume, status, repeat_mode, shuffle, shuffle_seed, context, queue_index, user_queue, history, revision, cue from player_state where id = 1")
+    if len(filas) == 0:
+        return EstadoCola("", 0, 1.0, "stopped", "off", false, 0, "null", [], [], 0, [], [], 0, 0, false, false)
+    return estado_de_fila(filas[0], 1)
+
+# Solo los escalares (los ticks de fondo, las fotos, la mayoría de órdenes):
+# sin tocar ni parsear las listas. Las listas vienen vacías, y guardar_estado
+# lo sabe.
+fn EstadoCola leer_estado_ligero():
+    List<Json> filas = await sqlite.query("select track_id, position_ms, volume, status, repeat_mode, shuffle, shuffle_seed, context, queue_index, revision, cue from player_state where id = 1")
+    if len(filas) == 0:
+        return EstadoCola("", 0, 1.0, "stopped", "off", false, 0, "null", [], [], 0, [], [], 0, 0, true, false)
+    return estado_de_fila(filas[0], 2)
 
 fn List<Json> user_queue_json(EstadoCola e):
     List<Json> out = []
@@ -135,16 +167,39 @@ fn List<Json> user_queue_json(EstadoCola e):
     return out
 
 # Persistencia con cerrojo optimista sobre revision. Devuelve true si ganó.
+# Tres formas, de menos a más escritura (el WAL de SQLite crece con cada
+# columna reescrita): estado ligero -> solo escalares; completo -> además cola
+# de usuario e historial (pequeñas); y la cola de contexto + orden (miles de
+# ids) solo si `ctx_sucio`.
 fn bool guardar_estado(EstadoCola e):
-    int tocado = await sqlite.exec(
-        """update player_state set track_id = nullif(?, ''), position_ms = ?, volume = ?, status = ?,
-           repeat_mode = ?, shuffle = ?, shuffle_seed = ?, context = ?, context_queue = ?,
-           play_order = ?, queue_index = ?, user_queue = ?, history = ?, cue = ?,
-           revision = revision + 1, updated_at = unixepoch() where id = 1 and revision = ?""",
-        e.track_id == "" ? null : e.track_id, e.position_ms, e.volume, e.status, e.repeat_mode,
-        e.shuffle ? 1 : 0, e.shuffle_seed, e.context, str(e.context_queue),
-        str(e.play_order), e.queue_index, str(user_queue_json(e)), str(e.history),
-        e.cue, e.revision)
+    int tocado = 0
+    if e.ligero:
+        tocado = await sqlite.exec(
+            """update player_state set track_id = nullif(?, ''), position_ms = ?, volume = ?, status = ?,
+               repeat_mode = ?, shuffle = ?, shuffle_seed = ?, context = ?, queue_index = ?, cue = ?,
+               revision = revision + 1, updated_at = unixepoch() where id = 1 and revision = ?""",
+            e.track_id == "" ? null : e.track_id, e.position_ms, e.volume, e.status, e.repeat_mode,
+            e.shuffle ? 1 : 0, e.shuffle_seed, e.context, e.queue_index, e.cue, e.revision)
+    elif e.ctx_sucio:
+        # (quien lo marca asigna ambas listas enteras, o las leyó completas)
+        tocado = await sqlite.exec(
+            """update player_state set track_id = nullif(?, ''), position_ms = ?, volume = ?, status = ?,
+               repeat_mode = ?, shuffle = ?, shuffle_seed = ?, context = ?, context_queue = ?,
+               play_order = ?, queue_index = ?, user_queue = ?, history = ?, cue = ?,
+               revision = revision + 1, updated_at = unixepoch() where id = 1 and revision = ?""",
+            e.track_id == "" ? null : e.track_id, e.position_ms, e.volume, e.status, e.repeat_mode,
+            e.shuffle ? 1 : 0, e.shuffle_seed, e.context, str(e.context_queue),
+            str(e.play_order), e.queue_index, str(user_queue_json(e)), str(e.history),
+            e.cue, e.revision)
+    else:
+        tocado = await sqlite.exec(
+            """update player_state set track_id = nullif(?, ''), position_ms = ?, volume = ?, status = ?,
+               repeat_mode = ?, shuffle = ?, shuffle_seed = ?, context = ?, queue_index = ?,
+               user_queue = ?, history = ?, cue = ?,
+               revision = revision + 1, updated_at = unixepoch() where id = 1 and revision = ?""",
+            e.track_id == "" ? null : e.track_id, e.position_ms, e.volume, e.status, e.repeat_mode,
+            e.shuffle ? 1 : 0, e.shuffle_seed, e.context, e.queue_index,
+            str(user_queue_json(e)), str(e.history), e.cue, e.revision)
     return tocado == 1
 
 # La ÚNICA forma en que el backend mueve el motor de audio: estrena un cue.
@@ -176,9 +231,16 @@ fn int posicion_viva(EstadoCola e):
 # argd sólo lo usa "volume" (el único caso que necesita un double); argn hace
 # de slot entero genérico (ms, índice, posición de cola...) según la acción.
 fn bool mutar_estado(string accion, string arg1, string arg2, int argn, double argd = 0.0):
+    # Las acciones que solo tocan escalares no necesitan (ni deben reescribir) las listas.
+    bool escalar = accion == "toggle" or accion == "pause" or accion == "resume" or accion == "seek" or accion == "volume" or accion == "repeat"
+    bool sin_ctx = accion == "set_track" or accion == "saltar_entry" or accion == "quitar_entry" or accion == "mover_entry" or accion == "clear_user_queue"
     for int intento in range(0, 4):
-        EstadoCola e = leer_estado()
+        EstadoCola e = escalar ? leer_estado_ligero() : (sin_ctx ? leer_estado_medio() : leer_estado())
         bool ok = false
+        # Sin cambio real (volumen igual, ya en pausa...) no se escribe ni se sube la revisión.
+        string status0 = e.status
+        double volume0 = e.volume
+        string repeat0 = e.repeat_mode
         if accion == "avanzar":
             ok = cola_avanzar(e, arg1 == "natural")
         elif accion == "retroceder":
@@ -238,6 +300,8 @@ fn bool mutar_estado(string accion, string arg1, string arg2, int argn, double a
             ok = true
         if not ok:
             return true
+        if (accion == "volume" and e.volume == volume0) or (accion == "repeat" and e.repeat_mode == repeat0) or (accion == "pause" and e.status == status0 and argn < 0) or (accion == "resume" and e.status == status0):
+            return true
         if guardar_estado(e):
             return true
     return false
@@ -248,9 +312,10 @@ fn bool mutar_estado(string accion, string arg1, string arg2, int argn, double a
 # usuario NO se toca: sobrevive a los cambios de contexto, como en Spotify.
 fn bool set_contexto(string context_json, List<string> pistas, string pista_inicial):
     for int intento in range(0, 4):
-        EstadoCola e = leer_estado()
+        EstadoCola e = leer_estado_medio()
         e.context = context_json
         e.context_queue = pistas
+        e.ctx_sucio = true
         e.queue_index = 0
         if e.shuffle and len(pistas) > 1:
             e.shuffle_seed = time.now() % 2147483647
@@ -280,6 +345,7 @@ fn string pista_en_orden(EstadoCola e, int k):
 fn void anclar_actual(EstadoCola e):
     if len(e.play_order) != len(e.context_queue) or len(e.play_order) < 2:
         return
+    e.ctx_sucio = true
     int pos = e.play_order[e.queue_index]
     List<int> rotada = []
     for int i in range(0, len(e.play_order)):
@@ -365,6 +431,7 @@ fn bool cola_shuffle(EstadoCola e, bool activar):
     if activar == e.shuffle:
         return true
     e.shuffle = activar
+    e.ctx_sucio = true
     if activar and len(e.context_queue) > 1:
         e.shuffle_seed = time.now() % 2147483647
         e.play_order = permutacion_estable(len(e.context_queue), e.shuffle_seed)
@@ -390,16 +457,18 @@ fn bool cola_repeat(EstadoCola e, string modo):
 
 fn void cola_annadir_siguientes(List<string> ids):
     for int intento in range(0, 4):
-        EstadoCola e = leer_estado()
+        EstadoCola e = leer_estado_medio()
         # push_front en orden inverso para que A,B suenen A y luego B
-        for int i in range(len(ids) - 1, -1, -1):
-            e.user_queue = [Entrada(nuevo_id(), ids[i])].concat(e.user_queue)
+        List<Entrada> nueva = []
+        for int i in range(0, len(ids)):
+            nueva.add(Entrada(nuevo_id(), ids[i]))
+        e.user_queue = nueva.concat(e.user_queue)
         if guardar_estado(e):
             return
 
 fn void cola_annadir_al_final(List<string> ids):
     for int intento in range(0, 4):
-        EstadoCola e = leer_estado()
+        EstadoCola e = leer_estado_medio()
         for int i in range(0, len(ids)):
             e.user_queue.add(Entrada(nuevo_id(), ids[i]))
         if guardar_estado(e):
