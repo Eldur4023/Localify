@@ -2,7 +2,7 @@ import { actualizaciones } from "../ipc/client.js";
 import { t } from "../i18n/index.js";
 import { nodo } from "./dom.js";
 /**
-* Aviso de versión nueva. El backend (actualizar.lux) pregunta a GitHub cada 6 h; aquí solo se pinta.
+* Aviso de versión nueva. El backend (actualizar.lux) pregunta a GitHub al abrir la app y cada 6 h; aquí solo se pinta.
 * "Más tarde" lo oculta hasta que salga OTRA versión. En Android el APK lo baja e instala el puente nativo
 * (AndroidBridge.installApk); en escritorio lo hace el backend y reinicia la app.
 */
@@ -60,8 +60,8 @@ async function mirar() {
 		if (s.available && leer() !== s.latest) mostrar(s);
 	} catch { /* sin red o sin releases: nada que avisar */ }
 }
-/** Mira al poco de abrir y cada 30 min; el backend ya limita las consultas a GitHub a una cada 6 h. */
+/** Mira al poco de abrir y cada 30 min; el backend consulta a GitHub al abrir la app y luego cada 6 h. */
 export function vigilarActualizaciones() {
-	globalThis.setTimeout(() => void mirar(), 20000);
+	globalThis.setTimeout(() => void mirar(), 8000);
 	globalThis.setInterval(() => void mirar(), 30 * 60 * 1000);
 }

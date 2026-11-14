@@ -592,9 +592,12 @@
 
 /* Aviso de versión nueva (ui/actualizacion.js) */
 .actualizacion {
-	position: fixed; right: 16px; bottom: 16px; z-index: 60; max-width: min(420px, calc(100vw - 32px));
+	position: fixed; top: 16px; right: 16px; z-index: 1000; max-width: min(420px, calc(100vw - 32px));   /* arriba y sobre todo: abajo lo tapaba la barra del reproductor */
 	display: flex; flex-direction: column; gap: 10px; padding: 14px 16px;
 	background: var(--bg-card, #181818); color: var(--text-base, #fff);
 	border: 1px solid var(--bg-tinted-hover, #333); border-radius: 12px; box-shadow: 0 8px 28px rgba(0, 0, 0, .45);
 }
 .actualizacion__acciones { display: flex; gap: 8px; }
+@media (max-width: 600px) {
+	.actualizacion { left: 16px; right: 16px; max-width: none; }
+}

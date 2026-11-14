@@ -1,6 +1,6 @@
 # actualizar.lux — Aviso de versión nueva (releases de GitHub) y actualización automática.
 #
-# Cada 6 h (y al abrir) se pregunta a la API de GitHub por la última release. Si es más nueva que la
+# Al abrir la app y luego cada 6 h se pregunta a la API de GitHub por la última release. Si es más nueva que la
 # instalada, la interfaz enseña un aviso; "Actualizar" descarga el instalador de ESTA plataforma y lo
 # aplica: Windows (installer.exe /S y reabre), Linux (.deb con pkexec, o sustituye el binario si está en
 # una carpeta del usuario) y Android (la interfaz llama al puente nativo: lo instala el sistema).
@@ -76,9 +76,10 @@ fn string nombre_asset(List<Json> assets):
             return n
     return ""
 
-# Pregunta a GitHub y deja el resultado en ajustes ("update_info", JSON). `forzar` ignora las 6 h.
-fn void actualizar_comprobar(bool forzar):
-    if ajuste("update_auto", "1") == "0" and not forzar:
+# Pregunta a GitHub y deja el resultado en ajustes ("update_info", JSON). `forzar` ignora las 6 h de espera.
+fn void actualizar_comprobar(bool forzar, bool manual = false):
+    # update_auto = 0 apaga las consultas automáticas; la orden manual (update_check) siempre se hace
+    if ajuste("update_auto", "1") == "0" and not manual:
         return
     int ahora = time.now()
     if not forzar and ahora - int(ajuste("update_check_at", "0")) < 6 * 3600 * 1000:
@@ -152,10 +153,13 @@ fn Json update_install():
 
 fn Json cmd_actualizar(string cmd, Json args):
     if cmd == "update_status":
-        await actualizar_comprobar(false)
+        # la primera consulta de cada arranque de la app siempre va a GitHub (sin esperar las 6 h)
+        bool primera = state.get("update_arranque", "") == ""
+        state.set("update_arranque", "1")
+        await actualizar_comprobar(primera)
         return update_status()
     if cmd == "update_check":
-        await actualizar_comprobar(true)
+        await actualizar_comprobar(true, true)
         return update_status()
     if cmd == "update_install":
         return await update_install()
