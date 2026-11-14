@@ -7,6 +7,8 @@ fn Json sesion_guardada(Json? r):
     if r == null or (r["status"] != 200 and r["status"] != 201):
         if r != null and r["status"] == 409:
             return error_api("USERNAME_TAKEN", "error.username_taken").status(409)
+        if r != null and r["status"] == 403:
+            return error_api("INVITE_REQUIRED", "error.invite_required").status(403)
         if r != null and (r["status"] == 401 or r["status"] == 400 or r["status"] == 429):
             return error_api("SERVER_AUTH", "error.server_auth_" + str(r["status"])).status(r["status"])
         return srv_fallo(r)
@@ -50,6 +52,14 @@ fn Json cmd_social(string cmd, Json args):
             ajuste_poner("server_cuenta", "")
         ajuste_poner("server_host", host)
         ajuste_poner("server_port", str(puerto))
+        # HTTPS si el servidor lo habla (Lux con tls:); si no, HTTP. Se detecta aquí, al conectar.
+        ajuste_poner("server_tls", "0")
+        try:
+            Json t = await http.get("https://" + host + ":" + str(puerto) + "/api/info", null, { "timeout_ms": 4000 })
+            if jint(t["status"], 0) == 200:
+                ajuste_poner("server_tls", "1")
+        catch e:
+            ajuste_poner("server_tls", "0")
         state.remove("srv_caido")
         return await cmd_social("server_status", {})
     if cmd == "server_disconnect":
@@ -106,6 +116,7 @@ fn Json cmd_social(string cmd, Json args):
         Dict<string, Json> cuerpo = { "username": arg_str(args, "username", ""), "password": arg_str(args, "password", "") }
         if cmd == "server_register":
             cuerpo["displayName"] = arg_str(args, "displayName", "")
+            cuerpo["inviteCode"] = arg_str(args, "inviteCode", "")
         Dict<string, string> sin = {}
         Json r = null
         try:
@@ -118,6 +129,16 @@ fn Json cmd_social(string cmd, Json args):
     # a partir de aquí hace falta sesión
     if not srv_sesion():
         return error_api("SERVER_AUTH", "error.server_auth").status(401)
+
+    # Invitaciones para que otras personas se registren en este servidor
+    if cmd == "server_invites":
+        Json? r = srv("GET", "/invites")
+        return r != null and r["status"] == 200 ? r["body"] : srv_fallo(r)
+    if cmd == "server_invite_create":
+        Json? r = srv("POST", "/invites")
+        if r != null and r["status"] == 429:
+            return error_api("INVITE_LIMIT", "error.invite_limit").status(429)
+        return r != null and r["status"] == 201 ? r["body"] : srv_fallo(r)
 
     # Aporta mi biblioteca descargada: lotes de 20 pistas por llamada (la UI repite
     # hasta done). Lo que el servidor ya tiene (por identidad) no se vuelve a subir.

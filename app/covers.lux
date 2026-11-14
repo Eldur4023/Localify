@@ -90,6 +90,13 @@ fn string? portada_album_url_fallback(string album_id):
 # Portada de álbum: la suya, o la miniatura de una de sus pistas con vídeo.
 fn Json? portada_album_respuesta(string id):
     string destino = os.path_join(covers_dir(), "album-" + id + ".jpg")
+    List<Json> con_portada = await sqlite.query("select id from tracks where album_id = ?", id)
+    for int i in range(0, len(con_portada)):
+        string propia = os.path_join(covers_dir(), "usercover-" + jstr(con_portada[i]["id"], "") + ".jpg")
+        if os.is_file(propia):
+            header("Content-Type", "image/jpeg")
+            header("Cache-Control", "no-cache")
+            return send_file(propia, covers_dir())
     string? url = portada_album_url(id)
     if url == null:
         url = portada_album_url_fallback(id)
@@ -128,7 +135,17 @@ fn string? portada_por_busqueda(string tid):
     return null
 
 fn Json? portada_pista_respuesta(string id):
+    # portada puesta a mano por el usuario (editar metadatos): manda sobre todo lo demás
+    string propia = os.path_join(covers_dir(), "usercover-" + id + ".jpg")
+    if os.is_file(propia):
+        header("Content-Type", "image/jpeg")
+        header("Cache-Control", "no-cache")
+        return send_file(propia, covers_dir())
     string destino = os.path_join(covers_dir(), "track2-" + id + ".jpg")
+    # Ya en disco: servirla sin calcular la URL (que puede costar una búsqueda en YouTube Music)
+    if os.is_file(destino) and os.file_size(destino) > 100:
+        header("Content-Type", "image/jpeg")
+        return send_file(destino, covers_dir())
     # La portada del álbum es más fiable que la miniatura del vídeo: muchas
     # miniaturas de "audio oficial" traen la carátula centrada sobre un
     # lienzo más ancho, con el margen (gris o negro) incrustado en los
@@ -157,6 +174,15 @@ fn Json? portada_pista_respuesta(string id):
 
 get endpoint("/api/cover/track/:id", string id):
     return await portada_pista_respuesta(id)
+
+# Portada propia de una pista (editor de metadatos): llega ya recortada, en JPEG.
+post endpoint("/api/cover/track/:id", string id, File imagen):
+    string d = covers_dir()
+    string nombre = imagen.save(d)
+    if nombre == "":
+        return status(500)
+    await os.move(os.path_join(d, nombre), os.path_join(d, "usercover-" + id + ".jpg"))
+    return { "ok": true }
 
 # Portada de playlist: la sube el usuario (multipart) o se borra.
 post endpoint("/api/cover/playlist/:id", string id, File imagen):

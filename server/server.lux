@@ -44,6 +44,14 @@ on start:
             created_at integer not null default (unixepoch())
         )""")
     await sqlite.exec("""
+        create table if not exists invites(
+            code text primary key,
+            created_by integer not null references users(id) on delete cascade,
+            created_at integer not null default (unixepoch()),
+            used_by integer references users(id) on delete set null,
+            used_at integer
+        )""")
+    await sqlite.exec("""
         create table if not exists presence(
             user_id integer primary key references users(id) on delete cascade,
             title text not null default '', artist text not null default '',
@@ -307,12 +315,24 @@ post endpoint("/api/register", Json b):
     string nombre = s_of(b, "displayName", user).trim().slice(0, 40)
     if nombre == "":
         nombre = user
+    # Con usuarios ya dentro, solo se entra con un código de invitación de uso único
+    # (lo genera cualquier usuario). El primer usuario de un servidor vacío no lo necesita.
+    string codigo = s_of(b, "inviteCode", "").trim().lower()
+    List<Json> hay = await sqlite.query("select count(*) as n from users")
+    bool exigir = int(hay[0]["n"]) > 0
+    if exigir:
+        List<Json> inv = await sqlite.query("select 1 from invites where code = ? and used_by is null", codigo)
+        if codigo == "" or len(inv) == 0:
+            return { "error": "invite_required" }.status(403)
     string h = await hash.password(pass)
     try:
         await sqlite.exec("insert into users(username, display_name, pass_hash) values(?, ?, ?)", user, nombre, h)
     catch e:
         return { "error": "username_taken" }.status(409)
     int id = await sqlite.last_id()
+    # shortcut: dos registros simultáneos con el mismo código podrían colarse; subir a transacción si importa
+    if exigir:
+        await sqlite.exec("update invites set used_by = ?, used_at = unixepoch() where code = ?", id, codigo)
     return { "token": jwt.sign({ "sub": str(id) }, 2592000), "user": { "username": user, "displayName": nombre, "bio": "" } }.status(201)
 
 post endpoint("/api/login", Json b):
@@ -324,10 +344,30 @@ post endpoint("/api/login", Json b):
         return { "error": "bad_credentials" }.status(401)
     return { "token": jwt.sign({ "sub": str(r[0]["id"]) }, 2592000), "user": user_dto(r[0]) }
 
+# Portada de una pista, pública (sin token): Discord la descarga desde sus servidores.
+# Solo sirve la imagen, nunca el audio.
+get endpoint("/api/pub/cover/:id", string id):
+    if not id_valido(id) or not os.is_file("./data/tcovers/" + id + ".jpg"):
+        return status(404)
+    return send_file("./data/tcovers/" + id + ".jpg")
+
 # ─── Autenticado ─────────────────────────────────────────────────────────────
 
 group("/api"):
     require jwt.valid else status(401)
+
+    # ── invitaciones ──
+    # Cualquier usuario genera códigos de un solo uso (máx. 5 sin usar a la vez).
+    get endpoint("/invites"):
+        return await sqlite.query("select code, created_at from invites where created_by = ? and used_by is null order by created_at", yo())
+
+    post endpoint("/invites"):
+        List<Json> n = await sqlite.query("select count(*) as n from invites where created_by = ? and used_by is null", yo())
+        if int(n[0]["n"]) >= 5:
+            return { "error": "too_many" }.status(429)
+        string codigo = hash.random_hex(6)
+        await sqlite.exec("insert into invites(code, created_by) values(?, ?)", codigo, yo())
+        return { "code": codigo }.status(201)
 
     get endpoint("/me"):
         List<Json> r = await sqlite.query("select * from users where id = ?", yo())
@@ -530,6 +570,16 @@ group("/api"):
         if len(r) == 0 or not id_valido(id):
             return status(404)
         return send_file("./data/audio/" + id + "." + str(r[0]["ext"]))
+
+    # Portada de una pista que el servidor ya tiene (la sube un cliente que la conoce).
+    put endpoint("/tracks/:id/cover", string id, File cover):
+        List<Json> r = await sqlite.query("select 1 from tracks where id = ?", id)
+        if not id_valido(id) or len(r) == 0 or cover.size < 100:
+            return { "error": "invalid" }.status(400)
+        os.make_dir("data/tcovers")
+        os.remove_file("./data/tcovers/" + id + ".jpg")   # save() no sobrescribe
+        cover.save("./data/tcovers", id + ".jpg")
+        return { "ok": true }
 
     # subida: el cliente que acaba de descargar una pista la aporta al servidor
     put endpoint("/tracks/:id", string id, File audio, string title = "", string artist = "", string album = "", int duration_ms = 0, string search_norm = "", string title_norm = "", string artist_norm = "", string ext = "opus"):

@@ -32,7 +32,7 @@ android {
                 // libcurl+openssl (ver android/README.md, "Dependencies").
                 val deps = System.getProperty("user.home") + "/android-deps/arm64"
                 arguments += listOf(
-                    "-DANDROID_STL=c++_shared",
+                    "-DANDROID_STL=c++_static",          // una sola .so: la STL dentro, sin libc++_shared.so aparte
                     "-DCMAKE_BUILD_TYPE=Release",
                     "-DLUX_EXAMPLES=OFF",
                     "-DSQLITE3_INC=$deps/include",
@@ -41,10 +41,11 @@ android {
                     // -I/usr/include en la compilación cruzada y revienta
                     // el traductor ARM del emulador se atraganta con los IFUNC
                     // de las outline atomics: sin ellas, dentro y fuera
-                    "-DCMAKE_C_FLAGS=-mno-outline-atomics",
-                    "-DCMAKE_CXX_FLAGS=-mno-outline-atomics",
+                    // -ffunction/data-sections + --gc-sections/--icf: fuera el código que la app no usa
+                    "-DCMAKE_C_FLAGS=-mno-outline-atomics -ffunction-sections -fdata-sections",
+                    "-DCMAKE_CXX_FLAGS=-mno-outline-atomics -ffunction-sections -fdata-sections",
                     "-DPKG_CONFIG_EXECUTABLE=$deps/bin/pkg-config-arm64",
-                    "-DCMAKE_SHARED_LINKER_FLAGS=-L$deps/lib -lcurl -lssl -lcrypto -llog -Wl,-z,max-page-size=16384"
+                    "-DCMAKE_SHARED_LINKER_FLAGS=-L$deps/lib -lcurl -lssl -lcrypto -llog -Wl,-z,max-page-size=16384 -Wl,--gc-sections -Wl,--icf=safe"
                 )
             }
         }
@@ -61,7 +62,13 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.findByName("release")
-            isMinifyEnabled = false   // el código es una Activity y un servicio; lo pesado es nativo
+            // -Pperfil: release depurable (misma firma, conserva datos) para medir con chrome://inspect
+            isDebuggable = project.hasProperty("perfil")
+            // R8: casi todo classes.dex era la stdlib de Kotlin sin usar. Las reglas por defecto ya
+            // conservan los métodos @JavascriptInterface (AndroidBridge) y los `external` (JNI).
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
         }
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }

@@ -711,7 +711,7 @@ fn bool hay_binario(string nombre):
 fn Json? ffprobe_info(string ruta):
     if not ffprobe_disponible():
         return null
-    Json r = await os.run("ffprobe", ["-v", "error", "-show_entries", "format=duration,format_name:stream=codec_name", "-of", "json", ruta])
+    Json r = await os.run("ffprobe", ["-v", "error", "-show_entries", "format=duration,format_name:format_tags:stream=codec_name", "-of", "json", ruta])
     if jint(r["status"], 1) != 0:
         return null
     return parse_json(jstr(r["stdout"], ""))

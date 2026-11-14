@@ -29,6 +29,17 @@ foreach(_m imap mailparse keyring otp zip csv)
 endforeach()
 add_subdirectory(vendor/lux)
 
+# Android's NDK libc++ has no C++20 time zone database (lux_script/tz.hpp): Howard Hinnant's
+# date/tz library stands in for the `time` module. Localify no usa zonas con nombre, así que no
+# lleva los ficheros IANA (set_install): un nombre de zona fallaría en el móvil, los offsets fijos no.
+if(ANDROID)
+    add_library(date_tz STATIC third_party/date/src/tz.cpp)
+    target_include_directories(date_tz PUBLIC third_party/date/include)
+    target_compile_definitions(date_tz PUBLIC USE_OS_TZDB=0 HAS_REMOTE_API=0 AUTO_DOWNLOAD=0)
+    target_compile_definitions(date_tz PRIVATE INSTALL=.)
+    target_link_libraries(lux_script PRIVATE date_tz)
+endif()
+
 # ── Android: no window, no GTK -- the Kotlin Activity (android/) owns a
 # WebView and loads libluxapp.so, which only runs the Lux server. Gradle
 # drives this very file through externalNativeBuild; see android/README.md.
@@ -61,7 +72,7 @@ if(ANDROID)
     find_package(Threads REQUIRED)
     target_link_libraries(luxapp PRIVATE
         -Wl,--whole-archive lux_script -Wl,--no-whole-archive
-        lux Threads::Threads log)
+        lux date_tz Threads::Threads log)
     return()
 endif()
 

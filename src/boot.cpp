@@ -33,12 +33,31 @@ namespace {
 std::atomic<int> g_arrancando{0};
 
 void extract_resources(const fs::path& dir) {
+    // Solo si cambiaron (huella FNV-1a de rutas y contenido): reescribirlos en cada arranque
+    // costaba tiempo y cambiaba sus fechas, con lo que el ETag de los estáticos cambiaba y el
+    // WebView volvía a descargarlos todos en vez de revalidar su caché.
+    uint64_t h = 1469598103934665603ULL;
+    auto mezcla = [&h](const void* p, size_t n) {
+        for (const auto* b = static_cast<const unsigned char*>(p); n--; ++b) h = (h ^ *b) * 1099511628211ULL;
+    };
+    for (const auto& f : kEmbeddedFiles) {
+        mezcla(f.path, std::strlen(f.path));
+        mezcla(f.data, f.size);
+    }
+    const std::string huella = std::to_string(h);
+    const fs::path marca = dir / ".recursos";
+    {
+        std::ifstream in(marca);
+        std::string previa;
+        if (in && std::getline(in, previa) && previa == huella) return;
+    }
     for (const auto& f : kEmbeddedFiles) {
         fs::path dest = dir / f.path;
         fs::create_directories(dest.parent_path());
         std::ofstream out(dest, std::ios::binary);
         out.write(reinterpret_cast<const char*>(f.data), static_cast<std::streamsize>(f.size));
     }
+    std::ofstream(marca) << huella << '\n';   // al final: un arranque cortado a medias vuelve a extraer
 }
 
 // Binds to loopback with port 0 (the OS picks a free ephemeral port), reads
@@ -46,11 +65,17 @@ void extract_resources(const fs::path& dir) {
 // (something else could grab the same port before Lux's own bind) is the
 // same trade-off every "find a free port" helper makes; fine for an app
 // that only ever talks to itself.
-uint16_t find_free_port() {
+uint16_t find_free_port(uint16_t preferido = 0) {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) throw std::runtime_error("socket: " + std::string(std::strerror(errno)));
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(preferido);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (preferido != 0 && ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+        ::close(fd);
+        return preferido;
+    }
     addr.sin_port        = 0;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
@@ -85,6 +110,8 @@ bool wait_for_server(uint16_t port, std::chrono::milliseconds timeout) {
 } // namespace
 
 LuxServer::LuxServer(const fs::path& work_dir) {
+    const auto t0 = std::chrono::steady_clock::now();
+    auto ms = [t0] { return static_cast<long>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count()); };
     // Antes que el bundle de certificados: en una instalación limpia la carpeta aún no
     // existe, el PEM no se podía escribir y TODO https fallaba hasta el segundo arranque.
     fs::create_directories(work_dir);
@@ -93,19 +120,27 @@ LuxServer::LuxServer(const fs::path& work_dir) {
     // hash antiguo de OpenSSL 1.0) no sirve de CAPATH a OpenSSL 3: se junta en
     // un solo PEM, que el módulo http de Lux usa como CAINFO.
     {
+        // Se rehace solo si falta o el almacén del sistema es más nuevo (una actualización de
+        // Android): leer ~150 ficheros en cada arranque retrasaba la apertura.
+        const fs::path cas = "/apex/com.android.conscrypt/cacerts";
         fs::path bundle = work_dir / "cacert.pem";
-        std::ofstream out(bundle, std::ios::binary);
-        std::error_code ec;
-        for (const auto& e : fs::directory_iterator("/apex/com.android.conscrypt/cacerts", ec)) {
-            std::ifstream in(e.path(), std::ios::binary);
-            out << in.rdbuf() << '\n';
+        std::error_code ec, ec2;
+        const bool vigente = fs::file_size(bundle, ec) > 0 && !ec &&
+                             fs::last_write_time(bundle, ec) >= fs::last_write_time(cas, ec2) && !ec && !ec2;
+        if (!vigente) {
+            std::ofstream out(bundle, std::ios::binary);
+            for (const auto& e : fs::directory_iterator(cas, ec)) {
+                std::ifstream in(e.path(), std::ios::binary);
+                out << in.rdbuf() << '\n';
+            }
         }
-        out.close();
         ::setenv("LUX_CA_BUNDLE", bundle.c_str(), 1);
     }
 #endif
     fs::create_directories(work_dir);
+    BOOTLOG("arranque: certificados %ld ms", ms());
     extract_resources(work_dir);
+    BOOTLOG("arranque: recursos %ld ms", ms());
     fs::current_path(work_dir); // the app's own paths (templates "./templates",
                                  // static "/x" -> "./public") are written
                                  // relative to itself, so this is the CWD
@@ -118,6 +153,7 @@ LuxServer::LuxServer(const fs::path& work_dir) {
     lux_script::DiagnosticBag diags;
     mod_ = lux_script::compile(inputs, diags);
     if (!diags.empty()) throw std::runtime_error(lux_script::format_errors(diags, mod_->files));
+    BOOTLOG("arranque: compilado %ld ms", ms());
 
     auto mod = mod_;
     // (sin set_templates: esta versión vendida de Lux no la tiene y la app no
@@ -239,7 +275,16 @@ LuxServer::LuxServer(const fs::path& work_dir) {
 }
 
 uint16_t LuxServer::start() {
-    uint16_t port = find_free_port();
+    // El mismo puerto que la última vez (si sigue libre): el origen del WebView no cambia, así
+    // que su caché HTTP y su localStorage sobreviven entre arranques. CWD = work_dir.
+    uint16_t previo = 0;
+    {
+        std::ifstream in("port");
+        unsigned v = 0;
+        if (in >> v && v > 1024 && v < 65536) previo = static_cast<uint16_t>(v);
+    }
+    uint16_t port = find_free_port(previo);
+    if (port != previo) std::ofstream("port") << port << '\n';
     thread_ = std::thread([this, port] { app_.run("127.0.0.1", port); });
     if (!wait_for_server(port, std::chrono::milliseconds(5000)))
         lux::log().warn("server did not come up in time, continuing anyway");

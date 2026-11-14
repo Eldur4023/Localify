@@ -3,6 +3,8 @@ import { alCambiarIdioma, t } from "../i18n/index.js";
 import { alRecibirTipo } from "../ipc/events.js";
 import { mountTrackList } from "../ui/track-list.js";
 import { nodo } from "../ui/dom.js";
+import { editarPista } from "../ui/editar-pista.js";
+import { mostrarError } from "../ui/error-overlay.js";
 const POR_PAGINA = 100;
 /** Ordenaciones ofrecidas, con su clave de traducción. */
 const ORDENES = [
@@ -39,7 +41,58 @@ export function mountLibraryView(contenedor) {
 		opt.value = o.valor;
 		orden.append(opt);
 	}
-	controles.append(orden);
+	// Añadir canciones propias, de una o de muchas: selector múltiple o arrastrar
+	// ficheros a la vista. Se suben y se abre el editor una tras otra; lo vacío
+	// de cada una hereda artista/álbum/fecha de la anterior (útil para un disco).
+	const anadir = nodo("button", "boton");
+	anadir.type = "button";
+	const selector = document.createElement("input");
+	selector.type = "file";
+	selector.multiple = true;
+	selector.accept = "audio/*,.mp3,.flac,.ogg,.opus,.m4a,.wav,.aac";
+	selector.hidden = true;
+	let ocupado = false;
+	async function anadirArchivos(archivos) {
+		const audios = [...archivos].filter((f) => f.type.startsWith("audio/") || /\.(mp3|flac|ogg|opus|m4a|wav|aac|wma)$/i.test(f.name));
+		if (audios.length === 0 || ocupado) return;
+		ocupado = true;
+		anadir.disabled = true;
+		const ids = [];
+		try {
+			for (const [i, f] of audios.entries()) {
+				anadir.textContent = `${t("common.loading")} ${i + 1}/${audios.length}`;
+				const informe = await library.uploadImport(f);
+				ids.push(...informe.trackIds ?? []);
+			}
+			if (ids.length === 0) mostrarError(t("settings.import_failed"), "");
+			let previo = null;
+			for (const [i, id] of ids.entries()) {
+				const r = await editarPista(id, {
+					indice: i + 1,
+					total: ids.length,
+					previo
+				});
+				if (r) previo = r;
+			}
+		} catch (e) {
+			mostrarError(t("settings.import_failed"), String(e));
+		}
+		ocupado = false;
+		anadir.disabled = false;
+		anadir.textContent = t("library.add");
+	}
+	anadir.addEventListener("click", () => selector.click());
+	selector.addEventListener("change", () => {
+		const elegidos = [...selector.files ?? []];
+		selector.value = "";
+		void anadirArchivos(elegidos);
+	});
+	el.addEventListener("dragover", (e) => e.preventDefault());
+	el.addEventListener("drop", (e) => {
+		e.preventDefault();
+		void anadirArchivos(e.dataTransfer?.files ?? []);
+	});
+	controles.append(anadir, selector, orden);
 	cabecera.append(titulo, cuenta, controles);
 	const cuerpo = nodo("div", "vista__body");
 	// Recién instalada, esta es la primera pantalla que se ve, y era una lista
@@ -97,6 +150,7 @@ export function mountLibraryView(contenedor) {
 	}
 	function etiquetas() {
 		titulo.textContent = t("library.title");
+		if (!ocupado) anadir.textContent = t("library.add");
 		vacio.textContent = t("library.empty");
 		for (const [i, o] of ORDENES.entries()) {
 			const opt = orden.options.item(i);

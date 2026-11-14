@@ -241,9 +241,16 @@ fn string portada_publica(string track_id):
     if len(f) > 0:
         url = jstr(f[0]["u"], "")
     if url == "":
+        url = srv_portada_url(track_id)   # pista local: su portada servida por el servidor
+    if url == "":
         string yid = youtube_id_de_pista(track_id)
         if yid != "":
             url = url_miniatura_video(yid).replace("/maxresdefault.jpg", "/hq720.jpg")   # sin 404 posible de fallback: va a Discord/MPRIS tal cual
+        else:
+            # pista local (sin álbum ni vídeo): carátula del mejor resultado en YouTube Music
+            string? b = portada_por_busqueda(track_id)
+            if b != null:
+                url = b
     state.set(k, url == "" ? "-" : url)
     return url
 

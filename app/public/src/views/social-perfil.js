@@ -348,6 +348,22 @@ export function crearPerfil(ctx) {
 		cn.append(acciones, avisoPull, progreso);
 		return [sp, sn];
 	}
+	function tarjetaInvitaciones() {
+		const { s, cuerpo } = tarjeta(t("social.invites"), "settings");
+		cuerpo.append(nodo("p", "social__sub", t("social.invites_help")));
+		const lista = nodo("div", "social__acciones");
+		const aviso = nodo("p", "ajustes__ayuda ajustes__ayuda--aviso");
+		const pintarCodigos = async () => {
+			lista.replaceChildren();
+			for (const c of await social.invites()) lista.append(nodo("code", "", c.code));
+		};
+		void pintarCodigos().catch(() => {});
+		cuerpo.append(lista, aviso, boton(t("social.invite_new"), "boton--sutil", async () => {
+			await social.createInvite();
+			await pintarCodigos();
+		}, aviso));
+		return s;
+	}
 	function tarjetaSesion(u) {
 		const { s, cuerpo } = tarjeta(t("social.session"), "settings");
 		cuerpo.append(nodo("p", "social__sub", `@${u.username} · ${ctx.estado.host}:${ctx.estado.port}`));
@@ -369,7 +385,7 @@ export function crearPerfil(ctx) {
 		const principal = nodo("div", "perfil__principal");
 		const lateral = nodo("aside", "perfil__lateral");
 		escaparate(principal, u, true);
-		lateral.append(await tarjetaSincronizacion(), ...tarjetaPrivacidadYNube(), tarjetaSesion(u));
+		lateral.append(await tarjetaSincronizacion(), ...tarjetaPrivacidadYNube(), tarjetaInvitaciones(), tarjetaSesion(u));
 		rejilla.append(principal, lateral);
 		panel.append(rejilla);
 	}

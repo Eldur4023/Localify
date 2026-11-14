@@ -140,6 +140,8 @@ export function mountSocialView(contenedor, ruta) {
 		const usuario = campoTexto(t("social.username"), estado.username);
 		usuario.input.autocapitalize = "none";
 		const clave = campoTexto(t("social.password"), "", "password");
+		const invitacion = campoTexto(t("social.invite_code"), "");
+		invitacion.input.autocapitalize = "none";
 		const aviso = nodo("p", "ajustes__ayuda ajustes__ayuda--aviso");
 		const acceder = (registro) => async () => {
 			// "ip" o "ip:puerto"; sin puerto, el de siempre
@@ -152,7 +154,7 @@ export function mountSocialView(contenedor, ruta) {
 				return;
 			}
 			const u = usuario.input.value.trim();
-			if (registro) await social.register(u, clave.input.value, u);
+			if (registro) await social.register(u, clave.input.value, u, invitacion.input.value);
 			else await social.login(u, clave.input.value);
 			// Al entrar con mi usuario se trae lo que tengo guardado en el servidor
 			avisoNube = t("social.pulling");
@@ -167,7 +169,7 @@ export function mountSocialView(contenedor, ruta) {
 				aviso.textContent = textoDeError(x);
 			});
 		});
-		cuerpo.append(servidor.fila, usuario.fila, clave.fila, aviso, acciones);
+		cuerpo.append(servidor.fila, usuario.fila, clave.fila, invitacion.fila, aviso, acciones);
 		panel.append(s);
 	}
 	// ── Pestañas con sesión ─────────────────────────────────────────────────

@@ -12,7 +12,9 @@
 # ─── Conexión ────────────────────────────────────────────────────────────────
 
 fn string srv_base():
-    return "http://" + ajuste("server_host", "") + ":" + ajuste("server_port", "8787") + "/api"
+    # server_tls = "1": el servidor habla HTTPS (Lux con tls:); Discord solo carga portadas por HTTPS
+    string esquema = ajuste("server_tls", "") == "1" ? "https" : "http"
+    return esquema + "://" + ajuste("server_host", "") + ":" + ajuste("server_port", "8787") + "/api"
 
 # Hay servidor configurado y sesión iniciada
 fn bool srv_sesion():
@@ -99,6 +101,30 @@ fn string srv_id_de(string tid):
     if r == null or r["status"] != 200 or len(jlist(r["body"])) == 0:
         return ""
     return jstr(r["body"][0]["serverId"], "")
+
+# URL pública de la portada de una pista que el servidor tiene (para Discord).
+# Si el servidor aún no tiene portada y aquí hay una propia (incrustada o
+# puesta a mano), se sube. "" si no hay servidor, pista o portada.
+fn string srv_portada_url(string tid):
+    if not srv_activo():
+        return ""
+    string sid = srv_id_de(tid)
+    if sid == "":
+        return ""
+    string url = srv_base() + "/pub/cover/" + sid
+    try:
+        Json r = await http.get(url, {}, { "timeout_ms": 4000 })
+        if jint(r["status"], 0) == 200:
+            return url
+        string propia = os.path_join(covers_dir(), "usercover-" + tid + ".jpg")
+        if jint(r["status"], 0) == 404 and os.is_file(propia):
+            Dict<string, string> cab = { "Authorization": "Bearer " + ajuste("server_token", "") }
+            Json u = await http.put(srv_base() + "/tracks/" + sid + "/cover", { "k": "1" }, cab, { "files": { "cover": propia }, "timeout_ms": 30000 })
+            if jint(u["status"], 0) < 300:
+                return url
+    catch e:
+        return ""
+    return ""
 
 # Descarga la pista del servidor al temporal del trabajo y lo deja en
 # 'finalizing'. false = el servidor no la tiene (o no hay servidor): seguir con

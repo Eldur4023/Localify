@@ -13,9 +13,13 @@ ok "sin token" "$(curl -s -o /dev/null -w %{http_code} $B/me)" 401
 ok "pass corta" "$(j POST '{"username":"ana","password":"x"}' $B/register)" 400
 R=$(j POST '{"username":"ana","password":"secreto123","displayName":"Ana"}' $B/register); ok registro "$R" '201'
 TA=$(sed 's/.*"token":"\([^"]*\)".*/\1/' <<<"$R")
-ok "usuario repetido" "$(j POST '{"username":"ANA","password":"secreto123"}' $B/register)" 409
+inv() { curl -s -X POST -H "Authorization: Bearer $TA" $B/invites | sed 's/.*"code":"\([^"]*\)".*/\1/'; }
+ok "sin código de invitación no se registra" "$(j POST '{"username":"zed","password":"secreto123"}' $B/register)" 403
+ok "usuario repetido" "$(j POST "{\"username\":\"ANA\",\"password\":\"secreto123\",\"inviteCode\":\"$(inv)\"}" $B/register)" 409
+CI=$(inv); ok "código válido registra" "$(j POST "{\"username\":\"zed\",\"password\":\"secreto123\",\"inviteCode\":\"$CI\"}" $B/register)" 201
+ok "un código no se reutiliza" "$(j POST "{\"username\":\"zed2\",\"password\":\"secreto123\",\"inviteCode\":\"$CI\"}" $B/register)" 403
 ok "login mal" "$(j POST '{"username":"ana","password":"nope"}' $B/login)" 401
-TB=$(sed 's/.*"token":"\([^"]*\)".*/\1/' <<<"$(j POST '{"username":"bob","password":"secreto123"}' $B/register)")
+TB=$(sed 's/.*"token":"\([^"]*\)".*/\1/' <<<"$(j POST "{\"username\":\"bob\",\"password\":\"secreto123\",\"inviteCode\":\"$(inv)\"}" $B/register)")
 T=$TA; ok me "$(curl -s -H "Authorization: Bearer $T" $B/me)" '"username":"ana"'
 ok "editar perfil" "$(j PUT '{"displayName":"Ana G","bio":"hola"}' $B/me)" 'Ana G'
 head -c 20000 /dev/urandom > "$W/a.opus"
@@ -113,7 +117,7 @@ ok "invitado: no la hace pública" "$(j PUT '{"visibility":"public"}' $B/playlis
 T=$TA; D=$(curl -s -H "Authorization: Bearer $T" $B/playlists/$PV)
 ok "sigue llamándose igual" "$D" '"name":"Privada"'
 ok "sigue siendo privada" "$D" '"visibility":"private"'
-TC=$(sed 's/.*"token":"\([^"]*\)".*/\1/' <<<"$(j POST '{"username":"carol","password":"secreto123"}' $B/register)")
+TC=$(sed 's/.*"token":"\([^"]*\)".*/\1/' <<<"$(j POST "{\"username\":\"carol\",\"password\":\"secreto123\",\"inviteCode\":\"$(inv)\"}" $B/register)")
 ok "carol recibe invitación" "$(j POST '{"username":"carol"}' $B/playlists/$PV/members)" 204
 ok "carol la rechaza" "$(curl -s -o /dev/null -w %{http_code} -X DELETE -H "Authorization: Bearer $TC" $B/playlists/$PV/invitation)" 204
 ok "rechazada: ya no está en sus invitaciones" "$(curl -s -H "Authorization: Bearer $TC" $B/invitations)" '[]'

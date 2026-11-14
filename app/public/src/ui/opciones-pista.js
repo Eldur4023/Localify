@@ -1,6 +1,7 @@
 import { library, playlists, player, queue } from "../ipc/client.js";
 import { t } from "../i18n/index.js";
 import { confirmar, pedirTexto } from "./dialogo.js";
+import { editarPista } from "./editar-pista.js";
 import { elegirCandidato } from "./reasignar-metadatos.js";
 /** Longitud máxima del nombre de una playlist, la misma que acepta el backend. */
 const MAX_NOMBRE = 100;
@@ -151,6 +152,14 @@ export function opcionesDePista(pista, ctx) {
 	// descargada: un fichero importado sin etiquetas o un emparejamiento
 	// equivocado son casos igual de válidos para una pista que nunca se ha
 	// bajado.
+	menu.push({
+		clave: "edit_metadata",
+		separar: true,
+		etiqueta: t("menu.edit_metadata"),
+		ejecutar: async () => {
+			if (await editarPista(pista.id)) ctx.alCambiar?.();
+		}
+	});
 	menu.push({
 		clave: "reassign_metadata",
 		separar: true,

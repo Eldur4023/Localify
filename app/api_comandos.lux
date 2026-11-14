@@ -350,6 +350,7 @@ fn Json cmd_importar_ficheros(Json args):
     int elegidos = len(rutas)
     int importadas = 0
     int ilegibles = 0
+    List<string> ids_nuevos = []
     garantizar_biblioteca()
     for int i in range(0, len(rutas)):
         string ruta = rutas[i]
@@ -366,9 +367,11 @@ fn Json cmd_importar_ficheros(Json args):
             List<Json> streams = jlist(jget(info, "streams"))
             if len(streams) > 0:
                 codec = jstr(streams[0]["codec_name"], "")
-        if tags == null or dur <= 0.0:
+        if dur <= 0.0:
             ilegibles = ilegibles + 1
             continue
+        if tags == null:
+            tags = {}
         string titulo = jstr(tags["title"], "")
         if titulo == "":
             titulo = os.path_basename(ruta)
@@ -391,6 +394,7 @@ fn Json cmd_importar_ficheros(Json args):
         if ruta != destino:
             await os.copy_file(ruta, destino, true)
         string album_id = ""
+        string artista_id = ""
         if album != "":
             album_id = "local_al_" + hash.sha256(album + "|" + artista).slice(0, 20)
             await sqlite.exec("""
@@ -403,21 +407,98 @@ fn Json cmd_importar_ficheros(Json args):
                     insert or ignore into artists(id, name, name_norm, metadata_at) values(?, ?, ?, unixepoch())
                     """, aid, artista, normalizar(artista))
                 await sqlite.exec("insert or ignore into album_artists(album_id, artist_id, position) values(?, ?, 0)", album_id, aid)
-                await sqlite.exec("insert or ignore into track_artists(track_id, artist_id, position) values(?, ?, 0)", tid, aid)
+                artista_id = aid
         await sqlite.exec("""
             insert into tracks(id, title, title_norm, album_id, duration_ms, track_number, artist_display, artist_norm, metadata_locked, metadata_at, added_at)
             values(?, ?, ?, ?, ?, ?, ?, ?, 1, unixepoch(), unixepoch())
             on conflict(id) do nothing
             """, tid, titulo, normalizar(titulo), album_id == "" ? null : album_id,
             int(dur * 1000.0), pista_num == 0 ? null : pista_num, artista, normalizar(artista))
+        if artista_id != "":
+            await sqlite.exec("insert or ignore into track_artists(track_id, artist_id, position) values(?, ?, 0)", tid, artista_id)
         await sqlite.exec("""
             insert or ignore into audio_files(track_id, rel_path, format, codec, size_bytes, duration_ms, source, verified_at)
             values(?, ?, ?, ?, ?, ?, 'imported', unixepoch())
             """, tid, "audio/" + shard + "/" + tid + "." + ext, ext, codec,
             os.file_size(destino), int(dur * 1000.0))
+        # portada incrustada en el fichero (si la hay) como portada de la pista
+        string propia = os.path_join(covers_dir(), "usercover-" + tid + ".jpg")
+        if not os.is_file(propia):
+            await os.run("ffmpeg", ["-v", "error", "-y", "-i", destino, "-an", "-map", "0:v:0", "-frames:v", "1", propia])
         importadas = importadas + 1
+        ids_nuevos.add(tid)
     tocar_biblioteca()
-    return { "filesSelected": elegidos, "imported": importadas, "skippedUnreadable": ilegibles }
+    return { "filesSelected": elegidos, "imported": importadas, "skippedUnreadable": ilegibles, "trackIds": ids_nuevos }
+
+# Subida desde el navegador (selector múltiple / arrastrar y soltar): el fichero va a
+# .tmp, se importa como cualquier otro y el temporal se borra (import copia el audio).
+post endpoint("/api/import/upload", File audio):
+    garantizar_biblioteca()
+    string d = os.path_join(biblioteca_raiz(), ".tmp")
+    string nombre = audio.save(d)
+    if nombre == "":
+        return status(500)
+    string tmp = os.path_join(d, nombre)
+    Json r = await cmd_importar_ficheros({ "paths": [tmp] })
+    os.remove_file(tmp)
+    return r
+
+# ─── Edición manual de una pista (propia o no) ──────────────────────────────
+
+fn Json cmd_meta_pista(string tid):
+    List<Json> f = await sqlite.query("""
+        select t.title, t.artist_display as artist, coalesce(al.title, '') as album,
+               t.track_number, coalesce(al.release_date, '') as date
+        from tracks t left join albums al on al.id = t.album_id where t.id = ?""", tid)
+    if len(f) == 0:
+        return error_api("NOT_FOUND", "error.invalid").status(404)
+    return { "title": f[0]["title"], "artist": f[0]["artist"], "album": f[0]["album"],
+             "trackNumber": jint(f[0]["track_number"], 0), "date": f[0]["date"],
+             "hasCover": os.is_file(os.path_join(covers_dir(), "usercover-" + tid + ".jpg")) }
+
+# Guarda título/artista/álbum/nº/fecha/portada y, si la pista tiene audio y el
+# servidor está activo con subida permitida, la aporta al servidor.
+fn Json cmd_actualizar_pista(Json args):
+    string tid = arg_str(args, "trackId", "")
+    string titulo = arg_str(args, "title", "").trim()
+    string artista = arg_str(args, "artist", "").trim()
+    string album = arg_str(args, "album", "").trim()
+    string fecha = arg_str(args, "date", "").trim()
+    int num = jint(jget(args, "trackNumber"), 0)
+    string imagen = arg_str(args, "imagePath", "")
+    if tid == "" or titulo == "":
+        return error_api("INVALID", "error.invalid").status(400)
+    string album_id = ""
+    if album != "":
+        album_id = "local_al_" + hash.sha256(album + "|" + artista).slice(0, 20)
+        await sqlite.exec("""
+            insert into albums(id, title, title_norm, release_date, metadata_at) values(?, ?, ?, ?, unixepoch())
+            on conflict(id) do update set release_date = coalesce(excluded.release_date, release_date)
+            """, album_id, album, normalizar(album), fecha == "" ? null : fecha)
+    await sqlite.exec("""
+        update tracks set title = ?, title_norm = ?, album_id = ?, track_number = ?,
+               artist_display = ?, artist_norm = ?, metadata_locked = 1, metadata_at = unixepoch()
+        where id = ?""", titulo, normalizar(titulo), album_id == "" ? null : album_id, num == 0 ? null : num,
+        artista, normalizar(artista), tid)
+    await sqlite.exec("delete from track_artists where track_id = ?", tid)
+    if artista != "":
+        string aid = "local_ar_" + hash.sha256(artista).slice(0, 20)
+        await sqlite.exec("insert or ignore into artists(id, name, name_norm, metadata_at) values(?, ?, ?, unixepoch())", aid, artista, normalizar(artista))
+        await sqlite.exec("insert or ignore into track_artists(track_id, artist_id, position) values(?, ?, 0)", tid, aid)
+        if album_id != "":
+            await sqlite.exec("insert or ignore into album_artists(album_id, artist_id, position) values(?, ?, 0)", album_id, aid)
+    if jget(args, "removeCover") == true:
+        os.remove_file(os.path_join(covers_dir(), "usercover-" + tid + ".jpg"))
+    if imagen != "" and os.is_file(imagen):
+        await os.copy_file(imagen, os.path_join(covers_dir(), "usercover-" + tid + ".jpg"), true)
+    tocar_biblioteca()
+    # Subida al servidor: solo con audio en disco y si el servidor aún no la tiene.
+    List<Json> af = await sqlite.query("select rel_path, format, duration_ms from audio_files where track_id = ?", tid)
+    if len(af) > 0 and srv_activo() and ajuste("server_upload", "1") == "1" and srv_id_de(tid) == "":
+        string ruta = ruta_audio_abs(jstr(af[0]["rel_path"], ""))
+        if os.is_file(ruta) and srv_poner(tid, ruta, jstr(af[0]["format"], "opus"), titulo, artista, album, jint(af[0]["duration_ms"], 0)):
+            srv_alta(tid)
+    return null
 
 # ─── Búsqueda ────────────────────────────────────────────────────────────────
 

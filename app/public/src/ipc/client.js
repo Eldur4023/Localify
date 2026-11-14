@@ -130,6 +130,34 @@ export const library = {
 	pickImportFiles: () => invoke("library_pick_import_files"),
 	/** Importa los ficheros elegidos, para que convivan con lo descargado. */
 	importFiles: (paths) => invoke("library_import_files", { paths }),
+	/** Sube un fichero de audio (del selector del navegador) y lo importa. */
+	uploadImport: async (archivo) => {
+		const f = new FormData();
+		f.append("audio", archivo, archivo.name);
+		const r = await fetch("/api/import/upload", {
+			method: "POST",
+			body: f
+		});
+		if (!r.ok) throw new Error(`HTTP ${r.status}`);
+		return r.json();
+	},
+	/** Sube la portada propia de una pista (JPEG ya recortado). */
+	uploadTrackCover: async (trackId, blob) => {
+		const f = new FormData();
+		f.append("imagen", blob, "cover.jpg");
+		const r = await fetch(`/api/cover/track/${encodeURIComponent(trackId)}`, {
+			method: "POST",
+			body: f
+		});
+		if (!r.ok) throw new Error(`HTTP ${r.status}`);
+	},
+	/** Metadatos editables de una pista. */
+	trackMeta: (trackId) => invoke("library_track_meta", { trackId }),
+	/** Guarda metadatos y portada; sube la pista al servidor si procede. */
+	updateTrack: (trackId, meta) => invoke("library_update_track", {
+		trackId,
+		...meta
+	}),
 	/**
 	* Borra la pista del catálogo entero: playlists, favoritos e historial se
 	* van con ella. A diferencia de `deleteDownload`, no tiene marcha atrás
@@ -299,11 +327,14 @@ export const social = {
 		username,
 		password
 	}),
-	register: (username, password, displayName) => invoke("server_register", {
+	register: (username, password, displayName, inviteCode = "") => invoke("server_register", {
 		username,
 		password,
-		displayName
+		displayName,
+		inviteCode
 	}),
+	invites: () => invoke("server_invites"),
+	createInvite: () => invoke("server_invite_create"),
 	logout: () => invoke("server_logout"),
 	setUpload: (enabled) => invoke("server_set_upload", { enabled }),
 	setPresence: (enabled) => invoke("server_set_presence", { enabled }),

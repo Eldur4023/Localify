@@ -405,6 +405,10 @@ fn Json despachar_base(string cmd, Json args):
         return await cmd_anadir_web(args)
     if cmd == "library_assign_metadata":
         return await cmd_asignar_metadata(args)
+    if cmd == "library_track_meta":
+        return await cmd_meta_pista(arg_str(args, "trackId", ""))
+    if cmd == "library_update_track":
+        return await cmd_actualizar_pista(args)
     if cmd == "library_import_files":
         return await cmd_importar_ficheros(args)
 

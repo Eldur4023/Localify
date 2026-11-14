@@ -22,6 +22,7 @@ import json
 app:
     name      "Localify"
     host      "127.0.0.1"
+    max_body  "2GB"          # canciones propias subidas desde el navegador (>16 MB)
     templates "./templates"
     static    "/static" -> "./public"
 

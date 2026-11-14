@@ -25,7 +25,8 @@ ok "sin sesión: búsqueda funciona" "$(inv search_query '{"q":"yellow"}')" '"qu
 ok "sin sesión: no trae del servidor" "$(sqlite3 $W/app/data/localify.db "select count(*) from tracks where id='dQw4w9WgXcQ'")" 0
 ok "sin sesión: social pide login" "$(inv social_playlists)" SERVER_AUTH
 ok "sin sesión: aportar biblioteca pide login" "$(inv server_sync_library)" SERVER_AUTH
-ok "registro" "$(inv server_register '{"username":"ana","password":"secreto123","displayName":"Ana"}')" '"username":"ana"'
+CI=$(curl -s -X POST -H "Authorization: Bearer $TB" $B/invites | sed 's/.*"code":"\([^"]*\)".*/\1/')   # bob ya existe: ana entra con su invitación
+ok "registro" "$(inv server_register "{\"username\":\"ana\",\"password\":\"secreto123\",\"displayName\":\"Ana\",\"inviteCode\":\"$CI\"}")" '"username":"ana"'
 ok "estado" "$(inv server_status)" '"loggedIn":true'
 ok "búsqueda trae del servidor" "$(inv search_query '{"q":"yellow"}')" 'dQw4w9WgXcQ'
 ok "candidatos del servidor" "$(inv library_search_candidates '{"query":"coldplay yellow","limit":3}')" '"title":"Yellow"'

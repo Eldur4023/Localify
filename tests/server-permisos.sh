@@ -7,7 +7,9 @@ W=$(mktemp -d); trap 'kill $P 2>/dev/null; rm -rf "$W"' EXIT; cp $REPO/server/se
 for i in $(seq 40); do curl -sf localhost:8797/api/info >/dev/null && break; sleep 0.3; done
 B=localhost:8797/api; J='content-type: application/json'; fail=0
 chk() { if [ "$2" = "$3" ]; then echo "  ok    $1"; else echo "  FAIL  $1: got $2 want $3"; fail=1; fi; }
-tok() { curl -s -X POST -H "$J" -d "{\"username\":\"$1\",\"password\":\"secreto123\"}" $B/register | sed 's/.*"token":"\([^"]*\)".*/\1/'; }
+# el primer usuario no necesita invitación; el resto la pide a ana ($TA)
+inv() { [ -n "$TA" ] && curl -s -X POST -H "Authorization: Bearer $TA" $B/invites | sed 's/.*"code":"\([^"]*\)".*/\1/'; }
+tok() { curl -s -X POST -H "$J" -d "{\"username\":\"$1\",\"password\":\"secreto123\",\"inviteCode\":\"$(inv)\"}" $B/register | sed 's/.*"token":"\([^"]*\)".*/\1/'; }
 code() { curl -s -o /dev/null -w "%{http_code}" "$@"; }
 TA=$(tok ana); TB=$(tok bob)
 PID=$(curl -s -X POST -H "Authorization: Bearer $TA" -H "$J" -d '{"name":"P","visibility":"public"}' $B/playlists | sed 's/.*"id":\([0-9]*\).*/\1/')
