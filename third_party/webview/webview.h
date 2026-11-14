@@ -2016,7 +2016,19 @@ public:
 
     return E_NOINTERFACE;
   }
+  // Localify: deja el HRESULT del fallo en %TEMP%\localify-webview2.log (sin esto, un WebView2 que no
+  // arranca solo se ve como un cierre silencioso).
+  static void log_failure(const char *what, HRESULT res) {
+    wchar_t tmp[MAX_PATH];
+    if (!GetTempPathW(MAX_PATH, tmp)) return;
+    std::wstring path = std::wstring(tmp) + L"localify-webview2.log";
+    if (FILE *f = _wfopen(path.c_str(), L"a")) {
+      fprintf(f, "%s: HRESULT 0x%08lX\n", what, static_cast<unsigned long>(res));
+      fclose(f);
+    }
+  }
   HRESULT STDMETHODCALLTYPE Invoke(HRESULT res, ICoreWebView2Environment *env) {
+    if (FAILED(res)) log_failure("environment", res);
     if (SUCCEEDED(res)) {
       res = env->CreateCoreWebView2Controller(m_window, this);
       if (SUCCEEDED(res)) {
@@ -2029,6 +2041,7 @@ public:
   HRESULT STDMETHODCALLTYPE Invoke(HRESULT res,
                                    ICoreWebView2Controller *controller) {
     if (FAILED(res)) {
+      log_failure("controller", res);
       // See try_create_environment() regarding
       // HRESULT_FROM_WIN32(ERROR_INVALID_STATE).
       // The result is E_ABORT if the parent window has been destroyed already.

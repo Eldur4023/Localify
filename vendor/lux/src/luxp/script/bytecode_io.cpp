@@ -61,11 +61,11 @@ std::pair<int, int> stack_effect(const Instr& in) {
         case Op::Jump: return {0, 0};
         case Op::JumpIfFalse: return {1, 0};
         case Op::JumpIfFalsePeek: case Op::JumpIfTruePeek: return {1, 1};   // see verify_chunk
-        case Op::CallFunction: case Op::CallNative: case Op::CallAsync: return {argc, 1};
+        case Op::CallFunction: case Op::CallNative: return {argc, 1};
         case Op::CallMethod: return {argc + 1, 1};
         case Op::Return: return {1, 0};
         case Op::ReturnNull: return {0, 0};
-        default: return {-1, 0};   // module calls: never in a page
+        default: return {-1, 0};   // module calls and await: never in a page
     }
 }
 
@@ -118,16 +118,13 @@ bool verify_chunk(const Compiled& c, size_t fi, std::string* err) {
                     return fail(err, fi, pc, "mas argumentos que locales en la funcion llamada");
                 break;
             }
-            case Op::CallNative: case Op::CallAsync: {
+            case Op::CallNative: {
                 const int id = int(in.operand >> 8);   // already resolved by load_bytecode
                 if (id < 0) return fail(err, fi, pc, "nativa no permitida en el navegador");
                 const auto& def = lux_script::native_at(id);
                 const int argc = int(in.operand & 0xFF);
-                if (argc < def.min_args || (def.max_args >= 0 && argc > def.max_args) || !(def.fn || def.is_async))
+                if (argc < def.min_args || (def.max_args >= 0 && argc > def.max_args) || !def.fn)
                     return fail(err, fi, pc, std::string("aridad invalida para ") + def.name);
-                // A suspending native only through CallAsync, a plain one only through CallNative.
-                if (def.is_async != (in.op == Op::CallAsync))
-                    return fail(err, fi, pc, std::string("llamada sincrona/asincrona incorrecta para ") + def.name);
                 break;
             }
             default: break;
@@ -175,7 +172,7 @@ bool verify_chunk(const Compiled& c, size_t fi, std::string* err) {
 
 } // namespace
 
-Layout serialize_layout(const Compiled& c) {
+std::string serialize(const Compiled& c) {
     lux_script::BrowserProfile browser;   // native ids are the browser table's
     std::vector<std::string> names;       // native name table
     auto name_index = [&](int id) {
@@ -188,7 +185,7 @@ Layout serialize_layout(const Compiled& c) {
     for (const auto& fp : c.functions) {
         operands.emplace_back();
         for (const auto& in : fp->code)
-            operands.back().push_back((in.op == Op::CallNative || in.op == Op::CallAsync)
+            operands.back().push_back(in.op == Op::CallNative
                 ? (name_index(int(in.operand >> 8)) << 8) | (in.operand & 0xFF) : in.operand);
     }
 
@@ -227,35 +224,15 @@ Layout serialize_layout(const Compiled& c) {
     int prev = 0;
     for (int l : c.line_map) { body.sv(int64_t(l) - prev); prev = l; }
 
-    Layout l;
     Writer w;
     w.out = "LUXBC";
     w.uv(kFormat);
     w.uv(kOpCount);
     w.uv(names.size());
     for (const auto& n : names) w.str(n);
-    l.head = std::move(w.out);
-    l.strings = std::move(strings.names);
-    l.body = std::move(body.out);
-    return l;
-}
-
-std::string serialize(const Compiled& c) {
-    return assemble(serialize_layout(c), {});
-}
-
-std::string assemble(const Layout& l, const std::vector<std::pair<size_t, std::string>>& replaced) {
-    Writer w;
-    w.out.reserve(l.head.size() + l.body.size() + 16 + l.strings.size() * 8);
-    w.out = l.head;
-    w.uv(l.strings.size());
-    size_t r = 0;   // `replaced` is sorted by string index
-    for (size_t i = 0; i < l.strings.size(); ++i) {
-        if (r < replaced.size() && replaced[r].first == i) w.str(replaced[r++].second);
-        else w.str(l.strings[i]);
-    }
-    w.out += l.body;
-    return std::move(w.out);
+    w.uv(strings.names.size());
+    for (const auto& n : strings.names) w.str(n);
+    return w.out + body.out;
 }
 
 std::unique_ptr<Compiled> load_bytecode(const std::string& bytes, std::string* err) {
@@ -295,7 +272,7 @@ std::unique_ptr<Compiled> load_bytecode(const std::string& bytes, std::string* e
             const uint64_t operand = r.uv();
             if (operand > 0xFFFFFFFFull) return bad("operando fuera de rango");
             in.operand = uint32_t(operand);
-            if ((in.op == Op::CallNative || in.op == Op::CallAsync)) {
+            if (in.op == Op::CallNative) {
                 const uint32_t k = in.operand >> 8;
                 if (k >= native_ids.size()) return bad("nativa fuera de la tabla de nombres");
                 if (native_ids[k] < 0) return bad("nativa no permitida en el navegador");
@@ -351,7 +328,7 @@ Capabilities capabilities(const Compiled& c) {
     Capabilities caps;
     for (const auto& fp : c.functions)
         for (const auto& in : fp->code) {
-            if ((in.op == Op::CallNative || in.op == Op::CallAsync)) {
+            if (in.op == Op::CallNative) {
                 std::string name = lux_script::native_at(int(in.operand >> 8)).name;
                 if (name.starts_with("__")) name = name.substr(2);
                 caps.natives.insert(name);

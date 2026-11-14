@@ -58,7 +58,8 @@ inline std::string swagger_ui_html(const std::string& spec_url = "/openapi.json"
       url: ")" + escaped + R"(",
       dom_id: '#swagger-ui',
       deepLinking: true,
-      presets: [SwaggerUIBundle.presets.apis]
+      presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+      layout: "StandaloneLayout"
     });
   </script>
 </body>

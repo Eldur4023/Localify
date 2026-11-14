@@ -50,6 +50,14 @@ if(ANDROID)
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -flto=thin")
     endif()
 endif()
+# Windows no trae libsqlite3: se compila la amalgamation incluida y se le pasa a Lux rellenando de
+# antemano las variables de su find_path/find_library (como en Homeflix-Local).
+if(WIN32)
+    add_library(sqlite3_vendored STATIC third_party/sqlite/sqlite3.c)
+    target_compile_definitions(sqlite3_vendored PRIVATE SQLITE_ENABLE_FTS5 SQLITE_THREADSAFE=1 SQLITE_OMIT_LOAD_EXTENSION)
+    set(SQLITE3_INC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite CACHE PATH "" FORCE)
+    set(SQLITE3_LIB sqlite3_vendored CACHE STRING "" FORCE)
+endif()
 add_subdirectory(vendor/lux)
 
 # ── Android: no window, no GTK -- the Kotlin Activity (android/) owns a
@@ -146,8 +154,18 @@ else()
 endif()
 
 # ── respack: embeds an app's source directory into a generated .cpp ─────────
-add_executable(respack tools/respack/respack.cpp)
-target_include_directories(respack PRIVATE include)
+# respack corre en la máquina de compilación: en una cruzada a Windows (MinGW) se pasa el del host
+# con -DLUX_HOST_RESPACK=<ruta> (compilar antes la versión Linux).
+if(WIN32 AND CMAKE_CROSSCOMPILING)
+    if(NOT LUX_HOST_RESPACK)
+        message(FATAL_ERROR "Cruzada a Windows: pasa -DLUX_HOST_RESPACK=<ruta al respack del host>")
+    endif()
+    add_executable(respack IMPORTED)
+    set_target_properties(respack PROPERTIES IMPORTED_LOCATION ${LUX_HOST_RESPACK})
+else()
+    add_executable(respack tools/respack/respack.cpp)
+    target_include_directories(respack PRIVATE include)
+endif()
 
 # Shared by every target that embeds the Lux runtime + native window
 # (the packaged `app` binary below and the live `app-dev` one).

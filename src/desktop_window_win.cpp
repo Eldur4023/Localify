@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <stdexcept>
 #include <iterator>
 #include <vector>
 
@@ -60,6 +61,11 @@ HICON load_icon(const std::string& path) {
 
 DesktopWindow::DesktopWindow(Options opts) {
     auto w = webview_create(opts.devtools ? 1 : 0, nullptr);
+    if (!w) {
+        MessageBoxW(nullptr, L"No se pudo iniciar la ventana (WebView2). Instala o repara el runtime de WebView2 de Microsoft "
+                             L"y vuelve a abrir Localify.", L"Localify", MB_OK | MB_ICONERROR);
+        throw std::runtime_error("webview_create failed: WebView2 could not be initialised");
+    }
     webview_set_title(w, opts.title.c_str());
     webview_set_size(w, opts.width, opts.height,
                       opts.resizable ? WEBVIEW_HINT_NONE : WEBVIEW_HINT_FIXED);

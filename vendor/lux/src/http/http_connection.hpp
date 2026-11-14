@@ -10,27 +10,13 @@
 #include "../../include/lux/types.hpp"
 #include "../../include/lux/cancel.hpp"
 
-struct ssl_st;   // OpenSSL's SSL and BIO, only used with LUX_TLS
-struct bio_st;
-
 namespace lux::http {
-
-// The textual IP of a socket address, "" for a family other than IPv4/IPv6.
-inline std::string peer_ip_of(const sockaddr_storage& ss) {
-    char buf[INET6_ADDRSTRLEN]{};
-    if (ss.ss_family == AF_INET)
-        inet_ntop(AF_INET, &reinterpret_cast<const sockaddr_in*>(&ss)->sin_addr, buf, sizeof buf);
-    else if (ss.ss_family == AF_INET6)
-        inet_ntop(AF_INET6, &reinterpret_cast<const sockaddr_in6*>(&ss)->sin6_addr, buf, sizeof buf);
-    return buf;
-}
 
 class HttpConnection : public std::enable_shared_from_this<HttpConnection> {
 public:
     HttpConnection(int fd, core::EventLoop& loop, lux::DispatchFn dispatch,
                    std::shared_ptr<std::atomic<int>> conn_count = nullptr,
-                   std::shared_ptr<std::atomic<int>> loop_count = nullptr,
-                   std::string peer_ip = {});   // from accept(): saves the getpeername(2) on the first request
+                   std::shared_ptr<std::atomic<int>> loop_count = nullptr);
     ~HttpConnection();
 
     void start();
@@ -53,20 +39,6 @@ private:
     bool               draining_       = false;   // begin_shutdown() was called: no more keep-alive
     // What epoll is watching: re-arming the same thing after every response
     // was an epoll_ctl per request for nothing.
-    // HTTPS (LUX_TLS, lux::tls::init): every socket I/O goes through io_read()/
-    // io_write(), which behave like read(2)/write(2) -- a TLS "want read/write"
-    // is EAGAIN -- so the callers do not care which one they have. null = plain.
-    ssl_st*            ssl_            = nullptr;
-    bio_st*            tls_in_         = nullptr;  // ciphertext read off the socket, for OpenSSL (owned by ssl_)
-    bool               tls_want_out_   = false;  // the handshake needs EPOLLOUT, not a response
-    bool               tls_drained_    = false;  // the last socket read was short: empty until the next edge
-    bool    corked_         = false;  // TCP_CORK while a TLS file response goes out
-    void    cork(bool on);
-    ssize_t io_read(void* buf, size_t n);
-    ssize_t io_write(const void* buf, size_t n);
-    ssize_t tls_ret(int r, bool reading);
-    bool    drain();   // writes write_buf_ out: true = all sent, false = blocked or closed
-    void    free_tls();
     uint32_t           armed_          = EPOLLIN;   // as tcp_server adds it
     void arm(uint32_t events) {
         if (events == armed_) return;

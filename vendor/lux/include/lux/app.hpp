@@ -107,8 +107,6 @@ public:
     //
     //   app.ws("/chat", handler, {.allowed_origins = {"https://app.example.com"}});
     //
-    // {"*"} explicitly allows any origin (no warning: it is an opt-in).
-    //
     // If allowed_origins is empty (default) the check is skipped — only safe
     // for unauthenticated public endpoints.
     struct WSOptions {
@@ -144,7 +142,7 @@ public:
                 bool ok = false;
                 if (origin) {
                     for (const auto& o : opts.allowed_origins) {
-                        if (o == "*" || o == *origin) { ok = true; break; }
+                        if (o == *origin) { ok = true; break; }
                     }
                 }
                 if (!ok) {

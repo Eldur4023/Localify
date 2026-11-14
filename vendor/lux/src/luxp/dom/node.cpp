@@ -6,8 +6,6 @@
 
 namespace luxium::dom {
 
-ImeState g_ime;
-
 Node& Node::append(std::unique_ptr<Node> child) {
     child->parent = this;
     children.push_back(std::move(child));
