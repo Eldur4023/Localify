@@ -36,7 +36,7 @@ on start:
     os.make_dir("data/audio")
     await sqlite.exec("""
         create table if not exists users(
-            id integer primary key,
+            id integer primary key autoincrement,
             username text not null unique collate nocase,
             display_name text not null,
             bio text not null default '',
