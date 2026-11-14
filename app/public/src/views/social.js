@@ -18,6 +18,7 @@ export function mountSocialView(contenedor, ruta) {
 	contenedor.replaceChildren(el);
 	let estado = null;
 	let pestaña = "users";
+	let rutaAplicada = null;
 	let destruida = false;
 	/** Resultado de la última descarga de la nube, para enseñarlo arriba. */
 	let avisoNube = "";
@@ -396,9 +397,14 @@ export function mountSocialView(contenedor, ruta) {
 			else if (ruta.params[0] === "user" && ruta.params[1] && decodeURIComponent(ruta.params[1]) !== estado.username) await pintarUsuario(panel, ruta.params[1]);
 			else if (ruta.params[0] === "playlist" && ruta.params[1]) await pintarPlaylist(panel, ruta.params[1]);
 			else {
-				// entrar en mi propio usuario (desde cualquier enlace) abre Mi perfil
-				if (ruta.params[0] === "playlists" || ruta.params[0] === "me") pestaña = ruta.params[0];
-				else if (ruta.params[0] === "user") pestaña = "me";
+				// entrar en mi propio usuario (desde cualquier enlace) abre Mi perfil. Solo al CAMBIAR de ruta:
+				// en cada repintado pisaría la pestaña que el usuario acaba de pulsar (no se podía salir de Perfil).
+				const clave = ruta.params.join("/");
+				if (clave !== rutaAplicada) {
+					rutaAplicada = clave;
+					if (ruta.params[0] === "playlists" || ruta.params[0] === "me") pestaña = ruta.params[0];
+					else if (ruta.params[0] === "user") pestaña = "me";
+				}
 				if (avisoNube) panel.append(nodo("p", "ajustes__ayuda", avisoNube));
 				const invitaciones = await dato("invitations", () => social.invitations());
 				pintarInvitaciones(panel, invitaciones);
