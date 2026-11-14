@@ -49,6 +49,12 @@ class MainActivity : Activity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Un cierre al abrir no deja rastro en el móvil: se guarda el error y se enseña en el siguiente arranque.
+        val previo = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            try { File(filesDir, "crash.txt").writeText("Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}), ${Build.MANUFACTURER} ${Build.MODEL}, ABI ${Build.SUPPORTED_ABIS.joinToString()}\n${t.name}: ${e.stackTraceToString()}") } catch (_: Throwable) {}
+            previo?.uncaughtException(t, e)
+        }
         web = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
@@ -79,20 +85,26 @@ class MainActivity : Activity() {
         }
         // Sin servicio en primer plano, con la pantalla apagada Android corta la
         // red a la app y las descargas (y la música) mueren.
-        startForegroundService(Intent(this, PlaybackService::class.java))
+        try { startForegroundService(Intent(this, PlaybackService::class.java)) }
+        catch (e: Throwable) { android.util.Log.e("luxdesktop", "servicio en primer plano: $e") }
 
         // Arranque en frío (~7 s: compilar la app y migrar): pantalla de carga
         // oscura en vez de un WebView en blanco que parece colgado.
         web.setBackgroundColor(0xFF121212.toInt())
+        val crash = File(filesDir, "crash.txt").takeIf { it.isFile }?.readText()
         web.loadData(
             "<body style='margin:0;background:#121212;color:#1ed760;font:600 28px sans-serif;" +
                 "display:flex;align-items:center;justify-content:center;height:100vh'>Localify</body>",
             "text/html", "utf-8"
         )
+        if (crash != null) mostrarError("La última vez Localify se cerró al arrancar:", crash)
         // Compiling the app takes a moment: keep it off the UI thread.
         val dir = File(filesDir, "lux").absolutePath
         Thread {
-            val port = LuxRuntime.ensureStarted(dir)
+            val port = try { LuxRuntime.ensureStarted(dir) } catch (e: Throwable) {
+                runOnUiThread { mostrarError("Lux no pudo arrancar:", "${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE}, ABI ${Build.SUPPORTED_ABIS.joinToString()}\n${e.stackTraceToString()}") }
+                return@Thread
+            }
             // El servidor contesta 503 "starting" mientras corren las migraciones
             // (más lentas en una instalación limpia): cargar antes dejaría el
             // WebView clavado en ese error.
@@ -115,10 +127,22 @@ class MainActivity : Activity() {
                 }
             }
             runOnUiThread {
-                if (port > 0) web.loadUrl("http://127.0.0.1:$port/")
-                else web.loadData("Lux failed to start; see logcat (tag luxdesktop).", "text/plain", "utf-8")
+                if (port > 0) { File(filesDir, "crash.txt").delete(); web.loadUrl("http://127.0.0.1:$port/") }
+                else mostrarError("Lux no pudo compilar la app:", "Mira logcat (etiqueta luxdesktop).")
             }
         }.start()
+    }
+
+    /** Pantalla de error legible (y copiable con una captura): el motivo en vez de un cierre mudo. */
+    private fun mostrarError(titulo: String, detalle: String) {
+        val esc = { t: String -> t.replace("&", "&amp;").replace("<", "&lt;") }
+        runOnUiThread {
+            web.loadData(
+                "<body style='margin:16px;background:#121212;color:#eee;font:14px sans-serif'>" +
+                    "<h3 style='color:#1ed760'>${esc(titulo)}</h3><pre style='white-space:pre-wrap;word-break:break-all;font-size:12px'>${esc(detalle)}</pre></body>",
+                "text/html", "utf-8"
+            )
+        }
     }
 
     @Deprecated("Deprecated in Java")
