@@ -202,6 +202,9 @@ fn Json cmd_social(string cmd, Json args):
     if cmd == "social_update_me":
         Json? r = srv("PUT", "/me", { "displayName": arg_str(args, "displayName", ""), "bio": arg_str(args, "bio", "") })
         return r != null and r["status"] == 200 ? r["body"] : srv_fallo(r)
+    if cmd == "social_set_privacy":
+        Json? r = srv("PUT", "/me/privacy", { "hide": jget(args, "hide") })
+        return r != null and r["status"] == 204 ? null : srv_fallo(r)
     if cmd == "social_users":
         Json? r = srv("GET", "/users")
         return r != null and r["status"] == 200 ? r["body"] : srv_fallo(r)

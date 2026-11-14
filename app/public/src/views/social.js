@@ -231,7 +231,8 @@ export function mountSocialView(contenedor, ruta) {
 				a.append(ahora);
 			}
 			const pie = nodo("div", "social__etiquetas");
-			pie.append(nodo("span", "social__etiqueta", t("social.n_playlists", { count: u.nPlaylists })), nodo("span", "social__etiqueta", t("social.n_tracks", { count: u.nTracks })));
+			pie.append(nodo("span", "social__etiqueta", t("social.n_playlists", { count: u.nPlaylists })));
+			if (u.nTracks != null) pie.append(nodo("span", "social__etiqueta", t("social.n_tracks", { count: u.nTracks })));
 			a.append(pie);
 			rejilla.append(a);
 		}

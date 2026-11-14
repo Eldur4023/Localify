@@ -146,7 +146,9 @@ export function crearPerfil(ctx) {
 		c.append(av, datos);
 		const resumen = nodo("div", "perfil__resumen");
 		const cifras = nodo("div", "perfil__cifras");
-		cifras.append(cifra(u.playlists?.length ?? 0, t("social.playlists")), cifra(tiempo(u.listenedMs ?? 0), t("social.plays_90")), cifra(u.topTracks?.length ?? 0, t("social.top_short")));
+		cifras.append(cifra(u.playlists?.length ?? 0, t("social.playlists")));
+		if (u.listenedMs !== undefined) cifras.append(cifra(tiempo(u.listenedMs), t("social.plays_90")));
+		if (u.topTracks) cifras.append(cifra(u.topTracks.length, t("social.top_short")));
 		resumen.append(cifras);
 		if (u.nowPlaying) resumen.append(pildoraAhora(u.nowPlaying));
 		c.append(resumen);
@@ -312,12 +314,21 @@ export function crearPerfil(ctx) {
 		pintarCuerpo();
 		return s;
 	}
-	function tarjetaPrivacidadYNube() {
+	function tarjetaPrivacidadYNube(u) {
 		const { s: sp, cuerpo: cp } = tarjeta(t("social.privacy"), "users");
 		cp.append(filaInterruptor(t("social.presence"), t("social.presence_help"), ctx.estado.presence !== false, async (v) => {
 			await social.setPresence(v);
 			ctx.estado.presence = v;
 		}));
+		// Lo que los demás ven de mi perfil: el servidor no lo calcula ni lo envía si lo oculto
+		const ocultas = new Set((u.hide ?? "").split(",").filter(Boolean));
+		for (const [clave, texto] of [["top", "show_top"], ["time", "show_time"], ["library", "show_library"]]) {
+			cp.append(filaInterruptor(t(`social.${texto}`), t(`social.${texto}_help`), !ocultas.has(clave), async (v) => {
+				if (v) ocultas.delete(clave); else ocultas.add(clave);
+				await social.setPrivacy([...ocultas]);
+				u.hide = [...ocultas].join(",");   // la copia en caché sigue al día al volver a esta pantalla
+			}));
+		}
 		const { s: sn, cuerpo: cn } = tarjeta(t("social.cloud_title"), "cloud-download");
 		cn.append(filaInterruptor(t("social.upload"), t("social.upload_help"), ctx.estado.upload, async (v) => {
 			await social.setUpload(v);
@@ -385,7 +396,7 @@ export function crearPerfil(ctx) {
 		const principal = nodo("div", "perfil__principal");
 		const lateral = nodo("aside", "perfil__lateral");
 		escaparate(principal, u, true);
-		lateral.append(await tarjetaSincronizacion(), ...tarjetaPrivacidadYNube(), tarjetaInvitaciones(), tarjetaSesion(u));
+		lateral.append(await tarjetaSincronizacion(), ...tarjetaPrivacidadYNube(u), tarjetaInvitaciones(), tarjetaSesion(u));
 		rejilla.append(principal, lateral);
 		panel.append(rejilla);
 	}

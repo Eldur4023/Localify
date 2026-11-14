@@ -59,6 +59,15 @@ ok "subir avatar" "$(curl -s -o /dev/null -w %{http_code} -X PUT -H "Authorizati
 ok "con avatar" "$(curl -s -H "Authorization: Bearer $T" $B/me)" '"hasAvatar":true'
 curl -s -H "Authorization: Bearer $TB" $B/users/ana/avatar | cmp -s - "$W/av.jpg" && ok "avatar visible a otros" 1 1 || ok "avatar visible a otros" 0 1
 ok "escaparate: más escuchadas" "$(curl -s -H "Authorization: Bearer $TB" $B/users/ana)" '"topTracks":[{"id":"dQw4w9WgXcQ","title":"Yellow"'
+# privacidad del perfil: ana oculta top, tiempo y nº de canciones; bob no los ve, ella sí
+ok "privacidad: valor no válido" "$(curl -s -o /dev/null -w %{http_code} -X PUT -H "Authorization: Bearer $TA" -H 'Content-Type: application/json' -d '{"hide":["nada"]}' $B/me/privacy)" 400
+ok "privacidad: ocultar" "$(curl -s -o /dev/null -w %{http_code} -X PUT -H "Authorization: Bearer $TA" -H 'Content-Type: application/json' -d '{"hide":["top","time","library"]}' $B/me/privacy)" 204
+V=$(curl -s -H "Authorization: Bearer $TB" $B/users/ana)
+[[ "$V" != *topTracks* && "$V" != *listenedMs* ]] && ok "privacidad: otros no ven top ni tiempo" 1 1 || ok "privacidad: otros no ven top ni tiempo" "$V" "sin topTracks/listenedMs"
+ok "privacidad: otros no ven el nº de canciones" "$(curl -s -H "Authorization: Bearer $TB" $B/users | python3 -c 'import sys,json; print([u["nTracks"] for u in json.load(sys.stdin) if u["username"]=="ana"][0])')" None
+ok "privacidad: el dueño sí ve lo suyo" "$(curl -s -H "Authorization: Bearer $TA" $B/users/ana)" '"topTracks"'
+ok "privacidad: /me devuelve lo oculto" "$(curl -s -H "Authorization: Bearer $TA" $B/me)" '"hide":"top,time,library"'
+curl -s -o /dev/null -X PUT -H "Authorization: Bearer $TA" -H 'Content-Type: application/json' -d '{"hide":[]}' $B/me/privacy
 head -c 20000 /dev/urandom > "$W/r.bin"
 ok "relay no pisa una pista ajena" "$(curl -s -X PUT -H "Authorization: Bearer $TB" -F audio=@"$W/r.bin" -F title=Hack -F title_norm=hack -F artist_norm=hack -F duration_ms=1 $B/relay/dQw4w9WgXcQ)" '"stored":false'
 curl -s -H "Authorization: Bearer $T" $B/tracks/dQw4w9WgXcQ/audio | cmp -s - "$W/a.opus" && ok "el audio original sigue intacto" 1 1 || ok "el audio original sigue intacto" 0 1

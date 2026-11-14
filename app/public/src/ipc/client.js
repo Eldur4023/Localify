@@ -338,6 +338,8 @@ export const social = {
 	logout: () => invoke("server_logout"),
 	setUpload: (enabled) => invoke("server_set_upload", { enabled }),
 	setPresence: (enabled) => invoke("server_set_presence", { enabled }),
+	/** Qué oculta mi perfil a los demás: subconjunto de ["top", "time", "library"]. */
+	setPrivacy: (hide) => invoke("social_set_privacy", { hide }),
 	/** Reproducción sincronizada entre mis equipos: ajustes de este equipo + lista de equipos. */
 	syncStatus: () => invoke("social_sync_status"),
 	setSync: (patch) => invoke("social_sync_set", patch),
