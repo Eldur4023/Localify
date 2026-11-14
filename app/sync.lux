@@ -285,10 +285,12 @@ fn void sync_tick():
     # los informes del <audio>, cada 3 s): una pasada por segundo basta.
     if en_movil() and state.incr("sync_tick_movil", 1, 1000) != 1:
         return
+    # "En línea / visto hace…" de mis equipos: se anuncia siempre que haya sesión, no solo con la sincronización
+    # de reproducción activa (si no, un equipo sin sync figuraba como "visto hace 29 días" para siempre).
+    if srv_activo() and state.incr("sync_anuncio", 1, 60000) == 1:
+        srv("PUT", "/devices", { "deviceId": sync_dispositivo(), "name": sync_nombre(), "platform": en_movil() ? "android" : "desktop" })
     if not sync_activo():
         return
-    if state.incr("sync_anuncio", 1, 60000) == 1:
-        srv("PUT", "/devices", { "deviceId": sync_dispositivo(), "name": sync_nombre(), "platform": en_movil() ? "android" : "desktop" })
     sync_enviar()
     # en el móvil lo comprueba cada informe de posición del <audio> (movil.lux)
     if not en_movil():

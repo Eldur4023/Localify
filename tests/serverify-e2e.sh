@@ -27,6 +27,9 @@ ok "sin sesión: social pide login" "$(inv social_playlists)" SERVER_AUTH
 ok "sin sesión: aportar biblioteca pide login" "$(inv server_sync_library)" SERVER_AUTH
 CI=$(curl -s -X POST -H "Authorization: Bearer $TB" $B/invites | sed 's/.*"code":"\([^"]*\)".*/\1/')   # bob ya existe: ana entra con su invitación
 ok "registro" "$(inv server_register "{\"username\":\"ana\",\"password\":\"secreto123\",\"displayName\":\"Ana\",\"inviteCode\":\"$CI\"}")" '"username":"ana"'
+# el equipo se anuncia al servidor con sesión iniciada, SIN activar la sincronización de reproducción
+sleep 3
+ok "equipo anunciado sin sync" "$(inv social_sync_status)" '"platform":"desktop"'
 ok "estado" "$(inv server_status)" '"loggedIn":true'
 ok "búsqueda trae del servidor" "$(inv search_query '{"q":"yellow"}')" 'dQw4w9WgXcQ'
 ok "candidatos del servidor" "$(inv library_search_candidates '{"query":"coldplay yellow","limit":3}')" '"title":"Yellow"'
