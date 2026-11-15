@@ -55,7 +55,8 @@ export function mountSocialView(contenedor, ruta) {
 				reachable: false,
 				loggedIn: false,
 				username: "",
-				upload: true
+				upload: true,
+				stream: false
 			};
 		}
 		if (!destruida) void pintar();

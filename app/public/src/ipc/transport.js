@@ -69,10 +69,10 @@ function diferir(antes, ahora) {
 			// el trabajo desapareció: o terminó bien (se borra la fila al
 			// finalizar) o lo borró un wipe
 			emitir("downloadCompleted", { trackId: tid });
-			emitir("availabilityChanged", {
-				trackId: tid,
-				availability: { kind: "local", format: "opus", bytes: 0 },
-			});
+			// local o en streaming (con ese ajuste se borra la copia): lo dice el backend
+			invocar("library_availability", { trackId: tid })
+				.then((availability) => emitir("availabilityChanged", { trackId: tid, availability }))
+				.catch(() => emitir("availabilityChanged", { trackId: tid, availability: { kind: "local", format: "opus", bytes: 0 } }));
 		}
 	}
 

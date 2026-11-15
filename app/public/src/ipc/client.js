@@ -294,7 +294,7 @@ export const settings = {
 	* canciones después, cuando el fallo ya no se parece a lo que tocó.
 	*/
 	testCookies: () => invoke("settings_test_cookies"),
-	/** Fuerza la comprobación de versión de yt-dlp, que ya se hace al arrancar. */
+	/** Fuerza la comprobación de versión de yt-dlp, que ya se hace al arrancar (ytdlp_comprobar_arranque). */
 	updateYtdlp: () => invoke("settings_update_ytdlp"),
 	/**
 	* Cambia la carpeta de la biblioteca.
@@ -343,6 +343,7 @@ export const social = {
 	createInvite: () => invoke("server_invite_create"),
 	logout: () => invoke("server_logout"),
 	setUpload: (enabled) => invoke("server_set_upload", { enabled }),
+	setStream: (enabled) => invoke("server_set_stream", { enabled }),
 	setPresence: (enabled) => invoke("server_set_presence", { enabled }),
 	/** Qué oculta mi perfil a los demás: subconjunto de ["top", "time", "library"]. */
 	setPrivacy: (hide) => invoke("social_set_privacy", { hide }),

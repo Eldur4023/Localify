@@ -77,7 +77,7 @@ function fechaCorta(segundos) {
 */
 function pintarDisponibilidad(el, a) {
 	// Mismo estado que ya está pintado: no se toca el DOM (salvo el % de descarga).
-	const clave = a.kind === "failed" ? `failed:${a.reasonKey}` : a.kind === "downloading" || a.kind === "local" ? a.kind : "absent";
+	const clave = a.kind === "failed" ? `failed:${a.reasonKey}` : a.kind === "downloading" || a.kind === "local" || a.kind === "streaming" ? a.kind : "absent";
 	if (clave === el._clave && clave !== "downloading") return;
 	el._clave = clave;
 	switch (a.kind) {
@@ -86,6 +86,9 @@ function pintarDisponibilidad(el, a) {
 			break;
 		case "local":
 			pintarDescargada(el);
+			break;
+		case "streaming":
+			pintarStreaming(el);
 			break;
 		case "failed":
 			pintarFallida(el, a.reasonKey);
@@ -114,6 +117,13 @@ function pintarDescargada(el) {
 	el.className = "track__state track__state--local";
 	el.replaceChildren(iconoClonado("cloud-download", 16));
 	el.title = t("tracks.downloaded");
+}
+function pintarStreaming(el) {
+	el._clave = "streaming";
+	el.onclick = null;
+	el.className = "track__state track__state--local";
+	el.replaceChildren(iconoClonado("cloud", 16));
+	el.title = t("tracks.streaming");
 }
 function pintarFallida(el, reasonKey) {
 	el._clave = `failed:${reasonKey}`;

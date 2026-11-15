@@ -36,7 +36,7 @@ fn Json cmd_social(string cmd, Json args):
         return {
             "host": ajuste("server_host", ""), "port": int(ajuste("server_port", "8787")),
             "reachable": alcanzable, "loggedIn": ajuste("server_token", "") != "",
-            "username": ajuste("server_user", ""), "upload": ajuste("server_upload", "1") == "1",
+            "username": ajuste("server_user", ""), "upload": ajuste("server_upload", "1") == "1", "stream": ajuste("server_stream", "0") == "1",
             "presence": ajuste("server_presence", "1") == "1",
             "sync": ajuste("sync_playback", "0") == "1", "syncMode": ajuste("sync_modo", "both")
         }
@@ -73,6 +73,9 @@ fn Json cmd_social(string cmd, Json args):
         return null
     if cmd == "server_set_upload":
         ajuste_poner("server_upload", jget(args, "enabled") == true ? "1" : "0")
+        return null
+    if cmd == "server_set_stream":
+        ajuste_poner("server_stream", jget(args, "enabled") == true ? "1" : "0")
         return null
     if cmd == "server_set_presence":
         ajuste_poner("server_presence", jget(args, "enabled") == true ? "1" : "0")
@@ -294,9 +297,9 @@ fn Json cmd_social(string cmd, Json args):
 # El WebView no puede mandar el token del servidor en un <img>: se baja aquí y se sirve.
 
 get endpoint("/api/social/img/:kind/:id", string kind, string id):
-    if not srv_sesion() or (kind != "avatar" and kind != "playlist") or id.contains("/") or id.contains(".."):
+    if not srv_sesion() or (kind != "avatar" and kind != "banner" and kind != "playlist") or id.contains("/") or id.contains(".."):
         return status(404)
-    string ruta = kind == "avatar" ? "/users/" + http.url_encode(id) + "/avatar" : "/playlists/" + id + "/cover"
+    string ruta = kind == "playlist" ? "/playlists/" + id + "/cover" : "/users/" + http.url_encode(id) + "/" + kind
     string destino = os.path_join(covers_dir(), "srv-" + kind + "-" + id.replace("%", "_") + ".jpg")
     Dict<string, string> cab = { "Authorization": "Bearer " + ajuste("server_token", "") }
     try:
@@ -309,8 +312,21 @@ get endpoint("/api/social/img/:kind/:id", string kind, string id):
     header("Content-Type", "image/jpeg")
     return send_file(destino, covers_dir())
 
-# Mi foto de perfil: el frontend la sube aquí y se reenvía al servidor.
+# Mi foto de perfil o mi fondo: el frontend la sube aquí y se reenvía al servidor.
 post endpoint("/api/social/avatar", File imagen):
+    return await subir_imagen_perfil(imagen, "avatar")
+
+post endpoint("/api/social/banner", File imagen):
+    return await subir_imagen_perfil(imagen, "banner")
+
+delete endpoint("/api/social/banner"):
+    if not srv_sesion():
+        return status(401)
+    Json? r = srv("DELETE", "/me/banner")
+    os.remove_file(os.path_join(covers_dir(), "srv-banner-" + ajuste("server_user", "").replace("%", "_") + ".jpg"))
+    return r != null and r["status"] < 300 ? { "ok": true } : status(502)
+
+fn Json subir_imagen_perfil(File imagen, string campo):
     if not srv_sesion():
         return status(401)
     string d = covers_dir()
@@ -319,9 +335,11 @@ post endpoint("/api/social/avatar", File imagen):
         return status(500)
     string origen = os.path_join(d, nombre)
     Dict<string, string> cab = { "Authorization": "Bearer " + ajuste("server_token", "") }
+    Dict<string, string> ficheros = {}
+    ficheros[campo] = origen
     int estado = 0
     try:
-        Json u = await http.put(srv_base() + "/me/avatar", { "k": "1" }, cab, { "files": { "avatar": origen }, "timeout_ms": 60000 })
+        Json u = await http.put(srv_base() + "/me/" + campo, { "k": "1" }, cab, { "files": ficheros, "timeout_ms": 60000 })
         estado = jint(u["status"], 0)
     catch e:
         estado = 0

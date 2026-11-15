@@ -176,7 +176,12 @@ struct AudioEngine::Voice {
 #else
         std::vector<const char*> argv = {bin && *bin ? bin : "ffmpeg", "-nostdin", "-v", "quiet", "-threads", "1"};
         if (start_frame > 0) { argv.push_back("-ss"); argv.push_back(ss.c_str()); }
-        for (const char* a : {"-i", path.c_str(), "-vn", "-sn", "-dn", "-ac", "2", "-ar", "48000",
+        // Streaming: "URL\nCabecera: valor" (la cabecera lleva el token; no cabe en la URL).
+        const size_t nl = path.find('\n');
+        std::string hdr;
+        if (nl != std::string::npos) { hdr = path.substr(nl + 1) + "\r\n"; argv.push_back("-headers"); argv.push_back(hdr.c_str()); }
+        const std::string url = path.substr(0, nl);
+        for (const char* a : {"-i", url.c_str(), "-vn", "-sn", "-dn", "-ac", "2", "-ar", "48000",
                               "-f", "f32le", "pipe:1"})
             argv.push_back(a);
         argv.push_back(nullptr);
@@ -246,7 +251,9 @@ struct AudioEngine::Voice {
         quote_arg(cl, exe);
         for (const char* a : {"-nostdin", "-v", "quiet", "-threads", "1"}) quote_arg(cl, widen(a));
         if (start_frame > 0) { quote_arg(cl, L"-ss"); quote_arg(cl, widen(ss)); }
-        quote_arg(cl, L"-i"); quote_arg(cl, widen(path));
+        const size_t nl = path.find('\n');
+        if (nl != std::string::npos) { quote_arg(cl, L"-headers"); quote_arg(cl, widen(path.substr(nl + 1) + "\r\n")); }
+        quote_arg(cl, L"-i"); quote_arg(cl, widen(path.substr(0, nl)));
         for (const char* a : {"-vn", "-sn", "-dn", "-ac", "2", "-ar", "48000", "-f", "f32le", "pipe:1"})
             quote_arg(cl, widen(a));
         STARTUPINFOW si{};

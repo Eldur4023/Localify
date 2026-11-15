@@ -1,5 +1,5 @@
 /**
-* Recorte de imagen con zoom, para la foto de perfil.
+* Recorte de imagen con zoom, para la foto de perfil (cuadrada) y el fondo del perfil (ancho).
 *
 * Una ventana con un marco cuadrado (el círculo del avatar se ve como máscara): la imagen se
 * arrastra con el ratón o el dedo, se acerca con la rueda, el deslizador o pellizcando, y no
@@ -14,7 +14,7 @@ const ZOOM_MAXIMO = 5;
 * Abre el recortador con `archivo`. Resuelve al JPEG recortado (`Blob`), o `null` si se cancela
 * o el fichero no es una imagen que el navegador pueda abrir.
 */
-export function recortarImagen(archivo, salida = 512) {
+export function recortarImagen(archivo, salida = 512, aspecto = 1) {
 	return new Promise((resolver) => {
 		const url = URL.createObjectURL(archivo);
 		const img = new Image();
@@ -24,17 +24,20 @@ export function recortarImagen(archivo, salida = 512) {
 			URL.revokeObjectURL(url);
 			resolver(null);
 		});
-		img.addEventListener("load", () => abrir(img, url, salida, resolver));
+		img.addEventListener("load", () => abrir(img, url, salida, aspecto, resolver));
 		img.src = url;
 	});
 }
-function abrir(img, url, salida, resolver) {
-	const dlg = nodo("dialog", "dialogo recorte");
+function abrir(img, url, salida, aspecto, resolver) {
+	const dlg = nodo("dialog", `dialogo recorte${aspecto === 1 ? "" : " recorte--ancho"}`);
 	const form = nodo("form");
 	form.method = "dialog";
 	const marco = nodo("div", "recorte__marco");
+	marco.style.aspectRatio = String(aspecto);
 	img.classList.add("recorte__img");
-	marco.append(img, nodo("div", "recorte__mascara"));
+	marco.append(img);
+	// la máscara circular solo tiene sentido en la foto de perfil
+	if (aspecto === 1) marco.append(nodo("div", "recorte__mascara"));
 	const zoom = nodo("input", "recorte__zoom");
 	zoom.type = "range";
 	zoom.min = "1";
@@ -56,6 +59,7 @@ function abrir(img, url, salida, resolver) {
 	// Estado del recorte: lado del marco (px de pantalla), escala (px de pantalla por px de la imagen)
 	// y posición de la esquina superior izquierda de la imagen dentro del marco.
 	let lado = 0;
+	let alto = 0;
 	let minimo = 1;
 	let escala = 1;
 	let x = 0;
@@ -65,7 +69,7 @@ function abrir(img, url, salida, resolver) {
 	function colocar() {
 		// la imagen siempre cubre el marco
 		x = Math.min(0, Math.max(lado - nw * escala, x));
-		y = Math.min(0, Math.max(lado - nh * escala, y));
+		y = Math.min(0, Math.max(alto - nh * escala, y));
 		img.style.width = `${nw * escala}px`;
 		img.style.height = `${nh * escala}px`;
 		img.style.transform = `translate(${x}px, ${y}px)`;
@@ -83,10 +87,11 @@ function abrir(img, url, salida, resolver) {
 	}
 	function iniciar() {
 		lado = marco.clientWidth;
-		minimo = Math.max(lado / nw, lado / nh);
+		alto = marco.clientHeight;
+		minimo = Math.max(lado / nw, alto / nh);
 		escala = minimo;
 		x = (lado - nw * escala) / 2;
-		y = (lado - nh * escala) / 2;
+		y = (alto - nh * escala) / 2;
 		colocar();
 	}
 	// ── arrastrar y pellizcar ──
@@ -134,7 +139,7 @@ function abrir(img, url, salida, resolver) {
 		const caja = marco.getBoundingClientRect();
 		acercar(escala * Math.exp(-e.deltaY * 0.0015), e.clientX - caja.left, e.clientY - caja.top);
 	}, { passive: false });
-	zoom.addEventListener("input", () => acercar(minimo * Number(zoom.value), lado / 2, lado / 2));
+	zoom.addEventListener("input", () => acercar(minimo * Number(zoom.value), lado / 2, alto / 2));
 	// ── cerrar ──
 	const cerrar = () => {
 		if (dlg.open) dlg.close();
@@ -142,14 +147,15 @@ function abrir(img, url, salida, resolver) {
 	cancelar.addEventListener("click", cerrar);
 	guardar.addEventListener("click", () => {
 		const lienzo = document.createElement("canvas");
+		const altoSalida = Math.round(salida / aspecto);
 		lienzo.width = salida;
-		lienzo.height = salida;
+		lienzo.height = altoSalida;
 		const c = lienzo.getContext("2d");
 		if (!c) return cerrar();
 		c.fillStyle = "#222";
-		c.fillRect(0, 0, salida, salida);
+		c.fillRect(0, 0, salida, altoSalida);
 		c.imageSmoothingQuality = "high";
-		c.drawImage(img, -x / escala, -y / escala, lado / escala, lado / escala, 0, 0, salida, salida);
+		c.drawImage(img, -x / escala, -y / escala, lado / escala, alto / escala, 0, 0, salida, altoSalida);
 		lienzo.toBlob((blob) => {
 			resultado = blob;
 			cerrar();

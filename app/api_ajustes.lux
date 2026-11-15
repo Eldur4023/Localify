@@ -188,14 +188,52 @@ fn Json cmd_settings_patch(Json cambios):
 fn Json cmd_probar_cookies():
     string modo = ajuste("cookies_mode", "none")
     if modo == "none":
-        return { "status": { "kind": "unavailable", "reasonKey": "settings.cookies_none" } }
+        return { "ok": false, "messageKey": "settings.cookies_error", "detail": null }
     List<string> extra = args_cookies()
     if len(extra) == 0:
-        return { "status": { "kind": "unavailable", "reasonKey": "settings.cookies_none" } }
+        return { "ok": false, "messageKey": "settings.cookies_error", "detail": null }
     Json r = await os.run(ytdlp_bin(), ["--dump-json", "--flat-playlist", "--playlist-end", "1"] + ytdlp_extra() + extra + ["ytsearch1:test"])
     if jint(r["status"], 1) == 0 and jstr(r["stdout"], "").trim() != "":
-        return { "status": { "kind": "ready" } }
-    return { "status": { "kind": "unavailable", "reasonKey": "settings.cookies_broken" } }
+        return { "ok": true, "messageKey": "settings.cookies_ok", "detail": null }
+    return { "ok": false, "messageKey": "settings.cookies_error", "detail": null }
+
+# La UI espera {ok, messageKey, detail?}. Se decide por lo que imprime `yt-dlp -U`.
+fn Json cmd_actualizar_ytdlp():
+    string salida = ""
+    int codigo = 1
+    try:
+        Json r = await os.run(ytdlp_bin(), ["-U"])
+        codigo = jint(r["status"], 1)
+        salida = (jstr(r["stdout"], "") + "\n" + jstr(r["stderr"], "")).trim()
+    catch e:
+        return { "ok": false, "messageKey": "settings.cookies_no_ytdlp", "detail": null }
+    if salida.contains("package manager"):
+        return { "ok": false, "messageKey": "settings.ytdlp_ajeno", "detail": null }
+    if codigo == 0 and salida.contains("up to date"):
+        return { "ok": true, "messageKey": "settings.ytdlp_al_dia", "detail": null }
+    if codigo == 0:
+        return { "ok": true, "messageKey": "settings.ytdlp_actualizado", "detail": null }
+    string detalle = salida.split("\n").last()
+    return { "ok": false, "messageKey": "settings.ytdlp_error", "detail": detalle == "" ? null : detalle }
+
+# Mantiene yt-dlp al día (la llama events.lux cada segundo, en su propio bloque): `yt-dlp -U` solo cambia
+# el binario si hay versión nueva. Corre al arrancar, después cada 24 h y, tras un fallo de descarga
+# (descargas.lux pone `ytdlp_fallo`), como mucho una vez cada 10 min para no machacar GitHub.
+fn void ytdlp_mantener():
+    if en_movil():
+        return
+    bool fallo = state.get("ytdlp_fallo", "") != ""
+    if fallo:
+        state.remove("ytdlp_fallo")
+    string motivo = ""
+    if fallo and state.incr("ytdlp_fallo_ventana", 1, 600000) == 1:
+        motivo = "fallo de descarga"
+    elif state.incr("ytdlp_diario", 1, 86400000) == 1:
+        motivo = "comprobación diaria"
+    if motivo == "":
+        return
+    Json r = await cmd_actualizar_ytdlp()
+    log.info("yt-dlp (" + motivo + "): " + jstr(r["messageKey"], "") + (jget(r, "detail") == null ? "" : " — " + jstr(r["detail"], "")))
 
 # ─── Estadísticas ────────────────────────────────────────────────────────────
 # ListeningStatsDto {totalMsPlayed, totalPlays, distinctTracks, topTracks:

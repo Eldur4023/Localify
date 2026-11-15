@@ -143,6 +143,14 @@ fn string descargar_movil(string tid, string video_id):
                     "search_norm": normalizar(titulo + " " + artista + " " + album),
                     "title_norm": normalizar(titulo), "artist_norm": normalizar(artista)
                 }, cab, { "files": { "audio": destino }, "timeout_ms": 120000 })
+                # streaming: el servidor ya lo tiene (o lo acaba de transcodificar): no se baja el MP3
+                if u != null and jint(u["status"], 0) < 300 and srv_stream():
+                    state.remove("srvno:" + tid)
+                    srv_id_cache(tid)   # la anota como "en el servidor" (indicador de streaming)
+                    os.remove_file(destino)
+                    srv_alta(tid)
+                    await sqlite.exec("delete from download_jobs where track_id = ?", tid)
+                    return ""
                 if u != null and jint(u["status"], 0) < 300 and srv_obtener(tid):
                     os.remove_file(destino)
                     return ""

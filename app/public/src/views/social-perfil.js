@@ -1,6 +1,6 @@
 /**
-* Social — el perfil: cabecera (editable en el sitio, con recorte de foto), escaparate (playlists
-* públicas y lo más escuchado) y la columna de ajustes (sincronización, privacidad, nube, sesión).
+* Social — el perfil: cabecera (editable en el sitio, con recorte de foto) y escaparate (playlists
+* públicas y lo más escuchado). Los ajustes de cuenta viven en Ajustes › Cuenta (cuenta.js).
 *
 * Vive aparte de social.js pero comparte su estado por `ctx`: `estado` y `avisoNube` son getters
 * (cambian de valor en social.js) y el resto son las piezas que ya tiene (dato, boton, seccion…).
@@ -9,17 +9,19 @@ import { player, social } from "../ipc/client.js";
 import { t } from "../i18n/index.js";
 import { textoDeError } from "../ui/publicar-playlist.js";
 import { mostrarError } from "../ui/error-overlay.js";
-import { botonIcono, icono } from "../ui/icons.js";
+import { icono } from "../ui/icons.js";
 import { ponerPortadaDePista } from "../ui/cards.js";
 import { colorDePortada } from "../ui/color.js";
 import { recortarImagen } from "../ui/recortar-imagen.js";
 import { nodo } from "../ui/dom.js";
-import { guardarCache, SIN_CACHE, tiempo } from "./social-cache.js";
+import { guardarCache, tiempo } from "./social-cache.js";
+import { abrirAjustes } from "./settings.js";
 export function crearPerfil(ctx) {
-	const { dato, boton, seccion, pintar, cargar, claveDato, textoNube } = ctx;
+	const { dato, seccion, pintar, claveDato } = ctx;
 	// ── Piezas del perfil ───────────────────────────────────────────────────
 	const version = Date.now();
 	let avatarV = 0;
+	let fondoV = 0;
 	/** `tam`: true = grande (cabecera), "media" = tarjetas de personas, nada = fila. */
 	function avatar(u, tam, alCargar) {
 		const clase = tam === true ? " perfil__avatar--grande" : tam === "media" ? " perfil__avatar--media" : "";
@@ -51,6 +53,55 @@ export function crearPerfil(ctx) {
 		ahora.append(barras, texto);
 		return ahora;
 	}
+	/** "Cambiar fondo" (recorte ancho) y "Quitar fondo" en la esquina de mi cabecera. */
+	function botonesFondo(u) {
+		const caja = nodo("div", "perfil__fondo-acciones");
+		const archivo = nodo("input");
+		archivo.type = "file";
+		archivo.accept = "image/*";
+		archivo.hidden = true;
+		const cambiar = nodo("button", "boton boton--sutil");
+		cambiar.type = "button";
+		cambiar.append(icono("camera", 16), document.createTextNode(t("social.change_background")));
+		cambiar.addEventListener("click", () => archivo.click());
+		archivo.addEventListener("change", () => void (async () => {
+			const elegida = archivo.files?.[0];
+			archivo.value = "";
+			if (!elegida) return;
+			const recorte = await recortarImagen(elegida, 1600, 3.2);
+			if (!recorte) return;
+			const fd = new FormData();
+			fd.append("imagen", recorte, "banner.jpg");
+			try {
+				const r = await fetch("/api/social/banner", { method: "POST", body: fd });
+				if (!r.ok) throw new Error(String(r.status));
+				fondoV = Date.now();
+				u.hasBanner = true;
+				guardarCache(claveDato(`user.${ctx.estado.username}`), u);
+				await pintar();
+			} catch (e) {
+				mostrarError(t("error.internal"), textoDeError(e));
+			}
+		})());
+		caja.append(cambiar, archivo);
+		if (u.hasBanner) {
+			const quitar = nodo("button", "boton boton--sutil", t("social.remove_background"));
+			quitar.type = "button";
+			quitar.addEventListener("click", () => void (async () => {
+				try {
+					const r = await fetch("/api/social/banner", { method: "DELETE" });
+					if (!r.ok) throw new Error(String(r.status));
+					u.hasBanner = false;
+					guardarCache(claveDato(`user.${ctx.estado.username}`), u);
+					await pintar();
+				} catch (e) {
+					mostrarError(t("error.internal"), textoDeError(e));
+				}
+			})());
+			caja.append(quitar);
+		}
+		return caja;
+	}
 	/** Cabecera ancha con el color de la foto. Con `propio`, nombre, bio y foto se editan en el sitio. */
 	function cabeceraPerfil(panel, u, propio = false) {
 		const c = nodo("header", `perfil__cabecera${propio ? " perfil__cabecera--propio" : ""}`);
@@ -59,6 +110,12 @@ export function crearPerfil(ctx) {
 			const col = colorDePortada(img);
 			if (col) c.style.setProperty("--perfil-color", col);
 		};
+		// imagen de fondo elegida por la persona (la ven todos); sin ella, el degradado de siempre
+		if (u.hasBanner) {
+			c.classList.add("perfil__cabecera--fondo");
+			c.style.setProperty("--perfil-fondo", `url("/api/social/img/banner/${encodeURIComponent(u.username)}?v=${fondoV || version}")`);
+		}
+		if (propio) c.append(botonesFondo(u));
 		const datos = nodo("div", "perfil__datos");
 		let av;
 		if (propio) {
@@ -151,6 +208,12 @@ export function crearPerfil(ctx) {
 		if (u.topTracks) cifras.append(cifra(u.topTracks.length, t("social.top_short")));
 		resumen.append(cifras);
 		if (u.nowPlaying) resumen.append(pildoraAhora(u.nowPlaying));
+		if (propio) {
+			const ajustes = nodo("a", "boton boton--sutil perfil__ajustes", t("account.settings"));
+			ajustes.href = "#/settings";
+			ajustes.addEventListener("click", () => abrirAjustes("cuenta"));
+			resumen.append(ajustes);
+		}
 		c.append(resumen);
 		panel.append(c);
 	}
@@ -213,192 +276,12 @@ export function crearPerfil(ctx) {
 		}
 	}
 
-	// ── Mi perfil: cabecera editable + escaparate + columna de ajustes ──────
-	function tarjeta(titulo, nombreIcono) {
-		const s = nodo("section", "social__card");
-		const cab = nodo("h3", "social__card-titulo");
-		if (nombreIcono) cab.append(icono(nombreIcono, 18));
-		cab.append(document.createTextNode(titulo));
-		const cuerpo = nodo("div", "social__card-cuerpo");
-		s.append(cab, cuerpo);
-		return {
-			s,
-			cuerpo
-		};
-	}
-	/** Interruptor con título y ayuda; guarda al momento. */
-	function filaInterruptor(titulo, ayuda, valor, alCambiar) {
-		const f = nodo("label", "social__ajuste");
-		const texto = nodo("span", "social__texto");
-		texto.append(nodo("strong", "", titulo));
-		if (ayuda) texto.append(nodo("span", "social__sub", ayuda));
-		const i = nodo("input", "interruptor");
-		i.type = "checkbox";
-		i.checked = valor;
-		i.addEventListener("change", () => void Promise.resolve(alCambiar(i.checked)).catch((e) => {
-			i.checked = !i.checked;
-			mostrarError(t("error.internal"), textoDeError(e));
-		}));
-		f.append(texto, i);
-		return f;
-	}
-	/** "visto hace 5 min" */
-	function haceTiempo(s) {
-		const n = s < 3600 ? Math.max(1, Math.round(s / 60)) : s < 86400 ? Math.round(s / 3600) : Math.round(s / 86400);
-		return t("social.seen_ago", { time: `${n} ${s < 3600 ? "min" : s < 86400 ? "h" : "d"}` });
-	}
-	async function tarjetaSincronizacion() {
-		const { s, cuerpo } = tarjeta(t("social.sync_title"), "refresh");
-		let info;
-		try {
-			info = await dato("sync", () => social.syncStatus());
-		} catch (e) {
-			if (e === SIN_CACHE) throw e;
-			info = {
-				enabled: false,
-				mode: "both",
-				deviceId: "",
-				devices: []
-			};
-		}
-		const pintarCuerpo = () => {
-			cuerpo.replaceChildren();
-			cuerpo.append(filaInterruptor(t("social.sync_enable"), t("social.sync_help"), info.enabled, async (v) => {
-				await social.setSync({ enabled: v });
-				// el móvil necesita el servicio en primer plano para seguir sincronizado en segundo plano
-				if (v) globalThis.AndroidBridge?.startPlayback?.();
-				info = await social.syncStatus();
-				guardarCache(claveDato("sync"), info);
-				pintarCuerpo();
-			}));
-			if (info.enabled) {
-				const modos = nodo("div", "social__modos");
-				for (const [clave, titulo, ayuda] of [
-					["both", t("social.sync_both"), t("social.sync_both_help")],
-					["here", t("social.sync_here"), t("social.sync_here_help")]
-				]) {
-					const b = nodo("button", `social__modo${info.mode === clave ? " is-activo" : ""}`);
-					b.type = "button";
-					b.append(nodo("strong", "", titulo), nodo("span", "social__sub", ayuda));
-					b.addEventListener("click", () => void social.setSync({ mode: clave }).then(() => {
-						info.mode = clave;
-						guardarCache(claveDato("sync"), info);
-						pintarCuerpo();
-					}).catch((e) => mostrarError(t("error.internal"), textoDeError(e))));
-					modos.append(b);
-				}
-				cuerpo.append(modos);
-			}
-			cuerpo.append(nodo("h4", "social__subtitulo", t("social.devices")));
-			if (info.devices.length === 0) cuerpo.append(nodo("p", "social__sub", t("social.no_devices")));
-			for (const d of info.devices) {
-				const este = d.deviceId === info.deviceId;
-				const enLinea = este ? info.enabled : d.agoS < 150;
-				const f = nodo("div", "social__equipo");
-				const ico = nodo("span", `social__equipo-icono${enLinea ? " is-linea" : ""}`);
-				ico.append(icono(d.platform === "android" ? "smartphone" : "monitor", 20));
-				const texto = nodo("span", "social__texto");
-				texto.append(nodo("strong", "", este ? `${d.name || t("social.this_device")} · ${t("social.this_device")}` : d.name || d.deviceId), nodo("span", "social__sub", enLinea ? t("social.online") : haceTiempo(d.agoS)));
-				f.append(ico, texto);
-				if (!este) {
-					const quitar = botonIcono("trash", t("social.remove_device"), () => void social.removeDevice(d.deviceId).then(() => {
-						info.devices = info.devices.filter((x) => x.deviceId !== d.deviceId);
-						guardarCache(claveDato("sync"), info);
-						pintarCuerpo();
-					}).catch((e) => mostrarError(t("error.internal"), textoDeError(e))), { tamano: 18 });
-					f.append(quitar);
-				}
-				cuerpo.append(f);
-			}
-		};
-		pintarCuerpo();
-		return s;
-	}
-	function tarjetaPrivacidadYNube(u) {
-		const { s: sp, cuerpo: cp } = tarjeta(t("social.privacy"), "users");
-		cp.append(filaInterruptor(t("social.presence"), t("social.presence_help"), ctx.estado.presence !== false, async (v) => {
-			await social.setPresence(v);
-			ctx.estado.presence = v;
-		}));
-		// Lo que los demás ven de mi perfil: el servidor no lo calcula ni lo envía si lo oculto
-		const ocultas = new Set((u.hide ?? "").split(",").filter(Boolean));
-		for (const [clave, texto] of [["top", "show_top"], ["time", "show_time"], ["library", "show_library"]]) {
-			cp.append(filaInterruptor(t(`social.${texto}`), t(`social.${texto}_help`), !ocultas.has(clave), async (v) => {
-				if (v) ocultas.delete(clave); else ocultas.add(clave);
-				await social.setPrivacy([...ocultas]);
-				u.hide = [...ocultas].join(",");   // la copia en caché sigue al día al volver a esta pantalla
-			}));
-		}
-		const { s: sn, cuerpo: cn } = tarjeta(t("social.cloud_title"), "cloud-download");
-		cn.append(filaInterruptor(t("social.upload"), t("social.upload_help"), ctx.estado.upload, async (v) => {
-			await social.setUpload(v);
-			ctx.estado.upload = v;
-		}));
-		const avisoPull = nodo("p", "ajustes__ayuda", ctx.avisoNube);
-		const progreso = nodo("p", "ajustes__ayuda");
-		const acciones = nodo("div", "social__acciones");
-		acciones.append(boton(t("social.cloud_pull"), "boton--sutil", async () => {
-			avisoPull.textContent = t("social.pulling");
-			avisoPull.textContent = textoNube(await social.pull());
-		}, avisoPull), boton(t("social.contribute_library_run"), "boton--sutil", async () => {
-			let desde = 0;
-			let subidas = 0;
-			let existentes = 0;
-			for (;;) {
-				const r = await social.syncLibrary(desde);
-				subidas += r.uploaded;
-				existentes += r.alreadyThere;
-				progreso.textContent = t("social.contribute_progress", {
-					uploaded: subidas,
-					existing: existentes
-				});
-				if (r.done) break;
-				desde = r.next;
-			}
-		}, progreso));
-		cn.append(acciones, avisoPull, progreso);
-		return [sp, sn];
-	}
-	function tarjetaInvitaciones() {
-		const { s, cuerpo } = tarjeta(t("social.invites"), "settings");
-		cuerpo.append(nodo("p", "social__sub", t("social.invites_help")));
-		const lista = nodo("div", "social__acciones");
-		const aviso = nodo("p", "ajustes__ayuda ajustes__ayuda--aviso");
-		const pintarCodigos = async () => {
-			lista.replaceChildren();
-			for (const c of await social.invites()) lista.append(nodo("code", "", c.code));
-		};
-		void pintarCodigos().catch(() => {});
-		cuerpo.append(lista, aviso, boton(t("social.invite_new"), "boton--sutil", async () => {
-			await social.createInvite();
-			await pintarCodigos();
-		}, aviso));
-		return s;
-	}
-	function tarjetaSesion(u) {
-		const { s, cuerpo } = tarjeta(t("social.session"), "settings");
-		cuerpo.append(nodo("p", "social__sub", `@${u.username} · ${ctx.estado.host}:${ctx.estado.port}`));
-		const acciones = nodo("div", "social__acciones");
-		acciones.append(boton(t("social.logout"), "boton--sutil", async () => {
-			await social.logout();
-			await cargar();
-		}), boton(t("social.disconnect"), "boton--peligro", async () => {
-			await social.disconnect();
-			await cargar();
-		}));
-		cuerpo.append(acciones);
-		return s;
-	}
 	async function pintarPerfil(panel) {
 		const u = await dato(`user.${ctx.estado.username}`, () => social.user(ctx.estado.username));
 		cabeceraPerfil(panel, u, true);
-		const rejilla = nodo("div", "perfil__layout");
 		const principal = nodo("div", "perfil__principal");
-		const lateral = nodo("aside", "perfil__lateral");
 		escaparate(principal, u, true);
-		lateral.append(await tarjetaSincronizacion(), ...tarjetaPrivacidadYNube(u), tarjetaInvitaciones(), tarjetaSesion(u));
-		rejilla.append(principal, lateral);
-		panel.append(rejilla);
+		panel.append(principal);
 	}
 
 	return {

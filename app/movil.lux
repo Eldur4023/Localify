@@ -44,6 +44,28 @@ get endpoint("/audio/:id", string id):
         return status(404)
     return send_file(ruta)
 
+# Streaming (ajuste server_stream): URL directa del servidor para el <audio>, o null si hay que usar
+# el fichero local (/audio/:id). El token corto se pide al servidor y se reutiliza 5 h.
+get endpoint("/api/stream-url/:id", string id):
+    if not srv_stream():
+        return { "url": null }
+    List<Json> f = await sqlite.query("select rel_path from audio_files where track_id = ?", id)
+    if len(f) > 0 and os.is_file(ruta_audio_abs(jstr(f[0]["rel_path"], ""))):
+        return { "url": null }
+    string sid = srv_id_cache(id)
+    if sid == "":
+        return { "url": null }
+    string tok = state.get("srv_stream_tok", "")
+    if tok == "":
+        Json? r = srv("POST", "/stream-token")
+        if r != null and r["status"] == 200:
+            tok = jstr(r["body"]["token"], "")
+            if tok != "":
+                state.set("srv_stream_tok", tok, 18000000)
+    if tok == "":
+        return { "url": null }
+    return { "url": srv_base() + "/pub/audio/" + sid + "?token=" + tok }
+
 post endpoint("/api/player/media-event", Json b):
     string tipo = jstr(jget(b, "type"), "")
     if tipo == "ended":

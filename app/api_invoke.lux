@@ -20,6 +20,7 @@ fn string sql_pista_dto():
                when dj.state = 'downloading' then 'downloading'
                when dj.state = 'failed' then 'failed'
                when dj.state is not null then 'absent'
+               when st.track_id is not null then 'streaming'
                else 'absent'
            end as avail_kind,
            af.format as avail_format,
@@ -33,6 +34,7 @@ fn string sql_pista_dto():
     left join audio_files af on af.track_id = t.id
     left join favorites f on f.track_id = t.id
     left join download_jobs dj on dj.track_id = t.id
+    left join server_tracks st on st.track_id = t.id
     """ + " "
 
 # availability: AvailabilityDto con tag "kind" (common.rs).
@@ -45,6 +47,9 @@ fn Json disponibilidad_dto(Json f):
         return { "kind": "downloading", "progress": p, "playable": false }
     if tipo == "failed":
         return { "kind": "failed", "reasonKey": jstr(f["avail_reason"], "download.failed"), "attempts": jint(f["avail_attempts"], 0) }
+    # en el servidor y escuchando por streaming (con el ajuste apagado no cuenta: habría que descargarla)
+    if tipo == "streaming" and ajuste("server_stream", "0") == "1":
+        return { "kind": "streaming" }
     return { "kind": "absent" }
 
 # TrackRowDto (catalog.rs): id, title, artistDisplay, artistId, albumId,
@@ -325,6 +330,9 @@ fn Json despachar_base(string cmd, Json args):
         return reproductor_orden("jump_to", args)
 
     # ── biblioteca ──
+    if cmd == "library_availability":
+        List<Json> f = await sqlite.query(sql_pista_dto() + " where t.id = ?", arg_str(args, "trackId", ""))
+        return len(f) > 0 ? disponibilidad_dto(f[0]) : { "kind": "absent" }
     if cmd == "library_tracks":
         return await cmd_library_tracks(args)
     if cmd == "library_favorites":
@@ -524,8 +532,7 @@ fn Json despachar_base(string cmd, Json args):
     if cmd == "settings_test_cookies":
         return await cmd_probar_cookies()
     if cmd == "settings_update_ytdlp":
-        Json r = await os.run(ytdlp_bin(), ["-U"])
-        return { "ok": jint(r["status"], 1) == 0, "message": (jstr(r["stdout"], "") + jstr(r["stderr"], "")).trim() }
+        return await cmd_actualizar_ytdlp()
     if cmd == "settings_change_library_path":
         string ruta = arg_str(args, "path", "")
         bool mover = jint(jget(args, "moveExisting"), 0) == 1

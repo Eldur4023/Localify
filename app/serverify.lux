@@ -100,6 +100,7 @@ fn string srv_id_de(string tid):
         "durationMs": jint(f[0]["duration_ms"], 0) }] })
     if r == null or r["status"] != 200 or len(jlist(r["body"])) == 0:
         return ""
+    state.set("srvext:" + tid, jstr(r["body"][0]["ext"], "mp3"), 3600000)
     return jstr(r["body"][0]["serverId"], "")
 
 # URL pública de la portada de una pista que el servidor tiene (para Discord).
@@ -125,6 +126,38 @@ fn string srv_portada_url(string tid):
     catch e:
         return ""
     return ""
+
+# ─── Streaming (sin guardar audio en local) ──────────────────────────────────
+
+# server_stream = "1": las pistas que el servidor tiene se reproducen en streaming
+# en vez de descargarse. Por defecto apagado.
+fn bool srv_stream():
+    return ajuste("server_stream", "0") == "1" and srv_activo()
+
+# Id en el servidor, con caché (acierto 10 min; fallo 30 s) para no preguntar en cada tick.
+fn string srv_id_cache(string tid):
+    string c = state.get("srvid:" + tid, "")
+    if c != "":
+        return c
+    if state.get("srvno:" + tid, "") != "":
+        return ""
+    string sid = srv_id_de(tid)
+    if sid == "":
+        state.set("srvno:" + tid, "1", 30000)
+    else:
+        state.set("srvid:" + tid, sid, 600000)
+        await sqlite.exec("insert or ignore into server_tracks(track_id) values(?)", tid)
+    return sid
+
+# "URL\nCabecera": el motor de audio (audio_engine.cpp) la pasa a ffmpeg con -headers.
+# "" si el modo está apagado o el servidor no tiene la pista.
+fn string srv_url_stream(string tid):
+    if not srv_stream():
+        return ""
+    string sid = srv_id_cache(tid)
+    if sid == "":
+        return ""
+    return srv_base() + "/tracks/" + sid + "/audio\nAuthorization: Bearer " + ajuste("server_token", "")
 
 # Descarga la pista del servidor al temporal del trabajo y lo deja en
 # 'finalizing'. false = el servidor no la tiene (o no hay servidor): seguir con

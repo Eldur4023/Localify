@@ -28,6 +28,7 @@ const TRAZOS = {
 	download: "M11 3h2v9h4l-5 5-5-5h4V3ZM4 19h16v2H4v-2Z",
 	// El indicador de "ya está en disco": la nube clásica con la flecha, para
 	// que se distinga de un botón de acción como "download" de arriba.
+	"cloud": "M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96Z",
 	"cloud-download": "M19.35 10.04A7.49 7.49 0 0 0 12 4a7.49 7.99 0 0 0-7.35 6.04A5.5 5.5 0 0 0 6.5 20H19a5 5 0 0 0 .35-9.96ZM17 13l-5 5-5-5h3V9h4v4h3Z",
 	refresh: "M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35Z",
 	monitor: "M21 2H3a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h7v2H8v2h8v-2h-2v-2h7a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2Zm0 14H3V4h18v12Z",

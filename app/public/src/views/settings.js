@@ -6,6 +6,7 @@ import { confirmar } from "../ui/dialogo.js";
 import { mountEqualizer } from "../ui/equalizer.js";
 import { mostrarError } from "../ui/error-overlay.js";
 import { nodo } from "../ui/dom.js";
+import { pintarCuenta } from "./cuenta.js";
 /**
 * Navegadores cuyas cookies sabe leer yt-dlp.
 *
@@ -113,6 +114,7 @@ function nombrePerfil(p) {
 /** Una pestaña de Ajustes. El orden aquí es el orden en que se pintan. */
 const PESTAÑAS = [
 	"general",
+	"cuenta",
 	"audio",
 	"descargas",
 	"integraciones",
@@ -123,12 +125,19 @@ const PESTAÑAS = [
 * el mismo texto— salvo las dos que antes no tenían una sola sección propia. */
 const ETIQUETA_PESTAÑA = {
 	general: "settings.tab_general",
+	cuenta: "settings.tab_account",
 	audio: "settings.audio",
 	descargas: "settings.downloads",
 	integraciones: "settings.tab_integrations",
 	stats: "settings.tab_stats",
 	almacenamiento: "settings.storage"
 };
+/** Pestaña abierta por última vez: volver de "Editar perfil" cae donde estabas. */
+let ultimaPestaña = "general";
+/** Deja Ajustes abierto en `clave` la próxima vez que se monte (enlaces desde otras vistas). */
+export function abrirAjustes(clave) {
+	ultimaPestaña = clave;
+}
 export function mountSettingsView(contenedor) {
 	const el = nodo("section", "vista vista--scroll ajustes");
 	contenedor.replaceChildren(el);
@@ -139,7 +148,7 @@ export function mountSettingsView(contenedor) {
 	/** Avance de la copia, o `null` si no hay ninguna en curso. */
 	let migrando = null;
 	let ecualizador = null;
-	let pestañaActiva = "general";
+	let pestañaActiva = ultimaPestaña;
 	// ── Piezas de formulario ────────────────────────────────────────────────
 	function seccion(titulo) {
 		const s = nodo("section", "ajustes__seccion");
@@ -355,6 +364,7 @@ export function mountSettingsView(contenedor) {
 			boton.addEventListener("click", () => {
 				if (pestañaActiva === clave) return;
 				pestañaActiva = clave;
+				ultimaPestaña = clave;
 				pintar();
 			});
 			nav.append(boton);
@@ -378,6 +388,10 @@ export function mountSettingsView(contenedor) {
 		el.append(panel);
 		if (pestañaActiva === "stats") {
 			pintarStats(panel);
+			return;
+		}
+		if (pestañaActiva === "cuenta") {
+			void pintarCuenta(panel, pintar);
 			return;
 		}
 		// General

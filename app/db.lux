@@ -278,6 +278,9 @@ fn void db_init():
         await sqlite.exec("create index if not exists idx_tracks_artist_title on tracks(artist_norm, title_norm, id)")
         reparar_titulos_repetidos()
         ajuste_poner("schema_version", "5")
+    # Pistas que el servidor común tiene (se anotan al comprobarlo): el indicador "en streaming".
+    # Fuera de las migraciones numeradas: `if not exists` la crea también en bases ya migradas.
+    await sqlite.exec("create table if not exists server_tracks(track_id text primary key)")
     # Al abrir la app no se sigue sonando: se restaura EN PAUSA en la última
     # posición conocida, como el original.
     await sqlite.exec("update player_state set status = 'paused' where id = 1 and status = 'playing'")

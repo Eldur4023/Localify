@@ -80,6 +80,9 @@ fn void asegurar_descarga(string track_id, string prioridad):
     List<Json> f = await sqlite.query("select track_id from audio_files where track_id = ?", track_id)
     if len(f) > 0:
         return
+    # streaming: lo que el servidor tiene no se descarga
+    if srv_url_stream(track_id) != "":
+        return
     string video = es_video_id(track_id) ? track_id : ""
     await sqlite.exec("""
         insert into download_jobs(track_id, state, priority, video_id, updated_at)
@@ -131,11 +134,15 @@ fn void srv_descargas_tick():
         state.remove("srv_pend:" + tid)
         bool del_servidor = srv_obtener(tid)
         if not del_servidor:
-            # el servidor no la tiene: de vuelta al flujo de siempre
+            # el servidor no la tiene: de vuelta al flujo de siempre. Con vídeo, iniciar_descarga
+            # deja en dlh el handle de yt-dlp: NO se borra (sin él, descargar_tick reencola y
+            # relanza yt-dlp en bucle).
             if vid != "":
                 iniciar_descarga(tid, vid)
-            else:
-                await sqlite.exec("update download_jobs set state = 'matching', updated_at = unixepoch() where track_id = ?", tid)
+                return
+            state.remove("dlh:" + tid)
+            await sqlite.exec("update download_jobs set state = 'matching', updated_at = unixepoch() where track_id = ?", tid)
+            return
         state.remove("dlh:" + tid)
         return
 
@@ -264,6 +271,7 @@ fn bool matching_tick(string tid, string estado_actual):
     state.remove("dlout:" + tid)
     bool ok = codigo != null and jint(codigo, 1) == 0
     if not ok and salida.trim() == "":
+        state.set("ytdlp_fallo", "1")
         # una consulta que falla no invalida el plan: pasa a la siguiente
         return matching_continuar(tid, estado_actual)
 
@@ -446,6 +454,8 @@ fn void descargar_tick(string tid):
     state.remove("dlp:" + tid)
 
     bool ok = codigo != null and jint(codigo, 1) == 0
+    if not ok:
+        state.set("ytdlp_fallo", "1")   # ytdlp_mantener lo actualiza por si es una versión vieja
     List<Json> f = await sqlite.query("select tmp_path, attempts from download_jobs where track_id = ?", tid)
     if len(f) == 0:
         return
@@ -549,15 +559,25 @@ fn void finalizar(string tid):
         elif contenedor.contains("mp3"):
             ext = "mp3"
 
-    # sin ffprobe (móvil) no hay forma de mirarlo: lo que trae el servidor es MP3
-    if info == null and state.get("srvdl:" + tid, "") != "":
-        ext = "mp3"
+    string codec = ""
+    if info != null and jget(info, "streams") != null:
+        List<Json> flujos = jlist(jget(info, "streams"))
+        if len(flujos) > 0:
+            codec = jstr(flujos[0]["codec_name"], "")
 
-    # Destino: SIEMPRE .mp3 (320 kbps, ID3v2.3 + ID3v1) con todas las
-    # etiquetas adheridas y la portada incrustada como fotograma APIC.
+    # sin ffprobe (móvil) no hay forma de mirarlo: el servidor dijo qué formato guarda (mp3 si es uno viejo)
+    if info == null and state.get("srvdl:" + tid, "") != "":
+        ext = state.get("srvext:" + tid, "mp3")
+
+    # Destino: el audio de YouTube ya viene comprimido con pérdida (Opus ~130 kbps o AAC 128 kbps);
+    # recodificarlo a MP3 lo agranda 2,5 veces y le añade otra pérdida. Con ffmpeg se COPIA el flujo
+    # (.opus / .m4a, con etiquetas; la portada solo cabe en .m4a); lo demás pasa a MP3 320 kbps.
     # Si el origen ya es mp3 (p. ej. vino del servidor) se copia tal cual.
     string ext_final = "mp3"
     bool ya_mp3 = ext == "mp3"
+    bool copiar = hay_binario("ffmpeg") and ((codec == "opus" and (ext == "webm" or ext == "ogg")) or (codec == "aac" and ext == "m4a"))
+    if copiar:
+        ext_final = codec == "opus" ? "opus" : "m4a"
 
     string shard = shard_de(tid)
     garantizar_biblioteca()
@@ -565,7 +585,7 @@ fn void finalizar(string tid):
     os.make_dir(dir_destino)
     # sin ffmpeg (móvil sin servidor) el crudo se queda con su contenedor
     if not hay_binario("ffmpeg") and not ya_mp3:
-        ext_final = origen.ends_with(".m4a") ? "m4a" : "webm"
+        ext_final = (ext == "opus" or ext == "m4a") ? ext : (origen.ends_with(".m4a") ? "m4a" : "webm")
     string destino_abs = os.path_join(dir_destino, tid + "." + ext_final)
     string rel = "audio/" + shard + "/" + tid + "." + ext_final
 
@@ -615,47 +635,71 @@ fn void finalizar(string tid):
         if not hecho and destino_abs != origen:
             await os.copy_file(origen, destino_abs, true)
     else:
-        List<string> args = ["-y", "-i", origen]
-        if portada != "":
-            # dos entradas: el audio y la carátula (se copia el stream JPEG,
-            # ffmpeg la envuelve como APIC en el ID3 del mp3)
-            # una miniatura de vídeo es 16:9: se recorta al cuadrado central
-            # (la carátula en los vídeos "Topic"); la del álbum ya es cuadrada
-            List<string> vcodec = portada_temporal ? ["-c:v", "mjpeg", "-q:v", "2", "-vf", "crop=ih:ih"] : ["-c:v", "copy"]
-            args = args + ["-i", portada, "-map", "0:a", "-map", "1:v"] + vcodec + [
-                           "-metadata:s:v", "title=Album cover",
-                           "-metadata:s:v", "comment=Cover (front)"]
-        else:
-            args.add("-vn")
-        args = args + ["-c:a", "libmp3lame", "-b:a", "320k",
-                       "-id3v2_version", "3", "-write_id3v1", "1",
-                       "-map_metadata", "-1"]
-        # etiquetas en el mismo pase: título, artista, álbum, pista, fecha, ISRC
-        args.add("-metadata")
-        args.add("title=" + titulo)
-        if artista != "":
+        if copiar:
+            # copia del flujo, sin recodificar: Opus -> .opus (sin portada: ffmpeg no sabe meterla en Ogg),
+            # AAC -> .m4a (con portada como attached_pic)
+            List<string> ca = ["-y", "-i", origen]
+            if ext_final == "m4a" and portada != "":
+                List<string> vc2 = portada_temporal ? ["-c:v", "mjpeg", "-q:v", "2", "-vf", "crop=ih:ih"] : ["-c:v", "copy"]
+                ca = ca + ["-i", portada, "-map", "0:a", "-map", "1:v"] + vc2 + ["-disposition:v", "attached_pic"]
+            else:
+                ca = ca + ["-map", "0:a"]
+            ca = ca + ["-c:a", "copy", "-map_metadata", "-1"] + etiquetas_ffmpeg(titulo, artista, album, pista_num, fecha, isrc)
+            ca.add(destino_abs)
+            Json rcopia = await os.run("ffmpeg", ca)
+            if jint(rcopia["status"], 1) == 0 and os.is_file(destino_abs) and os.file_size(destino_abs) >= 16384:
+                if portada_temporal:
+                    os.remove_file(portada)
+            else:
+                # la copia falló (flujo raro): se recodifica a MP3 como siempre
+                os.remove_file(destino_abs)
+                copiar = false
+                ext_final = "mp3"
+                destino_abs = os.path_join(dir_destino, tid + ".mp3")
+                rel = "audio/" + shard + "/" + tid + ".mp3"
+        if not copiar:
+            List<string> args = ["-y", "-i", origen]
+            if portada != "":
+                # dos entradas: el audio y la carátula (se copia el stream JPEG,
+                # ffmpeg la envuelve como APIC en el ID3 del mp3)
+                # una miniatura de vídeo es 16:9: se recorta al cuadrado central
+                # (la carátula en los vídeos "Topic"); la del álbum ya es cuadrada
+                List<string> vcodec = portada_temporal ? ["-c:v", "mjpeg", "-q:v", "2", "-vf", "crop=ih:ih"] : ["-c:v", "copy"]
+                args = args + ["-i", portada, "-map", "0:a", "-map", "1:v"] + vcodec + [
+                               "-metadata:s:v", "title=Album cover",
+                               "-metadata:s:v", "comment=Cover (front)"]
+            else:
+                args.add("-vn")
+            args = args + ["-c:a", "libmp3lame", "-b:a", "320k",
+                           "-id3v2_version", "3", "-write_id3v1", "1",
+                           "-map_metadata", "-1"]
+            # etiquetas en el mismo pase: título, artista, álbum, pista, fecha, ISRC
             args.add("-metadata")
-            args.add("artist=" + artista)
-        if album != "":
-            args.add("-metadata")
-            args.add("album=" + album)
-        if pista_num > 0:
-            args.add("-metadata")
-            args.add("track=" + str(pista_num))
-        if fecha != "":
-            args.add("-metadata")
-            args.add("date=" + fecha)
-        if isrc != "":
-            args.add("-metadata")
-            args.add("isrc=" + isrc)
-        args.add(destino_abs)
-        Json r = await os.run("ffmpeg", args)
-        if portada_temporal:
-            os.remove_file(portada)
-        if jint(r["status"], 1) != 0:
-            os.remove_file(destino_abs)
-            await sqlite.exec("update download_jobs set state = 'failed', last_error = 'finalize.transcode_failed', updated_at = unixepoch() where track_id = ?", tid)
-            return
+            args.add("title=" + titulo)
+            if artista != "":
+                args.add("-metadata")
+                args.add("artist=" + artista)
+            if album != "":
+                args.add("-metadata")
+                args.add("album=" + album)
+            if pista_num > 0:
+                args.add("-metadata")
+                args.add("track=" + str(pista_num))
+            if fecha != "":
+                args.add("-metadata")
+                args.add("date=" + fecha)
+            if isrc != "":
+                args.add("-metadata")
+                args.add("isrc=" + isrc)
+            args.add(destino_abs)
+            Json r = await os.run("ffmpeg", args)
+            if portada_temporal:
+                os.remove_file(portada)
+            if jint(r["status"], 1) != 0:
+                os.remove_file(destino_abs)
+                await sqlite.exec("update download_jobs set state = 'failed', last_error = 'finalize.transcode_failed', updated_at = unixepoch() where track_id = ?", tid)
+                return
+
 
     # verificación de duración con ffprobe (±2000 ms, TAMANO_MINIMO 16 KB)
     int duracion_real_ms = 0
@@ -682,15 +726,36 @@ fn void finalizar(string tid):
         on conflict(track_id) do update set rel_path = excluded.rel_path, format = excluded.format,
             codec = excluded.codec, size_bytes = excluded.size_bytes, duration_ms = excluded.duration_ms,
             youtube_id = excluded.youtube_id, verified_at = excluded.verified_at
-        """, tid, rel, ext_final, ext_final, os.file_size(destino_abs), duracion_real_ms > 0 ? duracion_real_ms : null,
+        """, tid, rel, ext_final, ext_final == "m4a" ? "aac" : ext_final, os.file_size(destino_abs), duracion_real_ms > 0 ? duracion_real_ms : null,
         seleccionar_youtube_id(tid))
 
     consolidar(tid)
     srv_subir(tid, destino_abs, ext_final, titulo, artista, album, duracion_real_ms > 0 ? duracion_real_ms : esperado_ms)
     srv_alta(tid)
 
+    # streaming: si el servidor ya la tiene (la subida de arriba o de otro), no se queda copia local
+    state.remove("srvno:" + tid)
+    if srv_stream() and srv_id_cache(tid) != "":
+        os.remove_file(destino_abs)
+        await sqlite.exec("delete from audio_files where track_id = ?", tid)
+
     os.remove_file(origen)
     await sqlite.exec("delete from download_jobs where track_id = ?", tid)
+
+# Etiquetas de ffmpeg: título, artista, álbum, pista, fecha, ISRC.
+fn List<string> etiquetas_ffmpeg(string titulo, string artista, string album, int pista_num, string fecha, string isrc):
+    List<string> t = ["-metadata", "title=" + titulo]
+    if artista != "":
+        t = t + ["-metadata", "artist=" + artista]
+    if album != "":
+        t = t + ["-metadata", "album=" + album]
+    if pista_num > 0:
+        t = t + ["-metadata", "track=" + str(pista_num)]
+    if fecha != "":
+        t = t + ["-metadata", "date=" + fecha]
+    if isrc != "":
+        t = t + ["-metadata", "isrc=" + isrc]
+    return t
 
 # shard: los 2 primeros caracteres alfanuméricos del id (ruta_relativa).
 fn string shard_de(string id):

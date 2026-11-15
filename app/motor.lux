@@ -29,12 +29,16 @@ fn Json fichero_de_pista(string track_id):
         from audio_files af join tracks t on t.id = af.track_id
         where af.track_id = ?
         """, track_id)
-    if len(f) == 0:
-        return { "ruta": "", "durationMs": 0 }
-    string ruta = ruta_audio_abs(jstr(f[0]["rel"], ""))
-    if not os.is_file(ruta):
-        return { "ruta": "", "durationMs": 0 }
-    return { "ruta": ruta, "durationMs": jint(f[0]["dur"], 0) }
+    if len(f) > 0:
+        string ruta = ruta_audio_abs(jstr(f[0]["rel"], ""))
+        if os.is_file(ruta):
+            return { "ruta": ruta, "durationMs": jint(f[0]["dur"], 0) }
+    # Sin fichero local: en streaming, directamente del servidor.
+    string url = srv_url_stream(track_id)
+    if url != "":
+        List<Json> t = await sqlite.query("select duration_ms as dur from tracks where id = ?", track_id)
+        return { "ruta": url, "durationMs": len(t) > 0 ? jint(t[0]["dur"], 0) : 0 }
+    return { "ruta": "", "durationMs": 0 }
 
 # ─── Estado → motor ──────────────────────────────────────────────────────────
 

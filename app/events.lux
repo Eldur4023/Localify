@@ -62,6 +62,10 @@ every "1m":
     # versión nueva en GitHub (cada 6 h; al abrir la app ya se mira siempre; ajuste update_auto = 0 lo desactiva)
     actualizar_comprobar(false)
 
+# yt-dlp: al abrir, cada 24 h y tras un fallo de descarga (en su propio bloque: -U puede tardar).
+every "1s":
+    ytdlp_mantener()
+
 # Reproducción sincronizada entre equipos (sync.lux): envía lo pendiente y pregunta cada segundo.
 every "500ms":
     sync_tick()

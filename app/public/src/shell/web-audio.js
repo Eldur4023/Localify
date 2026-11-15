@@ -38,6 +38,18 @@ export async function arrancarAudioWeb() {
 	let quererSonar = false;
 	let pistaActual = "";
 
+	// Fuente de una pista: URL del servidor si se escucha por streaming, o el fichero local.
+	const cargarPista = async (id) => {
+		let src = `/audio/${encodeURIComponent(id)}`;
+		try {
+			const r = await fetch(`/api/stream-url/${encodeURIComponent(id)}`).then((x) => x.json());
+			if (r?.url) src = r.url;
+		} catch {
+			// sin respuesta: el fichero local
+		}
+		if (id === pistaActual) audio.src = src;
+	};
+
 	const informar = (cuerpo) => {
 		void fetch("/api/player/media-event", {
 			method: "POST",
@@ -157,9 +169,8 @@ export async function arrancarAudioWeb() {
 			case "trackChanged": {
 				if (!ev.trackId) break;
 				pistaActual = ev.trackId;
-				audio.src = `/audio/${encodeURIComponent(ev.trackId)}`;
 				void ponerMetadata(ev.trackId, ev.estado?.track);
-				if (quererSonar) void audio.play().catch(() => {});
+				void cargarPista(ev.trackId).then(() => { if (quererSonar) void audio.play().catch(() => {}); });
 				break;
 			}
 			case "playStatusChanged": {
@@ -179,8 +190,7 @@ export async function arrancarAudioWeb() {
 				// la pista sonando llegó después de fijar el src (404 → el <audio> queda muerto): se
 				// recarga; la posición la corrige la sincronización (deriva) si está activa
 				if (ev.trackId !== pistaActual) break;
-				audio.src = `/audio/${encodeURIComponent(pistaActual)}`;
-				if (quererSonar) void audio.play().catch(() => {});
+				void cargarPista(pistaActual).then(() => { if (quererSonar) void audio.play().catch(() => {}); });
 				break;
 			}
 			case "remoteSeek": {
@@ -207,7 +217,7 @@ export async function arrancarAudioWeb() {
 		const id = estado?.track?.id;
 		if (!id || pistaActual) return;
 		pistaActual = id;
-		audio.src = `/audio/${encodeURIComponent(id)}`;
+		void cargarPista(id);
 		const ms = estado.positionMs ?? 0;
 		if (ms > 0) audio.addEventListener("loadedmetadata", () => { audio.currentTime = ms / 1000; }, { once: true });
 		void ponerMetadata(id, estado.track);

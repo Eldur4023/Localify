@@ -219,7 +219,8 @@ fn bool id_valido(string id):
 
 fn Json user_dto(Json u):
     return { "username": u["username"], "displayName": u["display_name"], "bio": u["bio"], "hide": u["hide"],
-             "hasAvatar": os.is_file("./data/avatars/" + str(u["id"]) + ".jpg") }
+             "hasAvatar": os.is_file("./data/avatars/" + str(u["id"]) + ".jpg"),
+             "hasBanner": os.is_file("./data/banners/" + str(u["id"]) + ".jpg") }
 
 # ¿oculta esta persona `k` (top, time, library) a los demás?
 fn bool oculta(Json u, string k):
@@ -358,10 +359,25 @@ get endpoint("/api/pub/cover/:id", string id):
         return status(404)
     return send_file("./data/tcovers/" + id + ".jpg")
 
+# Streaming para el <audio> del móvil, que no puede mandar cabeceras: lleva un token corto
+# (el que da POST /stream-token) en la URL. Solo vale para esto, no abre el resto de la API.
+get endpoint("/api/pub/audio/:id", string id, string token = ""):
+    Json c = jwt.verify(token)
+    if c == null or jstr(c["use"], "") != "stream":
+        return status(401)
+    List<Json> r = await sqlite.query("select ext from tracks where id = ?", id)
+    if len(r) == 0 or not id_valido(id):
+        return status(404)
+    return send_file("./data/audio/" + id + "." + str(r[0]["ext"]))
+
 # ─── Autenticado ─────────────────────────────────────────────────────────────
 
 group("/api"):
     require jwt.valid else status(401)
+
+    # token de 6 h para /pub/audio (ver arriba)
+    post endpoint("/stream-token"):
+        return { "token": jwt.sign({ "sub": str(yo()), "use": "stream" }, 21600) }
 
     # ── invitaciones ──
     # Cualquier usuario genera códigos de un solo uso (máx. 5 sin usar a la vez).
@@ -417,6 +433,25 @@ group("/api"):
         if len(r) == 0 or not os.is_file("./data/avatars/" + str(r[0]["id"]) + ".jpg"):
             return status(404)
         return send_file("./data/avatars/" + str(r[0]["id"]) + ".jpg")
+
+    # fondo del perfil (imagen ancha; la sube su dueño y la ven todos)
+    put endpoint("/me/banner", File banner):
+        if banner.size < 100:
+            return { "error": "invalid" }.status(400)
+        os.make_dir("data/banners")
+        os.remove_file("./data/banners/" + str(yo()) + ".jpg")   # save() no sobrescribe (ver /me/avatar)
+        banner.save("./data/banners", str(yo()) + ".jpg")
+        return status(204)
+
+    delete endpoint("/me/banner"):
+        os.remove_file("./data/banners/" + str(yo()) + ".jpg")
+        return status(204)
+
+    get endpoint("/users/:name/banner", string name):
+        List<Json> r = await sqlite.query("select id from users where username = ?", name)
+        if len(r) == 0 or not os.is_file("./data/banners/" + str(r[0]["id"]) + ".jpg"):
+            return status(404)
+        return send_file("./data/banners/" + str(r[0]["id"]) + ".jpg")
 
     # ── escuchando ahora ──
     # El cliente avisa al cambiar de canción (title vacío = parado) y repite cada
@@ -580,7 +615,12 @@ group("/api"):
             if i >= 200:
                 break
             string cid = s_of(items[i], "id", "")
-            out.add({ "id": cid, "serverId": id_de_referencia(cid, s_of(items[i], "titleNorm", ""), s_of(items[i], "artistNorm", ""), i_of(items[i], "durationMs", 0)) })
+            string sid = id_de_referencia(cid, s_of(items[i], "titleNorm", ""), s_of(items[i], "artistNorm", ""), i_of(items[i], "durationMs", 0))
+            string formato = ""
+            if sid != "":
+                List<Json> fe = await sqlite.query("select ext from tracks where id = ?", sid)
+                formato = len(fe) > 0 ? str(fe[0]["ext"]) : ""
+            out.add({ "id": cid, "serverId": sid, "ext": formato })
         return out
 
     # ids que el servidor ya tiene, de una lista (hasta 100)
@@ -667,19 +707,51 @@ group("/api"):
         # ¿qué es lo que ha traído? (ffprobe; si falla, se asume webm)
         string contenedor = ""
         Json pr = await os.run("ffprobe", [
-            "-v", "error", "-show_entries", "format=format_name",
+            "-v", "error", "-show_entries", "format=format_name:stream=codec_name",
             "-of", "json", raw
         ])
         Json? probe = jint(pr["status"], 1) == 0 ? parse_json(jstr(pr["stdout"], "")) : null
+        string codec = ""
         if probe != null:
             contenedor = jstr(jget(jget(probe, "format"), "format_name"), "")
+            List<Json> flujos = probe["streams"] == null ? [] : probe["streams"]
+            if len(flujos) > 0:
+                codec = str(flujos[0]["codec_name"])
 
         os.make_dir("data/audio")
-        string destino = "./data/audio/" + id + ".mp3"
+        # Opus y AAC (lo que da YouTube) se guardan SIN recodificar: MP3 320k pesaría 2,5 veces más
+        # y añadiría otra pérdida. Lo demás sí pasa a MP3.
+        bool copiar_opus = codec == "opus" and (contenedor.contains("webm") or contenedor.contains("matroska") or contenedor.contains("ogg"))
+        bool copiar_aac = codec == "aac" and contenedor.contains("mp4")
+        string ext_final = copiar_opus ? "opus" : (copiar_aac ? "m4a" : "mp3")
+        string destino = "./data/audio/" + id + "." + ext_final
         string portada = "./data/relay/" + id + ".jpg"
         bool tiene_portada = os.is_file(portada) and os.file_size(portada) > 100
         bool ok = false
-        if contenedor.contains("mp3"):
+        if copiar_opus or copiar_aac:
+            List<string> args = ["-y", "-v", "error", "-i", raw]
+            if copiar_aac and tiene_portada:
+                args = args + ["-i", portada, "-map", "0:a", "-map", "1:v", "-c:v", "copy", "-disposition:v", "attached_pic"]
+            else:
+                args = args + ["-map", "0:a"]
+            args = args + ["-c:a", "copy", "-map_metadata", "-1", "-metadata", "title=" + title.trim()]
+            if artist.trim() != "":
+                args = args + ["-metadata", "artist=" + artist.trim()]
+            if album.trim() != "":
+                args = args + ["-metadata", "album=" + album.trim()]
+            args.add(destino)
+            Json fc = await os.run("ffmpeg", args)
+            ok = jint(fc["status"], 1) == 0 and os.is_file(destino) and os.file_size(destino) >= 16384
+            if not ok:
+                # flujo raro: MP3 como siempre
+                os.remove_file(destino)
+                ext_final = "mp3"
+                destino = "./data/audio/" + id + ".mp3"
+                copiar_opus = false
+                copiar_aac = false
+        if copiar_opus or copiar_aac:
+            log.info("relay: " + id + " guardado sin recodificar (" + ext_final + ")")
+        elif contenedor.contains("mp3"):
             # ya es mp3: tal cual
             await os.move(raw, destino)
             ok = os.is_file(destino) and os.file_size(destino) >= 16384
@@ -710,11 +782,11 @@ group("/api"):
 
         await sqlite.exec("""
             insert into tracks(id, title, artist, album, duration_ms, search_norm, title_norm, artist_norm, ext, size, uploaded_by)
-            values(?, ?, ?, ?, ?, ?, ?, ?, 'mp3', ?, ?)
-            on conflict(id) do update set ext = 'mp3', size = excluded.size""",
+            values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            on conflict(id) do update set ext = excluded.ext, size = excluded.size""",
             id, title.trim(), artist, album, duration_ms,
-            search_norm.trim(), title_norm.trim(), artist_norm.trim(), os.file_size(destino), yo())
-        return { "stored": true, "id": id, "ext": "mp3" }.status(201)
+            search_norm.trim(), title_norm.trim(), artist_norm.trim(), ext_final, os.file_size(destino), yo())
+        return { "stored": true, "id": id, "ext": ext_final }.status(201)
 
     # Portada opcional para incrustar en el relay (se sube ANTES del audio).
     put endpoint("/relay/:id/cover", string id, File cover):

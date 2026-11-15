@@ -2005,3 +2005,116 @@ a.social__fila:hover {
 }
 .recorte__fila { display: flex; align-items: center; gap: var(--sp-3); margin-top: var(--sp-3); }
 .recorte__zoom { flex: 1; accent-color: var(--accent); }
+
+/* ── Ajustes: secciones como tarjetas, filas con título y ayuda ───────────── */
+
+.ajustes:not(.social) .ajustes__seccion {
+  margin: 0 0 var(--sp-4);
+  padding: var(--sp-5);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+}
+.ajustes:not(.social) .ajustes__cuerpo { gap: var(--sp-3); }
+/* separador solo entre filas de ajuste, nunca en botones ni avisos sueltos */
+.ajustes:not(.social) .ajustes__cuerpo > :is(.ajuste, .ajustes__campo) ~ :is(.ajuste, .ajustes__campo) {
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border-subtle);
+}
+.ajustes__cabecera { margin-bottom: var(--sp-4); }
+.ajustes__cabecera .ajustes__titulo { margin: 0; }
+.ajustes__subtitulo {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-md);
+  color: var(--text-subdued);
+}
+
+/* Fila: texto a la izquierda, control a la derecha */
+.ajuste {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+}
+.ajuste--pulsable { cursor: pointer; }
+.ajuste__texto { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ajuste__texto strong { font-weight: var(--fw-medium); font-size: var(--fs-md); }
+.ajuste__texto span { font-size: var(--fs-sm); color: var(--text-subdued); }
+.ajuste > .boton { flex: none; }
+
+/* Ajustes › Cuenta */
+.cuenta__perfil { display: flex; align-items: center; gap: var(--sp-4); flex-wrap: wrap; }
+.cuenta__perfil-texto { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 160px; }
+.cuenta__perfil-texto strong { font-size: var(--fs-lg); }
+.cuenta__perfil-texto span { font-size: var(--fs-sm); color: var(--text-subdued); overflow-wrap: anywhere; }
+.cuenta__perfil-acciones { display: flex; gap: var(--sp-2); }
+.cuenta__codigos { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.cuenta__codigos code {
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tinted);
+  font-size: var(--fs-md);
+  user-select: all;
+}
+.cuenta__solo { align-self: flex-start; }
+a.boton { text-decoration: none; }
+
+/* Perfil propio: acceso a editar, y la pantalla de edición */
+.perfil__editar { margin-top: var(--sp-3); }
+.perfil__volver { display: inline-block; margin-bottom: var(--sp-3); color: var(--text-subdued); text-decoration: none; }
+.perfil__volver:hover { color: var(--text-base); }
+.perfil__editar-titulo { margin: 0 0 var(--sp-5); font-size: var(--fs-xl); }
+.perfil__form { max-width: 560px; padding: var(--sp-5); border-radius: var(--radius-lg); background: var(--bg-elevated); display: flex; flex-direction: column; gap: var(--sp-5); }
+.perfil__form-foto { display: flex; align-items: center; gap: var(--sp-4); }
+.perfil__form-foto .perfil__cambiar-foto { flex: none; }
+.perfil__form-campo { display: flex; flex-direction: column; gap: var(--sp-2); }
+.perfil__input { width: 100%; min-width: 0; }
+.perfil__textarea { height: auto; padding-block: var(--sp-2); resize: vertical; }
+.perfil__contador { align-self: flex-end; font-size: var(--fs-xs); color: var(--text-muted); }
+.perfil__form-acciones { display: flex; align-items: center; gap: var(--sp-3); }
+
+/* Ajustes: columna centrada, sin barras visibles (se puede desplazar igual) y pestañas fijas */
+.ajustes:not(.social) {
+  max-width: none;
+  scrollbar-width: none;
+}
+.ajustes:not(.social)::-webkit-scrollbar { display: none; }
+.ajustes:not(.social) > * {
+  width: 100%;
+  max-width: 720px;
+  margin-inline: auto;
+}
+.ajustes:not(.social) .ajustes__tabs {
+  overflow: visible;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.ajustes:not(.social) .ajustes__ayuda { text-align: center; }
+
+/* Texto centrado dentro de botones y controles */
+.boton, .ajustes__tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  text-align: center;
+}
+.ajustes__select, .ajustes__input { line-height: normal; }
+.perfil__ajustes { margin-top: var(--sp-1); }
+
+/* Fondo de perfil elegido por la persona */
+.perfil__cabecera--fondo {
+  background:
+    linear-gradient(to bottom, rgba(0, 0, 0, 0.25), rgba(0, 0, 0, 0.7)),
+    var(--perfil-fondo) center / cover no-repeat;
+}
+.perfil__fondo-acciones {
+  position: absolute;
+  top: var(--sp-3);
+  right: var(--sp-3);
+  display: flex;
+  gap: var(--sp-2);
+  z-index: 1;
+}
+.perfil__fondo-acciones .boton { gap: var(--sp-2); background: rgba(0, 0, 0, 0.45); backdrop-filter: blur(6px); }
+.perfil__fondo-acciones .boton:hover:not(:disabled) { background: rgba(0, 0, 0, 0.65); }
+.recorte--ancho { width: min(92vw, 640px); }
