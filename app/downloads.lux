@@ -790,9 +790,15 @@ fn bool ffprobe_disponible():
     state.set("ffprobe_ok", ok ? "1" : "0")
     return ok
 
+# Con caché (10 min): se llama varias veces por descarga y cada llamada lanzaba un proceso.
 fn bool hay_binario(string nombre):
+    string c = state.get("bin:" + nombre, "")
+    if c != "":
+        return c == "1"
     Json r = await os.run(es_windows() ? "where" : "which", [nombre])
-    return jint(r["status"], 1) == 0 and jstr(r["stdout"], "").trim() != ""
+    bool hay = jint(r["status"], 1) == 0 and jstr(r["stdout"], "").trim() != ""
+    state.set("bin:" + nombre, hay ? "1" : "0", 600000)
+    return hay
 
 fn Json? ffprobe_info(string ruta):
     if not ffprobe_disponible():

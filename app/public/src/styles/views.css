@@ -2082,6 +2082,9 @@ a.boton { text-decoration: none; }
   width: 100%;
   max-width: 720px;
   margin-inline: auto;
+  /* Columna flex con contenido largo (estadísticas): sin esto los hijos se
+     encogen y el panel se pinta encima de las pestañas con wrap. */
+  flex-shrink: 0;
 }
 .ajustes:not(.social) .ajustes__tabs {
   overflow: visible;

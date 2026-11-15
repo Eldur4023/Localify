@@ -740,6 +740,7 @@ fn void cmd_playlist_add(Json args):
                 nuevo_id(), plid, ids[i], pos)
     await sqlite.exec("update playlists set updated_at = unixepoch() where id = ?", plid)
     # meter una canción en una playlist es decir "la quiero" (prefetch)
+    srv_precargar(ids)
     for int i in range(0, len(ids)):
         asegurar_descarga(ids[i], "prefetch")
 

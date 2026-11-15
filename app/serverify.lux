@@ -149,6 +149,36 @@ fn string srv_id_cache(string tid):
         await sqlite.exec("insert or ignore into server_tracks(track_id) values(?)", tid)
     return sid
 
+# Calienta la caché de srv_id_cache para una lista de pistas con UNA petición (hasta 200), en vez de una
+# por pista: lo usan las acciones en lote (descargar una playlist, añadir varias canciones).
+fn void srv_precargar(List<string> ids):
+    if not srv_stream() or len(ids) == 0:
+        return
+    List<string> faltan = []
+    for int i in range(0, len(ids)):
+        if len(faltan) < 200 and state.get("srvid:" + ids[i], "") == "" and state.get("srvno:" + ids[i], "") == "":
+            faltan.add(ids[i])
+    if len(faltan) == 0:
+        return
+    List<Json> f = await sqlite.query("select id, title_norm, artist_norm, duration_ms from tracks where id in (?)", faltan)
+    List<Json> items = []
+    for int i in range(0, len(f)):
+        items.add({ "id": jstr(f[i]["id"], ""), "titleNorm": jstr(f[i]["title_norm"], ""), "artistNorm": jstr(f[i]["artist_norm"], ""),
+                    "durationMs": jint(f[i]["duration_ms"], 0) })
+    Json? r = srv("POST", "/tracks/match", { "items": items }, 15000)
+    if r == null or r["status"] != 200:
+        return
+    List<Json> res = jlist(r["body"])
+    for int i in range(0, len(res)):
+        string tid = jstr(res[i]["id"], "")
+        string sid = jstr(res[i]["serverId"], "")
+        if sid == "":
+            state.set("srvno:" + tid, "1", 30000)
+        else:
+            state.set("srvid:" + tid, sid, 600000)
+            state.set("srvext:" + tid, jstr(res[i]["ext"], "mp3"), 3600000)
+            await sqlite.exec("insert or ignore into server_tracks(track_id) values(?)", tid)
+
 # "URL\nCabecera": el motor de audio (audio_engine.cpp) la pasa a ffmpeg con -headers.
 # "" si el modo está apagado o el servidor no tiene la pista.
 fn string srv_url_stream(string tid):
