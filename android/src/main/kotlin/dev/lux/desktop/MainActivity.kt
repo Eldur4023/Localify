@@ -110,7 +110,13 @@ class MainActivity : Activity() {
                 override fun onShowFileChooser(w: WebView, cb: ValueCallback<Array<Uri>>, p: FileChooserParams): Boolean {
                     elegirArchivo?.onReceiveValue(null)
                     elegirArchivo = cb
-                    startActivityForResult(Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE).setType("image/*"), 7)
+                    // Respeta accept/multiple del <input>: audio abre el explorador de archivos, no la galería.
+                    val mimes = p.acceptTypes.flatMap { it.split(",") }.map { it.trim() }.filter { "/" in it }.toTypedArray()
+                    val i = Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE)
+                        .setType(mimes.singleOrNull() ?: "*/*")
+                        .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, p.mode == FileChooserParams.MODE_OPEN_MULTIPLE)
+                    if (mimes.size > 1) i.putExtra(Intent.EXTRA_MIME_TYPES, mimes)
+                    startActivityForResult(i, 7)
                     return true
                 }
             }
@@ -217,7 +223,7 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         if (requestCode == 7) {
-            elegirArchivo?.onReceiveValue(data?.data?.takeIf { resultCode == RESULT_OK }?.let { arrayOf(it) })
+            elegirArchivo?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(resultCode, data))
             elegirArchivo = null
         } else super.onActivityResult(requestCode, resultCode, data)
     }
