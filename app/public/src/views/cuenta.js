@@ -227,14 +227,10 @@ function seccionInvitaciones() {
 	const { s, cuerpo } = seccion(t("social.invites"), t("social.invites_help"));
 	const lista = nodo("div", "cuenta__codigos");
 	const aviso = nodo("p", "ajustes__ayuda ajustes__ayuda--aviso");
-	const pintarCodigos = async () => {
-		lista.replaceChildren();
-		for (const c of await social.invites()) lista.append(nodo("code", "", c.code));
-	};
-	void pintarCodigos().catch(() => {});
+	// Un código solo se ve al generarlo: la lista vive con esta sección y se
+	// pierde al salir de Cuenta (el servidor los sigue guardando sin usar).
 	cuerpo.append(lista, aviso, boton(t("social.invite_new"), "boton--sutil cuenta__solo", async () => {
-		await social.createInvite();
-		await pintarCodigos();
+		lista.append(nodo("code", "", (await social.createInvite()).code));
 	}, aviso));
 	return s;
 }

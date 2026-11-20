@@ -339,7 +339,6 @@ export const social = {
 		displayName,
 		inviteCode
 	}),
-	invites: () => invoke("server_invites"),
 	createInvite: () => invoke("server_invite_create"),
 	logout: () => invoke("server_logout"),
 	setUpload: (enabled) => invoke("server_set_upload", { enabled }),
