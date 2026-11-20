@@ -18,3 +18,16 @@ post endpoint("/api/window/minimize"):
 post endpoint("/api/window/restore"):
     window.restore()
     return status(204)
+
+# Enlaces localify:// (p. ej. localify://invite?server=…&code=… desde la página de invitación del
+# servidor). El sistema abre el binario con el enlace; main() (runtime.cpp) o MainActivity lo
+# mandan aquí, a la instancia que esté abierta. Se guarda hasta que la interfaz lo recoja
+# (social_deeplink_take): llega antes de que la página cargue si la app estaba cerrada.
+post endpoint("/api/deeplink"):
+    string enlace = request.body.trim()
+    if not enlace.starts_with("localify://") or len(enlace) > 2000:
+        return status(400)
+    state.set("deeplink", enlace)
+    state.incr("deeplink_seq")
+    window.restore()
+    return status(204)

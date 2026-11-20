@@ -1,4 +1,4 @@
-import { library, settings as api, stats as statsApi } from "../ipc/client.js";
+import { library, settings as api, social, stats as statsApi } from "../ipc/client.js";
 import { alRecibir } from "../ipc/events.js";
 import { alCambiarIdioma, cambiarIdioma, t } from "../i18n/index.js";
 import { conEspera } from "../ui/cards.js";
@@ -7,6 +7,7 @@ import { mountEqualizer } from "../ui/equalizer.js";
 import { mostrarError } from "../ui/error-overlay.js";
 import { nodo } from "../ui/dom.js";
 import { pintarCuenta } from "./cuenta.js";
+import { pintarServidor } from "./servidor.js";
 /**
 * Navegadores cuyas cookies sabe leer yt-dlp.
 *
@@ -115,6 +116,7 @@ function nombrePerfil(p) {
 const PESTAÑAS = [
 	"general",
 	"cuenta",
+	"servidor",
 	"audio",
 	"descargas",
 	"integraciones",
@@ -126,6 +128,7 @@ const PESTAÑAS = [
 const ETIQUETA_PESTAÑA = {
 	general: "settings.tab_general",
 	cuenta: "settings.tab_account",
+	servidor: "settings.tab_server",
 	audio: "settings.audio",
 	descargas: "settings.downloads",
 	integraciones: "settings.tab_integrations",
@@ -134,6 +137,10 @@ const ETIQUETA_PESTAÑA = {
 };
 /** Pestaña abierta por última vez: volver de "Editar perfil" cae donde estabas. */
 let ultimaPestaña = "general";
+/** Mi papel en el servidor común: "admin", "user" (con sesión) o "" (sin servidor o sin sesión: no
+* hay pestaña Servidor). Se recuerda entre visitas para que la pestaña no aparezca de golpe, y se
+* vuelve a preguntar cada vez que se abre Ajustes. */
+let papel = "";
 /** Deja Ajustes abierto en `clave` la próxima vez que se monte (enlaces desde otras vistas). */
 export function abrirAjustes(clave) {
 	ultimaPestaña = clave;
@@ -354,6 +361,7 @@ export function mountSettingsView(contenedor) {
 		const nav = nodo("div", "ajustes__tabs");
 		nav.setAttribute("role", "tablist");
 		for (const clave of PESTAÑAS) {
+			if (clave === "servidor" && !papel) continue;
 			const boton = document.createElement("button");
 			boton.type = "button";
 			boton.className = "ajustes__tab";
@@ -392,6 +400,10 @@ export function mountSettingsView(contenedor) {
 		}
 		if (pestañaActiva === "cuenta") {
 			void pintarCuenta(panel, pintar);
+			return;
+		}
+		if (pestañaActiva === "servidor") {
+			void pintarServidor(panel, papel === "admin", comprobarAdmin);
 			return;
 		}
 		// General
@@ -902,6 +914,17 @@ export function mountSettingsView(contenedor) {
 	}).catch((e) => {
 		mostrarError(t("error.internal"), String(e));
 	});
+	/** Pregunta al servidor si soy admin (403 = con sesión, sin ser admin) y repinta si cambia: aparece o
+	* se va la pestaña Servidor, o sus secciones de admin. */
+	function comprobarAdmin() {
+		void social.admin("GET", "/settings").then(() => "admin", (e) => e?.api?.messageKey === "error.admin_forbidden" ? "user" : "").then((nuevo) => {
+			const cambia = nuevo !== papel || pestañaActiva === "servidor";
+			papel = nuevo;
+			if (!nuevo && pestañaActiva === "servidor") pestañaActiva = ultimaPestaña = "general";
+			if (actual && cambia) pintar();
+		});
+	}
+	comprobarAdmin();
 	const dejarIdioma = alCambiarIdioma(pintar);
 	return { destroy() {
 		dejarIdioma();

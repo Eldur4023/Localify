@@ -19,11 +19,12 @@ install -Dm644 /dev/stdin "$P/usr/share/applications/Localify.desktop" <<DESK
 Type=Application
 Name=Localify
 Comment=Reproductor de musica local con la experiencia de Spotify
-Exec=localify
+Exec=localify %u
 Icon=localify
 Terminal=false
 Categories=AudioVideo;Audio;Music;
 StartupWMClass=Localify
+MimeType=x-scheme-handler/localify;
 DESK
 python3 -c "
 from PIL import Image

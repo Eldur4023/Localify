@@ -32,6 +32,13 @@ app:
         pool 4
 
 on start:
+    # Versión del servidor: la de la app de este repo (../app/version.txt) o SERVERIFY_VERSION.
+    # Solo se atiende a clientes de esa misma versión (cabecera X-Localify-Version), PC o APK.
+    # Sin ninguna de las dos, no se exige versión.
+    string ver = os.getenv("SERVERIFY_VERSION", "")
+    if ver == "" and os.is_file("../app/version.txt"):
+        ver = (await os.read_file("../app/version.txt")).trim()
+    state.set("srv_version", ver)
     os.make_dir("data")
     os.make_dir("data/audio")
     await sqlite.exec("""
@@ -46,6 +53,28 @@ on start:
     # Qué oculta cada persona de su perfil a los demás: lista separada por comas (top, time, library)
     if len(await sqlite.query("select 1 from pragma_table_info('users') where name = 'hide'")) == 0:
         await sqlite.exec("alter table users add column hide text not null default ''")
+    # Administración: el primer usuario que se registra es admin. Los admins deciden quién invita,
+    # banean (banned_at: no entra ni usa la API, reversible) y nombran a otros admins.
+    if len(await sqlite.query("select 1 from pragma_table_info('users') where name = 'is_admin'")) == 0:
+        await sqlite.exec("alter table users add column is_admin integer not null default 0")
+        await sqlite.exec("alter table users add column banned_at integer")
+    # servidores de antes de los admins: el usuario más antiguo pasa a serlo
+    if len(await sqlite.query("select 1 from users where is_admin = 1")) == 0:
+        await sqlite.exec("update users set is_admin = 1 where id = (select min(id) from users)")
+    await sqlite.exec("create table if not exists server_settings(key text primary key, value text not null)")
+    # Historial: qué se hace en el servidor (Ajustes › Servidor, filtrable). `actor` guarda el nombre
+    # para que la fila siga leyéndose si la cuenta desaparece.
+    # ponytail: sin límite de tamaño; purgar lo de más de N días si la BD crece de verdad
+    await sqlite.exec("""
+        create table if not exists audit_log(
+            id integer primary key,
+            at integer not null default (unixepoch()),
+            actor text not null default '',
+            action text not null,
+            target text not null default '',
+            detail text not null default ''
+        )""")
+    await sqlite.exec("create index if not exists idx_audit_at on audit_log(at)")
     await sqlite.exec("""
         create table if not exists invites(
             code text primary key,
@@ -217,8 +246,36 @@ fn bool id_valido(string id):
             return false
     return true
 
+fn string ajuste_srv(string k, string def):
+    List<Json> r = await sqlite.query("select value from server_settings where key = ?", k)
+    return len(r) == 0 ? def : str(r[0]["value"])
+
+fn bool es_admin(int uid):
+    return len(await sqlite.query("select 1 from users where id = ? and is_admin = 1 and banned_at is null", uid)) > 0
+
+# Ajuste "invites": "everyone" (cualquiera genera códigos) o "admins"
+fn bool puede_invitar(int uid):
+    return ajuste_srv("invites", "everyone") == "everyone" or es_admin(uid)
+
+# ¿La cuenta del token sigue existiendo y sin ban? Un token firmado vale 30 días aunque banees
+# a su dueño: esto lo corta. Caché de 60 s en memoria; banear la borra al momento.
+fn bool cuenta_viva(int uid):
+    string k = "viva:" + str(uid)
+    if state.get(k, "") != "":
+        return true
+    if len(await sqlite.query("select 1 from users where id = ? and banned_at is null", uid)) == 0:
+        return false
+    state.set(k, "1", 60000)
+    return true
+
+# Una línea en el historial. actor_id 0 = sin sesión (p. ej. un login fallido); `quien` lo nombra.
+fn void apuntar(int actor_id, string accion, string objetivo, string detalle, string quien = ""):
+    await sqlite.exec("insert into audit_log(actor, action, target, detail) values(coalesce((select username from users where id = ?), ?), ?, ?, ?)",
+        actor_id, quien, accion, objetivo.slice(0, 100), detalle.slice(0, 200))
+
 fn Json user_dto(Json u):
     return { "username": u["username"], "displayName": u["display_name"], "bio": u["bio"], "hide": u["hide"],
+             "isAdmin": jint(u["is_admin"], 0) == 1,
              "hasAvatar": os.is_file("./data/avatars/" + str(u["id"]) + ".jpg"),
              "hasBanner": os.is_file("./data/banners/" + str(u["id"]) + ".jpg") }
 
@@ -322,9 +379,46 @@ fn void escribir_pistas(int pid, List<Json> pistas, int uid):
 # ─── Público ─────────────────────────────────────────────────────────────────
 
 get endpoint("/api/info"):
-    return { "name": "Serverify", "version": 1 }
+    return { "name": "Serverify", "version": 1, "appVersion": state.get("srv_version", "") }
+
+# Enlace de invitación: http(s)://servidor:puerto/invite/<código>. Lo abre un navegador (los chats no
+# convierten en enlace un localify://), y esta página pasa a la app con localify://invite, que
+# Localify tiene registrado en PC y Android: abre Social con el servidor y el código ya puestos.
+fn string esc_html(string s):
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;")
+
+get endpoint("/invite/:code", string code):
+    bool es = request.headers.get("accept-language", "").lower().starts_with("es")
+    string c = esc_html(code.lower())
+    string servidor = esc_html(request.host)
+    string titulo = es ? "Invitación a Localify" : "Localify invite"
+    string h = "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'><title>" + titulo + "</title>"
+    h += "<style>body{font:16px system-ui,sans-serif;background:#121212;color:#eee;max-width:32rem;margin:15vh auto;padding:0 16px}"
+    h += "a.b{display:inline-block;background:#1ed760;color:#000;padding:.7em 1.4em;border-radius:99px;text-decoration:none;font-weight:700}"
+    h += "code{background:#2a2a2a;padding:.1em .4em;border-radius:4px}</style><h1>" + titulo + "</h1>"
+    List<Json> r = await sqlite.query("select 1 from invites where code = ? and used_by is null", code.lower())
+    if len(r) == 0:
+        h += "<p>" + (es ? "Esta invitación ya se usó o no existe." : "This invite was already used or doesn't exist.") + "</p>"
+        return html(h)
+    h += "<p>" + (es ? "Te han invitado al servidor " : "You've been invited to the server ") + "<b>" + servidor + "</b>.</p>"
+    h += "<p><a class=b href='localify://invite?server=" + servidor + "&amp;code=" + c + "'>" + (es ? "Abrir en Localify" : "Open in Localify") + "</a></p>"
+    h += "<p>" + (es ? "¿No se abre? En Localify, ve a Social, conecta con " : "Not opening? In Localify, go to Social, connect to ") + "<b>" + servidor + "</b> "
+    h += (es ? "y regístrate con el código " : "and sign up with the code ") + "<code>" + c + "</code>.</p>"
+    h += "<script>location.href=document.querySelector('a.b').href</script>"
+    return html(h)
+
+# ¿El cliente viene de la versión del servidor? /api/info, la portada pública (Discord) y el audio
+# público (el <audio> del móvil no manda cabeceras; ya va con token) no lo exigen.
+fn bool version_ok():
+    string v = state.get("srv_version", "")
+    return v == "" or request.headers.get("x-localify-version", "") == v
+
+fn Json version_rechazo():
+    return { "error": "version_mismatch", "serverVersion": state.get("srv_version", "") }.status(426)
 
 post endpoint("/api/register", Json b):
+    if not version_ok():
+        return version_rechazo()
     if state.incr("reg:" + request.ip, 1, 3600000) > 20:
         return { "error": "rate_limited" }.status(429)
     string user = s_of(b, "username", "").trim()
@@ -334,8 +428,8 @@ post endpoint("/api/register", Json b):
     string nombre = s_of(b, "displayName", user).trim().slice(0, 40)
     if nombre == "":
         nombre = user
-    # Con usuarios ya dentro, solo se entra con un código de invitación de uso único
-    # (lo genera cualquier usuario). El primer usuario de un servidor vacío no lo necesita.
+    # Con usuarios ya dentro, solo se entra con un código de invitación de uso único. El primer
+    # usuario de un servidor vacío no lo necesita y queda como admin.
     string codigo = s_of(b, "inviteCode", "").trim().lower()
     List<Json> hay = await sqlite.query("select count(*) as n from users")
     bool exigir = int(hay[0]["n"]) > 0
@@ -345,22 +439,33 @@ post endpoint("/api/register", Json b):
             return { "error": "invite_required" }.status(403)
     string h = await hash.password(pass)
     try:
-        await sqlite.exec("insert into users(username, display_name, pass_hash) values(?, ?, ?)", user, nombre, h)
+        await sqlite.exec("insert into users(username, display_name, pass_hash, is_admin) values(?, ?, ?, ?)", user, nombre, h, exigir ? 0 : 1)
     catch e:
         return { "error": "username_taken" }.status(409)
     int id = await sqlite.last_id()
     # shortcut: dos registros simultáneos con el mismo código podrían colarse; subir a transacción si importa
+    string invito = ""
     if exigir:
         await sqlite.exec("update invites set used_by = ?, used_at = unixepoch() where code = ?", id, codigo)
+        List<Json> por = await sqlite.query("select (select username from users where id = created_by) as por from invites where code = ?", codigo)
+        invito = len(por) > 0 ? jstr(por[0]["por"], "") : ""
+    apuntar(id, "register", user, exigir ? "invite " + codigo.slice(0, 4) + "… · " + invito : "admin")
     return { "token": jwt.sign({ "sub": str(id) }, 2592000), "user": { "username": user, "displayName": nombre, "bio": "" } }.status(201)
 
 post endpoint("/api/login", Json b):
+    if not version_ok():
+        return version_rechazo()
     if state.incr("login:" + request.ip, 1, 60000) > 10:
         return { "error": "rate_limited" }.status(429)
     List<Json> r = await sqlite.query("select * from users where username = ?", s_of(b, "username", ""))
     # misma respuesta para usuario inexistente y contraseña errónea
     if len(r) == 0 or not await hash.verify(s_of(b, "password", ""), str(r[0]["pass_hash"])):
+        apuntar(0, "login_failed", s_of(b, "username", ""), request.ip, s_of(b, "username", "").slice(0, 32))
         return { "error": "bad_credentials" }.status(401)
+    if r[0]["banned_at"] != null:
+        apuntar(int(r[0]["id"]), "login_banned", str(r[0]["username"]), request.ip)
+        return { "error": "banned" }.status(403)
+    apuntar(int(r[0]["id"]), "login", str(r[0]["username"]), request.ip)
     return { "token": jwt.sign({ "sub": str(r[0]["id"]) }, 2592000), "user": user_dto(r[0]) }
 
 # Portada de una pista, pública (sin token): Discord la descarga desde sus servidores.
@@ -374,7 +479,7 @@ get endpoint("/api/pub/cover/:id", string id):
 # (el que da POST /stream-token) en la URL. Solo vale para esto, no abre el resto de la API.
 get endpoint("/api/pub/audio/:id", string id, string token = ""):
     Json c = jwt.verify(token)
-    if c == null or jstr(c["use"], "") != "stream":
+    if c == null or jstr(c["use"], "") != "stream" or not cuenta_viva(int(c["sub"])):
         return status(401)
     List<Json> r = await sqlite.query("select ext from tracks where id = ?", id)
     if len(r) == 0 or not id_valido(id):
@@ -384,23 +489,29 @@ get endpoint("/api/pub/audio/:id", string id, string token = ""):
 # ─── Autenticado ─────────────────────────────────────────────────────────────
 
 group("/api"):
+    require version_ok() else version_rechazo()
     require jwt.valid else status(401)
+    require cuenta_viva(yo()) else status(401)
 
     # token de 6 h para /pub/audio (ver arriba)
     post endpoint("/stream-token"):
         return { "token": jwt.sign({ "sub": str(yo()), "use": "stream" }, 21600) }
 
     # ── invitaciones ──
-    # Cualquier usuario genera códigos de un solo uso (máx. 5 sin usar a la vez).
+    # Códigos de un solo uso: los genera cualquiera o solo los admins (ajuste "invites").
+    # Quien no es admin, máx. 5 sin usar a la vez.
     get endpoint("/invites"):
         return await sqlite.query("select code, created_at from invites where created_by = ? and used_by is null order by created_at", yo())
 
     post endpoint("/invites"):
+        if not puede_invitar(yo()):
+            return { "error": "forbidden" }.status(403)
         List<Json> n = await sqlite.query("select count(*) as n from invites where created_by = ? and used_by is null", yo())
-        if int(n[0]["n"]) >= 5:
+        if int(n[0]["n"]) >= 5 and not es_admin(yo()):
             return { "error": "too_many" }.status(429)
         string codigo = hash.random_hex(6)
         await sqlite.exec("insert into invites(code, created_by) values(?, ?)", codigo, yo())
+        apuntar(yo(), "invite_create", "", codigo.slice(0, 4) + "…")
         return { "code": codigo }.status(201)
 
     get endpoint("/me"):
@@ -452,6 +563,23 @@ group("/api"):
         os.make_dir("data/banners")
         os.remove_file("./data/banners/" + str(yo()) + ".jpg")   # save() no sobrescribe (ver /me/avatar)
         banner.save("./data/banners", str(yo()) + ".jpg")
+        return status(204)
+
+    # Borrar mi cuenta: pide la contraseña. Se va todo lo mío (perfil, playlists, biblioteca, escuchas,
+    # códigos); el audio que subí se queda en el servidor. Si era el último admin, pasa a serlo la
+    # cuenta activa más antigua (un servidor con gente no se queda sin admin).
+    post endpoint("/me/delete", Json b):
+        List<Json> r = await sqlite.query("select * from users where id = ?", yo())
+        # 403 y no 401: un 401 es "sesión caducada" y el cliente tiraría el token
+        if len(r) == 0 or not await hash.verify(s_of(b, "password", ""), str(r[0]["pass_hash"])):
+            return { "error": "bad_password" }.status(403)
+        apuntar(yo(), "account_delete", str(r[0]["username"]), "")
+        await sqlite.exec("delete from users where id = ?", yo())
+        os.remove_file("./data/avatars/" + str(yo()) + ".jpg")
+        os.remove_file("./data/banners/" + str(yo()) + ".jpg")
+        state.remove("viva:" + str(yo()))
+        if len(await sqlite.query("select 1 from users where is_admin = 1 and banned_at is null")) == 0:
+            await sqlite.exec("update users set is_admin = 1 where id = (select min(id) from users where banned_at is null)")
         return status(204)
 
     delete endpoint("/me/banner"):
@@ -556,7 +684,7 @@ group("/api"):
                    u.id,
                    (select title from presence x where x.user_id = u.id and x.updated_at > unixepoch() - 150) as np_title,
                    (select artist from presence x where x.user_id = u.id and x.updated_at > unixepoch() - 150) as np_artist
-            from users u order by u.display_name collate nocase""", yo())
+            from users u where u.banned_at is null order by u.display_name collate nocase""", yo())
         List<Json> out = []
         for int i in range(0, len(r)):
             out.add({ "username": r[i]["username"], "displayName": r[i]["display_name"], "bio": r[i]["bio"],
@@ -567,7 +695,7 @@ group("/api"):
         return out
 
     get endpoint("/users/:name", string name):
-        List<Json> r = await sqlite.query("select * from users where username = ?", name)
+        List<Json> r = await sqlite.query("select * from users where username = ? and banned_at is null", name)
         if len(r) == 0:
             return status(404)
         List<Json> ps = await sqlite.query(sql_resumen() + " where p.owner_id = ? and p.visibility = 'public' order by p.updated_at desc", int(r[0]["id"]))
@@ -579,6 +707,8 @@ group("/api"):
         # escaparate: lo más escuchado y el tiempo escuchado (90 días). Si la persona los oculta, ni se calculan ni
         # salen en la respuesta; su dueño siempre ve los suyos.
         bool propio = int(r[0]["id"]) == yo()
+        if propio:
+            dto["canInvite"] = puede_invitar(yo())
         if propio or not oculta(r[0], "top"):
             List<Json> top = await sqlite.query("""
                 select t.id, t.title, t.artist, sum(p.ms_played) as n from plays p join tracks t on t.id = p.track_id
@@ -699,6 +829,7 @@ group("/api"):
             values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             id, titulo, artist, album, duration_ms,
             search_norm.trim(), title_norm.trim(), artist_norm.trim(), ext, audio.size, yo())
+        apuntar(yo(), "track_upload", titulo, artist)
         return { "stored": true, "id": id }.status(201)
 
     # ── relay de descargas ──
@@ -811,6 +942,7 @@ group("/api"):
             on conflict(id) do update set ext = excluded.ext, size = excluded.size""",
             id, title.trim(), artist, album, duration_ms,
             search_norm.trim(), title_norm.trim(), artist_norm.trim(), ext_final, os.file_size(destino), yo())
+        apuntar(yo(), "track_upload", title.trim(), artist)
         return { "stored": true, "id": id, "ext": ext_final }.status(201)
 
     # Portada opcional para incrustar en el relay (se sube ANTES del audio).
@@ -955,6 +1087,7 @@ group("/api"):
         int pid = await sqlite.last_id()
         if b["tracks"] != null:
             escribir_pistas(pid, b["tracks"], yo())
+        apuntar(yo(), "playlist_create", nombre, vis)
         return { "id": pid }.status(201)
 
     get endpoint("/playlists/:id", int id):
@@ -1021,7 +1154,9 @@ group("/api"):
             return status(404)
         await sqlite.exec("insert or ignore into playlist_tombstones(user_id, playlist_id) select owner_id, id from playlists where id = ?", id)
         await sqlite.exec("insert or ignore into playlist_tombstones(user_id, playlist_id) select user_id, playlist_id from playlist_members where playlist_id = ?", id)
+        List<Json> pn = await sqlite.query("select name from playlists where id = ?", id)
         await sqlite.exec("delete from playlists where id = ?", id)
+        apuntar(yo(), "playlist_delete", len(pn) > 0 ? str(pn[0]["name"]) : str(id), "")
         return status(204)
 
     # añadir pistas sin reescribir la lista (varios miembros a la vez)
@@ -1067,3 +1202,81 @@ group("/api"):
             return status(403)
         await sqlite.exec("delete from playlist_members where playlist_id = ? and user_id = (select id from users where username = ?)", id, name)
         return status(204)
+
+    # ── administración (Ajustes › Servidor; solo admins) ──
+    group("/admin"):
+        require es_admin(yo()) else status(403)
+
+        get endpoint("/settings"):
+            return { "invites": ajuste_srv("invites", "everyone") }
+
+        # invites: "everyone" o "admins". Al cerrarlo a admins, los códigos sin usar de quien ya no
+        # puede invitar dejan de valer (si no, seguirían abriendo la puerta).
+        put endpoint("/settings", Json b):
+            string inv = s_of(b, "invites", "")
+            if inv != "everyone" and inv != "admins":
+                return { "error": "invalid" }.status(400)
+            await sqlite.exec("insert into server_settings(key, value) values('invites', ?) on conflict(key) do update set value = excluded.value", inv)
+            if inv == "admins":
+                await sqlite.exec("delete from invites where used_by is null and created_by in (select id from users where is_admin = 0)")
+            apuntar(yo(), "settings", "invites", inv)
+            return { "invites": inv }
+
+        get endpoint("/users"):
+            List<Json> r = await sqlite.query("select username, display_name, is_admin, banned_at, created_at from users order by created_at")
+            List<Json> out = []
+            for int i in range(0, len(r)):
+                out.add({ "username": r[i]["username"], "displayName": r[i]["display_name"], "isAdmin": jint(r[i]["is_admin"], 0) == 1,
+                          "bannedAt": r[i]["banned_at"], "createdAt": r[i]["created_at"] })
+            return out
+
+        # { admin: bool } nombra o quita admin; { banned: bool } banea o levanta el ban. Siempre queda
+        # al menos un admin activo, y nadie se banea a sí mismo. Banear quita también el admin.
+        put endpoint("/users/:name", string name, Json b):
+            List<Json> r = await sqlite.query("select id, username, is_admin, banned_at from users where username = ?", name)
+            if len(r) == 0:
+                return status(404)
+            int uid = int(r[0]["id"])
+            string nombre = str(r[0]["username"])
+            if b["banned"] == true and uid == yo():
+                return { "error": "self" }.status(400)
+            bool quita_admin = (b["admin"] != null and b["admin"] != true) or b["banned"] == true
+            if quita_admin and jint(r[0]["is_admin"], 0) == 1:
+                List<Json> n = await sqlite.query("select count(*) as n from users where is_admin = 1 and banned_at is null and id != ?", uid)
+                if int(n[0]["n"]) == 0:
+                    return { "error": "last_admin" }.status(409)
+            if b["banned"] == true:
+                await sqlite.exec("update users set banned_at = unixepoch(), is_admin = 0 where id = ? and banned_at is null", uid)
+                await sqlite.exec("delete from invites where created_by = ? and used_by is null", uid)
+                await sqlite.exec("delete from presence where user_id = ?", uid)
+                state.remove("viva:" + str(uid))
+                apuntar(yo(), "ban", nombre, s_of(b, "reason", ""))
+            elif b["banned"] != null and r[0]["banned_at"] != null:
+                await sqlite.exec("update users set banned_at = null where id = ?", uid)
+                apuntar(yo(), "unban", nombre, "")
+            if b["admin"] != null and b["banned"] != true:
+                bool admin = b["admin"] == true
+                if admin != (jint(r[0]["is_admin"], 0) == 1):
+                    await sqlite.exec("update users set is_admin = ? where id = ? and banned_at is null", admin ? 1 : 0, uid)
+                    apuntar(yo(), admin ? "admin_grant" : "admin_revoke", nombre, "")
+            return status(204)
+
+        # códigos sin usar de todo el servidor (con quién los creó), para revocarlos
+        get endpoint("/invites"):
+            return await sqlite.query("""select i.code, i.created_at as createdAt, coalesce(u.username, '') as createdBy
+                from invites i left join users u on u.id = i.created_by where i.used_by is null order by i.created_at desc""")
+
+        delete endpoint("/invites/:code", string code):
+            await sqlite.exec("delete from invites where code = ? and used_by is null", code)
+            apuntar(yo(), "invite_revoke", "", code.slice(0, 4) + "…")
+            return status(204)
+
+        # Historial, lo más nuevo primero. from/to: segundos unix (0 = sin límite); user: quien lo hizo
+        # o sobre quién; action: una acción exacta; before: id de la última fila vista (paginar).
+        get endpoint("/log", int from = 0, int to = 0, string user = "", string action = "", int before = 0, int limit = 100):
+            int n = limit < 1 or limit > 500 ? 100 : limit
+            return await sqlite.query("""select id, at, actor, action, target, detail from audit_log
+                where (? = 0 or at >= ?) and (? = 0 or at < ?)
+                  and (? = '' or actor = ? collate nocase or target = ? collate nocase)
+                  and (? = '' or action = ?) and (? = 0 or id < ?)
+                order by id desc limit ?""", from, from, to, to, user, user, user, action, action, before, before, n)

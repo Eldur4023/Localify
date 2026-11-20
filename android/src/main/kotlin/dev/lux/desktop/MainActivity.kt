@@ -172,11 +172,34 @@ class MainActivity : Activity() {
                     Thread.sleep(30)
                 }
             }
+            // abierta desde un enlace localify://: se deja en el servidor, la página lo recoge al cargar
+            if (port > 0) enviarEnlace(port, intent)
             runOnUiThread {
                 if (port > 0) { File(filesDir, "crash.txt").delete(); web.loadUrl("http://127.0.0.1:$port/") }
                 else mostrarError("Lux no pudo compilar la app:", "Mira logcat (etiqueta luxdesktop).")
             }
         }.start()
+    }
+
+    // Enlace localify:// con la app ya abierta (singleTask): al servidor, que avisa a la página
+    override fun onNewIntent(nuevo: Intent) {
+        super.onNewIntent(nuevo)
+        setIntent(nuevo)
+        val dir = File(filesDir, "lux").absolutePath
+        Thread { val port = LuxRuntime.ensureStarted(dir); if (port > 0) enviarEnlace(port, nuevo) }.start()
+    }
+
+    /** POST /api/deeplink (window.lux) con el enlace del intent, si lo hay. Fuera del hilo de la interfaz. */
+    private fun enviarEnlace(port: Int, i: Intent?) {
+        val enlace = i?.data?.takeIf { it.scheme == "localify" }?.toString() ?: return
+        try {
+            (java.net.URL("http://127.0.0.1:$port/api/deeplink").openConnection() as java.net.HttpURLConnection).run {
+                requestMethod = "POST"; doOutput = true; connectTimeout = 2000; readTimeout = 2000
+                setRequestProperty("Content-Type", "text/plain")
+                outputStream.use { it.write(enlace.toByteArray()) }
+                (if (responseCode < 400) inputStream else errorStream)?.use { it.readBytes() }
+            }
+        } catch (e: Exception) { android.util.Log.e("luxdesktop", "enlace: $e") }
     }
 
     /** Pantalla de error legible (y copiable con una captura): el motivo en vez de un cierre mudo. */

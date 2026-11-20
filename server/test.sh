@@ -4,11 +4,16 @@
 cd "$(dirname "$0")"
 LUX=${1:-../build/vendor/lux/lux}; PORT=${PORT:-8792}; B=http://127.0.0.1:$PORT/api
 W=$(mktemp -d); cp server.lux "$W/"; trap 'kill $PID 2>/dev/null; rm -rf "$W"' EXIT
-LUXBIN=$(realpath "$LUX"); (cd "$W" && JWT_SECRET=test-secret-0123456789 exec "$LUXBIN" server.lux --port $PORT >"$W/log" 2>&1) & PID=$!
+# versión exigida: todo curl la manda (via .curlrc); `curl -q` lo ignora para probar el rechazo
+printf 'header = "X-Localify-Version: 9.9.9"\n' > "$W/.curlrc"; export CURL_HOME="$W"
+LUXBIN=$(realpath "$LUX"); (cd "$W" && SERVERIFY_VERSION=9.9.9 JWT_SECRET=test-secret-0123456789 exec "$LUXBIN" server.lux --port $PORT >"$W/log" 2>&1) & PID=$!
 for i in $(seq 50); do curl -sf $B/info >/dev/null && break; sleep 0.2; done
 fail=0; ok() { if [[ "$2" == *"$3"* ]]; then echo "  ok    $1"; else echo "  FAIL  $1: got [$2] want [$3]"; fail=1; fi; }
 j() { curl -s -X "$1" -H 'Content-Type: application/json' ${T:+-H "Authorization: Bearer $T"} "${@:3}" -d "$2" -w ' %{http_code}'; }
 ok info "$(curl -s $B/info)" Serverify
+ok "info dice la versión" "$(curl -s $B/info)" '"appVersion":"9.9.9"'
+ok "otra versión: no entra" "$(curl -q -s -X POST -H 'Content-Type: application/json' -H 'X-Localify-Version: 9.9.8' -d '{"username":"ana","password":"secreto123"}' -w ' %{http_code}' $B/login)" '"serverVersion":"9.9.9"} 426'
+ok "sin versión: no entra" "$(curl -q -s -o /dev/null -w %{http_code} $B/me)" 426
 ok "sin token" "$(curl -s -o /dev/null -w %{http_code} $B/me)" 401
 ok "pass corta" "$(j POST '{"username":"ana","password":"x"}' $B/register)" 400
 R=$(j POST '{"username":"ana","password":"secreto123","displayName":"Ana"}' $B/register); ok registro "$R" '201'
@@ -144,4 +149,41 @@ T=$TB; ok "expulsado: ya no la ve" "$(curl -s -o /dev/null -w %{http_code} -H "A
 ok "expulsado: no puede añadir" "$(j POST '{"tracks":[{"id":"x","title":"t"}]}' $B/playlists/$PV/tracks)" 403
 T=$TA; ok "dueña: puede borrarla" "$(j DELETE '' $B/playlists/$PV)" 204
 T=$TA; ok "dueño borra" "$(j DELETE '' $B/playlists/1)" 204
+# administración: ana es la primera, así que es admin
+g() { curl -s -H "Authorization: Bearer $T" -w ' %{http_code}' "$@"; }
+T=$TA; ok "primera cuenta: admin" "$(g $B/users/ana)" '"isAdmin":true'
+T=$TB; ok "no admin: sin acceso a /admin" "$(g $B/admin/settings)" 403
+T=$TA; ok "invitar: solo admins" "$(j PUT '{"invites":"admins"}' $B/admin/settings)" '"invites":"admins"'
+T=$TB; ok "no admin ya no genera códigos" "$(j POST '' $B/invites)" 403
+T=$TB; ok "y su perfil lo dice" "$(g $B/users/bob)" '"canInvite":false'
+T=$TA; ok "admin sí genera" "$(j POST '' $B/invites)" 201
+T=$TA; ok "admin ve los códigos" "$(g $B/admin/invites)" '"createdBy":"ana"'
+T=$TA; ok "no se banea a sí misma" "$(j PUT '{"banned":true}' $B/admin/users/ana)" 400
+T=$TA; ok "banea a bob" "$(j PUT '{"banned":true,"reason":"spam"}' $B/admin/users/bob)" 204
+T=$TB; ok "baneado: su token deja de valer" "$(g -o /dev/null $B/me)" 401
+ok "baneado: no entra" "$(j POST '{"username":"bob","password":"secreto123"}' $B/login)" 403
+T=$TA; ok "baneado: no sale en Social" "$(g $B/users | grep -c '"username":"bob"')" 0
+T=$TA; ok "levanta el ban" "$(j PUT '{"banned":false}' $B/admin/users/bob)" 204
+TB=$(sed 's/.*"token":"\([^"]*\)".*/\1/' <<<"$(j POST '{"username":"bob","password":"secreto123"}' $B/login)")
+T=$TA; ok "nombra admin a bob" "$(j PUT '{"admin":true}' $B/admin/users/bob)" 204
+T=$TB; ok "bob, admin, quita a ana" "$(j PUT '{"admin":false}' $B/admin/users/ana)" 204
+T=$TB; ok "el último admin no se quita" "$(j PUT '{"admin":false}' $B/admin/users/bob)" 409
+T=$TB; ok "historial: el ban" "$(g "$B/admin/log?action=ban&user=bob")" '"detail":"spam"'
+T=$TB; ok "historial: filtro por fecha" "$(g "$B/admin/log?to=1")" '[] 200'
+T=$TB; ok "historial: logins fallidos" "$(g "$B/admin/log?action=login_failed")" '"target":"ana"'
+T=$TB; j PUT '{"admin":true}' $B/admin/users/ana >/dev/null
+# enlace de invitación: página pública que pasa a la app con localify://invite
+T=$TA; CL=$(curl -s -X POST -H "Authorization: Bearer $T" $B/invites | sed 's/.*"code":"\([^"]*\)".*/\1/')
+ok "enlace: abre la app con el código" "$(curl -s -H 'Accept-Language: es' http://127.0.0.1:$PORT/invite/$CL)" "localify://invite?server=127.0.0.1:$PORT&amp;code=$CL"
+ok "enlace: código usado o falso" "$(curl -s http://127.0.0.1:$PORT/invite/nope%3Cb%3E)" "already used"
+ok "enlace: no inyecta html" "$(curl -s http://127.0.0.1:$PORT/invite/nope%3Cb%3E | grep -c '<b>nope')" 0
+# borrar mi cuenta: pide la contraseña; el último admin deja el puesto a la cuenta activa más antigua
+TZ=$(sed 's/.*"token":"\([^"]*\)".*/\1/' <<<"$(j POST '{"username":"zed","password":"secreto123"}' $B/login)")
+T=$TA; j PUT '{"admin":false}' $B/admin/users/bob >/dev/null
+T=$TA; ok "borrar cuenta: contraseña mala" "$(j POST '{"password":"nope"}' $B/me/delete)" 403
+T=$TA; ok "borrar cuenta" "$(j POST '{"password":"secreto123"}' $B/me/delete)" 204
+ok "borrada: no entra" "$(j POST '{"username":"ana","password":"secreto123"}' $B/login)" 401
+T=$TA; ok "borrada: su token deja de valer" "$(g -o /dev/null $B/me)" 401
+T=$TZ; ok "sin admins: pasa a la más antigua" "$(g $B/users/zed)" '"isAdmin":true'
+T=$TZ; ok "historial: la baja" "$(g "$B/admin/log?action=account_delete")" '"target":"ana"'
 ((fail)) && { echo; tail -5 "$W/log"; exit 1; }; echo "todo ok"

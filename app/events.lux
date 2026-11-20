@@ -130,6 +130,7 @@ fn Json construir_snapshot_de(EstadoCola e):
         "settingsStamp": s_aj,
         "statsStamp": state.get("stamp_stats", ""),
         "socialStamp": state.get("stamp_social", ""),
+        "deepLinkStamp": state.get("deeplink_seq", 0),
         "syncSeek": state.get("sync_seek", ""),
         "downloads": descargas_activas(),
         "remoteReady": ready,

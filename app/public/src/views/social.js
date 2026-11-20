@@ -7,6 +7,7 @@
 */
 import { player, social } from "../ipc/client.js";
 import { alRecibirTipo } from "../ipc/events.js";
+import { tomarInvitacion } from "../shell/enlaces.js";
 import { alCambiarIdioma, t } from "../i18n/index.js";
 import { textoDeError } from "../ui/publicar-playlist.js";
 import { mostrarError } from "../ui/error-overlay.js";
@@ -20,6 +21,8 @@ export function mountSocialView(contenedor, ruta) {
 	let estado = null;
 	let pestaña = "users";
 	let destruida = false;
+	/** Invitación abierta desde un enlace (shell/enlaces.js): enseña el acceso con todo puesto, aunque haya sesión. */
+	let invitacion = tomarInvitacion();
 	/** Resultado de la última descarga de la nube, para enseñarlo arriba. */
 	let avisoNube = "";
 	/**
@@ -136,14 +139,14 @@ export function mountSocialView(contenedor, ruta) {
 	function panelAcceso(panel) {
 		panel.classList.add("social__acceso");
 		const { s, cuerpo } = seccion(t("social.connect_title"));
-		const servidor = campoTexto(t("social.server"), estado.host ? `${estado.host}:${estado.port}` : "");
+		const servidor = campoTexto(t("social.server"), invitacion?.server ?? (estado.host ? `${estado.host}:${estado.port}` : ""));
 		servidor.input.placeholder = "192.168.1.10:8787";
 		servidor.input.autocapitalize = "none";
 		const usuario = campoTexto(t("social.username"), estado.username);
 		usuario.input.autocapitalize = "none";
 		const clave = campoTexto(t("social.password"), "", "password");
-		const invitacion = campoTexto(t("social.invite_code"), "");
-		invitacion.input.autocapitalize = "none";
+		const codigo = campoTexto(t("social.invite_code"), invitacion?.code ?? "");
+		codigo.input.autocapitalize = "none";
 		const aviso = nodo("p", "ajustes__ayuda ajustes__ayuda--aviso");
 		const acceder = (registro) => async () => {
 			// "ip" o "ip:puerto"; sin puerto, el de siempre
@@ -152,12 +155,13 @@ export function mountSocialView(contenedor, ruta) {
 			const puerto = m?.[2] ? Number(m[2]) : 8787;
 			estado = await social.connect(host, puerto);
 			if (!estado.reachable) {
-				aviso.textContent = t("error.server_unreachable");
+				aviso.textContent = textoVersion() || t("error.server_unreachable");
 				return;
 			}
 			const u = usuario.input.value.trim();
-			if (registro) await social.register(u, clave.input.value, u, invitacion.input.value);
+			if (registro) await social.register(u, clave.input.value, u, codigo.input.value);
 			else await social.login(u, clave.input.value);
+			invitacion = null;
 			// Al entrar con mi usuario se trae lo que tengo guardado en el servidor
 			avisoNube = t("social.pulling");
 			await cargar();
@@ -171,8 +175,22 @@ export function mountSocialView(contenedor, ruta) {
 				aviso.textContent = textoDeError(x);
 			});
 		});
-		cuerpo.append(servidor.fila, usuario.fila, clave.fila, invitacion.fila, aviso, acciones);
+		aviso.textContent = textoVersion();
+		if (invitacion) {
+			cuerpo.append(nodo("p", "ajustes__ayuda", t("social.invite_link_help", { server: invitacion.server })));
+			// con sesión en otro servidor: no se toca nada hasta registrarse; esto vuelve a lo de antes
+			if (estado.loggedIn) acciones.append(boton(t("common.cancel"), "boton--sutil", async () => {
+				invitacion = null;
+				await pintar();
+			}));
+			setTimeout(() => usuario.input.focus());
+		}
+		cuerpo.append(servidor.fila, usuario.fila, clave.fila, codigo.fila, aviso, acciones);
 		panel.append(s);
+	}
+	/** El servidor solo atiende a su misma versión de Localify: lo dice, en vez de "no se puede conectar". */
+	function textoVersion() {
+		return estado?.serverVersion ? t("error.server_version_detail", { server: estado.serverVersion, app: estado.appVersion }) : "";
 	}
 	// ── Pestañas con sesión ─────────────────────────────────────────────────
 	function pestañas(panel) {
@@ -396,7 +414,7 @@ export function mountSocialView(contenedor, ruta) {
 		if (!estado || destruida) return;
 		const panel = nodo("div", "ajustes__panel");
 		try {
-			if (!estado.host || !estado.reachable || !estado.loggedIn) panelAcceso(panel);
+			if (invitacion || !estado.host || !estado.reachable || !estado.loggedIn) panelAcceso(panel);
 			else if (ruta.params[0] === "user" && ruta.params[1] && decodeURIComponent(ruta.params[1]) !== estado.username) await pintarUsuario(panel, ruta.params[1]);
 			else if (ruta.params[0] === "playlist" && ruta.params[1]) await pintarPlaylist(panel, ruta.params[1]);
 			else {
@@ -434,6 +452,10 @@ export function mountSocialView(contenedor, ruta) {
 	// `socialChanged` (alguien empieza a escuchar algo, una playlist nueva...). Se repinta con
 	// datos frescos, sin la pasada de caché; no mientras se escribe en un campo, para no borrarlo.
 	void social.watch(true).catch(() => {});
+	const dejarInvitacion = alRecibirTipo("inviteLink", () => {
+		invitacion = tomarInvitacion() ?? invitacion;
+		void pintar();
+	});
 	const dejarActividad = alRecibirTipo("socialChanged", () => {
 		const foco = document.activeElement;
 		if (!estado?.loggedIn || el.contains(foco) && foco.matches("input, textarea, select")) return;
@@ -444,6 +466,7 @@ export function mountSocialView(contenedor, ruta) {
 		destruida = true;
 		dejarIdioma();
 		dejarActividad();
+		dejarInvitacion();
 		void social.watch(false).catch(() => {});
 		el.remove();
 	} };

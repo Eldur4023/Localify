@@ -53,6 +53,8 @@ fn Json srv_fallo(Json? r):
         return error_api("SERVER_UNREACHABLE", "error.server_unreachable").status(502)
     if r["status"] == 401:
         return error_api("SERVER_AUTH", "error.server_auth").status(401)
+    if r["status"] == 426:
+        return error_api("SERVER_VERSION", "error.server_version").status(426)
     return error_api("SERVER_ERROR", "error.server_error").status(jint(r["status"], 500))
 
 # ─── Playlists: el servidor las gestiona ─────────────────────────────────────
@@ -224,7 +226,7 @@ fn void sync_portada(string plid, string sid, Json remota):
     bool cambio_local = tengo and str(os.file_size(abs)) != marca
     bool cambio_remoto = hay and str(jint(remota["coverSize"], 0)) != marca
     bool duena = jstr(remota["owner"], "") == ajuste("server_user", "")
-    Dict<string, string> cab = { "Authorization": "Bearer " + ajuste("server_token", "") }
+    Dict<string, string> cab = srv_cab()
     try:
         if cambio_local and duena:
             Json u = await http.put(srv_base() + "/playlists/" + sid + "/cover", { "k": "1" }, cab, { "files": { "cover": abs }, "timeout_ms": 60000 })

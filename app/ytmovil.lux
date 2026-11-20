@@ -135,7 +135,7 @@ fn string descargar_movil(string tid, string video_id):
             string titulo = jstr(m[0]["title"], "")
             string artista = jstr(m[0]["artist_display"], "")
             string album = jstr(m[0]["album"], "")
-            Dict<string, string> cab = { "Authorization": "Bearer " + ajuste("server_token", "") }
+            Dict<string, string> cab = srv_cab()
             try:
                 Json? u = await http.put(srv_base() + "/relay/" + tid, {
                     "title": titulo, "artist": artista, "album": album,

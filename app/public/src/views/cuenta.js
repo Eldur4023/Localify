@@ -1,6 +1,6 @@
 /**
 * Ajustes › Cuenta: todo lo que depende del servidor (perfil, privacidad,
-* sincronización, nube, invitaciones y sesión), agrupado por tema en vez de
+* sincronización, nube y sesión; invitar y borrar la cuenta, en Servidor), agrupado por tema en vez de
 * apilado en una columna.
 *
 * Con sesión iniciada pide su propio estado (`social.status`); sin ella solo
@@ -13,7 +13,7 @@ import { mostrarError } from "../ui/error-overlay.js";
 import { botonIcono, icono } from "../ui/icons.js";
 import { nodo } from "../ui/dom.js";
 /** Sección con título y filas; mismas clases que el resto de Ajustes. */
-function seccion(titulo, descripcion) {
+export function seccion(titulo, descripcion) {
 	const s = nodo("section", "ajustes__seccion");
 	const cab = nodo("div", "ajustes__cabecera");
 	cab.append(nodo("h3", "ajustes__titulo", titulo));
@@ -26,7 +26,7 @@ function seccion(titulo, descripcion) {
 	};
 }
 /** Fila: título y ayuda a la izquierda, control a la derecha. */
-function fila(titulo, ayuda, control) {
+export function fila(titulo, ayuda, control) {
 	const f = nodo("div", "ajuste");
 	const texto = nodo("div", "ajuste__texto");
 	texto.append(nodo("strong", "", titulo));
@@ -51,7 +51,7 @@ function filaInterruptor(titulo, ayuda, valor, alCambiar) {
 	return f;
 }
 /** Botón con estado de carga; los errores salen en `aviso` si se da, o en el overlay. */
-function boton(texto, clase, accion, aviso) {
+export function boton(texto, clase, accion, aviso) {
 	const b = nodo("button", `boton ${clase ?? ""}`, texto);
 	b.type = "button";
 	b.addEventListener("click", () => void (async () => {
@@ -89,9 +89,10 @@ function enlace(destino, texto, clase) {
 	return a;
 }
 /** Sin servidor o sin sesión: una sola tarjeta que lleva a conectar. */
-function sinSesion(panel) {
+function sinSesion(panel, estado) {
 	const { s, cuerpo } = seccion(t("account.title"));
-	cuerpo.append(fila(t("account.disconnected"), t("account.disconnected_help"), enlace("#/social", t("account.connect"), "boton")));
+	const ayuda = estado?.serverVersion ? t("error.server_version_detail", { server: estado.serverVersion, app: estado.appVersion }) : t("account.disconnected_help");
+	cuerpo.append(fila(t("account.disconnected"), ayuda, enlace("#/social", t("account.connect"), "boton")));
 	panel.append(s);
 }
 function seccionPerfil(u, estado) {
@@ -223,17 +224,6 @@ function seccionNube(estado) {
 	cuerpo.append(acciones, aviso);
 	return s;
 }
-function seccionInvitaciones() {
-	const { s, cuerpo } = seccion(t("social.invites"), t("social.invites_help"));
-	const lista = nodo("div", "cuenta__codigos");
-	const aviso = nodo("p", "ajustes__ayuda ajustes__ayuda--aviso");
-	// Un código solo se ve al generarlo: la lista vive con esta sección y se
-	// pierde al salir de Cuenta (el servidor los sigue guardando sin usar).
-	cuerpo.append(lista, aviso, boton(t("social.invite_new"), "boton--sutil cuenta__solo", async () => {
-		lista.append(nodo("code", "", (await social.createInvite()).code));
-	}, aviso));
-	return s;
-}
 function seccionSesion(estado, recargar) {
 	const { s, cuerpo } = seccion(t("social.session"));
 	cuerpo.append(fila(t("social.logout"), t("account.logout_help"), boton(t("social.logout"), "boton--sutil", async () => {
@@ -255,12 +245,12 @@ export async function pintarCuenta(panel, recargar) {
 		return;
 	}
 	if (!estado.host || !estado.reachable || !estado.loggedIn) {
-		sinSesion(panel);
+		sinSesion(panel, estado);
 		return;
 	}
 	try {
 		const u = await social.user(estado.username);
-		panel.append(seccionPerfil(u, estado), seccionPrivacidad(u, estado), await seccionSincronizacion(), seccionNube(estado), seccionInvitaciones(), seccionSesion(estado, recargar));
+		panel.append(seccionPerfil(u, estado), seccionPrivacidad(u, estado), await seccionSincronizacion(), seccionNube(estado), seccionSesion(estado, recargar));
 	} catch (e) {
 		panel.append(nodo("p", "ajustes__ayuda ajustes__ayuda--aviso", textoDeError(e)));
 	}

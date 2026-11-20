@@ -340,6 +340,12 @@ export const social = {
 		inviteCode
 	}),
 	createInvite: () => invoke("server_invite_create"),
+	/** Borra mi cuenta del servidor (con mi contraseña) y cierra la sesión aquí. */
+	deleteAccount: (password) => invoke("server_delete_account", { password }),
+	/** Enlace localify:// que abrió la app (o "" si no hay); se entrega una sola vez. */
+	takeDeepLink: () => invoke("social_deeplink_take"),
+	/** Ajustes › Servidor (solo admins): `GET|PUT|DELETE /api/admin<path>`. */
+	admin: (method, path, body) => invoke("server_admin", { method, path, body }),
 	logout: () => invoke("server_logout"),
 	setUpload: (enabled) => invoke("server_set_upload", { enabled }),
 	setStream: (enabled) => invoke("server_set_stream", { enabled }),

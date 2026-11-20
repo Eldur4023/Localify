@@ -4,9 +4,13 @@
 # ─── Comandos (server_* ajustes/sesión, social_* usuarios y playlists) ───────
 
 fn Json sesion_guardada(Json? r):
+    if r != null and r["status"] == 426:
+        return error_api("SERVER_VERSION", "error.server_version").status(426)
     if r == null or (r["status"] != 200 and r["status"] != 201):
         if r != null and r["status"] == 409:
             return error_api("USERNAME_TAKEN", "error.username_taken").status(409)
+        if r != null and r["status"] == 403 and jstr(jget(r["body"], "error"), "") == "banned":
+            return error_api("BANNED", "error.banned").status(403)
         if r != null and r["status"] == 403:
             return error_api("INVITE_REQUIRED", "error.invite_required").status(403)
         if r != null and (r["status"] == 401 or r["status"] == 400 or r["status"] == 429):
@@ -25,17 +29,25 @@ fn Json sesion_guardada(Json? r):
 fn Json cmd_social(string cmd, Json args):
     if cmd == "server_status":
         bool alcanzable = false
+        string version_srv = ""
         if ajuste("server_host", "") != "":
             try:
                 Json i = await http.get(srv_base() + "/info", null, { "timeout_ms": 3000 })
                 alcanzable = jint(i["status"], 0) == 200
+                if alcanzable:
+                    version_srv = jstr(jget(i["body"], "appVersion"), "")
             catch e:
                 alcanzable = false
+        # un servidor de otra versión no atiende: como si no se alcanzara, pero diciendo por qué
+        bool otra_version = alcanzable and version_srv != "" and version_srv != version_actual()
+        if otra_version:
+            alcanzable = false
         if alcanzable:
             state.remove("srv_caido")
         return {
             "host": ajuste("server_host", ""), "port": int(ajuste("server_port", "8787")),
             "reachable": alcanzable, "loggedIn": ajuste("server_token", "") != "",
+            "serverVersion": otra_version ? version_srv : "", "appVersion": version_actual(),
             "username": ajuste("server_user", ""), "upload": ajuste("server_upload", "1") == "1", "stream": ajuste("server_stream", "0") == "1",
             "presence": ajuste("server_presence", "1") == "1",
             "sync": ajuste("sync_playback", "0") == "1", "syncMode": ajuste("sync_modo", "both")
@@ -67,6 +79,11 @@ fn Json cmd_social(string cmd, Json args):
         ajuste_poner("server_token", "")
         ajuste_poner("server_user", "")
         return null
+    # Enlace localify:// pendiente (window.lux): se entrega una vez
+    if cmd == "social_deeplink_take":
+        string enlace = state.get("deeplink", "")
+        state.remove("deeplink")
+        return { "url": enlace }
     if cmd == "server_logout":
         ajuste_poner("server_token", "")
         ajuste_poner("server_user", "")
@@ -125,7 +142,7 @@ fn Json cmd_social(string cmd, Json args):
         if cmd == "server_register":
             cuerpo["displayName"] = arg_str(args, "displayName", "")
             cuerpo["inviteCode"] = arg_str(args, "inviteCode", "")
-        Dict<string, string> sin = {}
+        Dict<string, string> sin = { "X-Localify-Version": version_actual() }
         Json r = null
         try:
             Json h = await http.post(srv_base() + (cmd == "server_login" ? "/login" : "/register"), cuerpo, sin, { "timeout_ms": 15000 })
@@ -142,11 +159,41 @@ fn Json cmd_social(string cmd, Json args):
     if cmd == "server_invites":
         Json? r = srv("GET", "/invites")
         return r != null and r["status"] == 200 ? r["body"] : srv_fallo(r)
+    # Ajustes › Servidor (solo admins): paso directo a /api/admin/*. El servidor decide quién
+    # puede (403 a quien no es admin); aquí solo se traducen sus errores.
+    if cmd == "server_admin":
+        string ruta = arg_str(args, "path", "")
+        string metodo = arg_str(args, "method", "GET")
+        if not ruta.starts_with("/") or ruta.contains("..") or not ["GET", "PUT", "DELETE"].contains(metodo):
+            return error_api("INVALID", "error.invalid").status(400)
+        Json? r = srv(metodo, "/admin" + ruta, jget(args, "body"), 15000)
+        if r != null and r["status"] < 300:
+            return r["status"] == 204 ? null : r["body"]
+        if r != null and (r["status"] == 400 or r["status"] == 403 or r["status"] == 409):
+            string e = jstr(jget(r["body"], "error"), "forbidden")
+            return error_api("ADMIN", "error.admin_" + e).status(r["status"])
+        return srv_fallo(r)
     if cmd == "server_invite_create":
         Json? r = srv("POST", "/invites")
         if r != null and r["status"] == 429:
             return error_api("INVITE_LIMIT", "error.invite_limit").status(429)
-        return r != null and r["status"] == 201 ? r["body"] : srv_fallo(r)
+        if r == null or r["status"] != 201:
+            return srv_fallo(r)
+        # el enlace es la página del propio servidor (/invite/<código>), que abre la app
+        string base = srv_base()
+        return { "code": jstr(r["body"]["code"], ""), "link": base.slice(0, len(base) - 4) + "/invite/" + jstr(r["body"]["code"], "") }
+    # Borrar mi cuenta del servidor (pide la contraseña). Después, como cerrar sesión.
+    if cmd == "server_delete_account":
+        Json? r = srv("POST", "/me/delete", { "password": arg_str(args, "password", "") })
+        if r != null and r["status"] == 403:
+            return error_api("BAD_PASSWORD", "error.bad_password").status(403)
+        if r == null or r["status"] != 204:
+            return srv_fallo(r)
+        ajuste_poner("server_token", "")
+        ajuste_poner("server_user", "")
+        olvidar_enlaces()
+        ajuste_poner("server_cuenta", "")
+        return null
 
     # Aporta mi biblioteca descargada: lotes de 20 pistas por llamada (la UI repite
     # hasta done). Lo que el servidor ya tiene (por identidad) no se vuelve a subir.
@@ -306,7 +353,7 @@ get endpoint("/api/social/img/:kind/:id", string kind, string id):
         return status(404)
     string ruta = kind == "playlist" ? "/playlists/" + id + "/cover" : "/users/" + http.url_encode(id) + "/" + kind
     string destino = os.path_join(covers_dir(), "srv-" + kind + "-" + id.replace("%", "_") + ".jpg")
-    Dict<string, string> cab = { "Authorization": "Bearer " + ajuste("server_token", "") }
+    Dict<string, string> cab = srv_cab()
     try:
         Json r = await http.get(srv_base() + ruta, cab, { "save_to": destino, "timeout_ms": 20000 })
         if jint(r["status"], 0) != 200 or os.file_size(destino) < 100:
@@ -339,7 +386,7 @@ fn Json subir_imagen_perfil(File imagen, string campo):
     if nombre == "":
         return status(500)
     string origen = os.path_join(d, nombre)
-    Dict<string, string> cab = { "Authorization": "Bearer " + ajuste("server_token", "") }
+    Dict<string, string> cab = srv_cab()
     Dict<string, string> ficheros = {}
     ficheros[campo] = origen
     int estado = 0

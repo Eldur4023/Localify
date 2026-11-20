@@ -13,11 +13,19 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
         android:networkSecurityConfig="@xml/network_security_config">
-        <activity android:name=".MainActivity" android:exported="true"
+        <!-- singleTask: un enlace localify:// con la app abierta llega a onNewIntent, no abre otra -->
+        <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTask"
                   android:configChanges="orientation|screenSize|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <!-- localify://invite?server=…&code=…: la página de invitación del servidor abre la app -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="localify"/>
             </intent-filter>
         </activity>
         <service

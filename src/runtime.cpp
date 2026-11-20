@@ -129,10 +129,8 @@ bool acquire_single_instance_lock(const fs::path& dir) {
 // different. Best-effort: a missing/stale port file just means we exit
 // quietly, same as before this existed.
 // Returns true if a live instance answered (the window was raised).
-bool ask_running_instance_to_show(const fs::path& work_dir) {
-    std::ifstream in(work_dir / "port");
-    uint16_t port = 0;
-    if (!(in >> port) || port == 0) return false;
+// One POST to this app's own loopback server (an empty body is fine).
+bool post_local(uint16_t port, const std::string& path, const std::string& body) {
     net_init();
     sock_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd == kBadSock) return false;
@@ -144,15 +142,44 @@ bool ask_running_instance_to_show(const fs::path& work_dir) {
     bool answered = false;
     if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
         answered = true;
-        static const char req[] =
-            "POST /api/window/restore HTTP/1.1\r\nHost: 127.0.0.1\r\n"
-            "Content-Length: 0\r\nConnection: close\r\n\r\n";
-        ::send(fd, req, sizeof(req) - 1, 0);
+        std::string req = "POST " + path + " HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\n"
+            "Content-Length: " + std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+        ::send(fd, req.data(), static_cast<int>(req.size()), 0);
         char buf[64];
         while (::recv(fd, buf, sizeof(buf), 0) > 0) {}
     }
     sock_close(fd);
     return answered;
+}
+
+// `link` = a "<app-id>://..." the OS opened this binary with (see register_url_scheme); the running
+// instance gets it at /api/deeplink (which also raises its window) instead of a bare restore.
+bool ask_running_instance_to_show(const fs::path& work_dir, const std::string& link) {
+    std::ifstream in(work_dir / "port");
+    uint16_t port = 0;
+    if (!(in >> port) || port == 0) return false;
+    return link.empty() ? post_local(port, "/api/window/restore", "") : post_local(port, "/api/deeplink", link);
+}
+
+// Windows: "<app-id>://" links open THIS exe. Per user (HKCU, no admin) and rewritten on every launch,
+// so a portable .exe that was moved still gets them. Linux does the same with the .desktop file's
+// MimeType=x-scheme-handler/<app-id> (packaging, or --install-desktop).
+void register_url_scheme() {
+#ifdef _WIN32
+    wchar_t exe[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return;
+    std::wstring scheme(LUXDESKTOP_APP_ID, LUXDESKTOP_APP_ID + std::strlen(LUXDESKTOP_APP_ID));
+    std::wstring base = L"Software\\Classes\\" + scheme;
+    std::wstring name = L"URL:" + scheme;
+    std::wstring cmd = L"\"" + std::wstring(exe) + L"\" \"%1\"";
+    auto put = [](const std::wstring& key, const wchar_t* value, const std::wstring& data) {
+        RegSetKeyValueW(HKEY_CURRENT_USER, key.c_str(), value, REG_SZ, data.c_str(), static_cast<DWORD>((data.size() + 1) * sizeof(wchar_t)));
+    };
+    put(base, nullptr, name);
+    put(base, L"URL Protocol", L"");
+    put(base + L"\\shell\\open\\command", nullptr, cmd);
+#endif
 }
 
 fs::path xdg_data_home() {
@@ -216,11 +243,16 @@ int install_desktop(const std::shared_ptr<lux_script::Module>& mod, const fs::pa
     out << "[Desktop Entry]\n"
         << "Type=Application\n"
         << "Name=" << display_name << "\n"
-        << "Exec=\"" << exe_path << "\"\n"
+        << "Exec=\"" << exe_path << "\" %u\n"
         << "Terminal=false\n"
         << icon_line
-        << "Categories=Utility;\n";
+        << "Categories=Utility;\n"
+        << "MimeType=x-scheme-handler/" << LUXDESKTOP_APP_ID << ";\n";
     out.close();
+    // best-effort: that "<app-id>://" links open this launcher (without these tools, the next login does it)
+    std::string reg = "update-desktop-database '" + apps_dir.string() + "' 2>/dev/null; xdg-mime default '" + id +
+                      ".desktop' x-scheme-handler/" LUXDESKTOP_APP_ID " 2>/dev/null";
+    if (std::system(reg.c_str()) != 0) {}
 
     std::cout << "luxdesktop: installed " << desktop_file.string() << "\n"
               << "            find \"" << display_name << "\" in your application menu.\n";
@@ -239,8 +271,15 @@ int main(int argc, char** argv) {
     // window.lux, still there for minimizing/restoring an ALREADY-running
     // window on demand, a different case from "start minimized").
     bool start_minimized = false;
-    for (int i = 1; i < argc; ++i)
-        if (std::string(argv[i]) == "--minimized") start_minimized = true;
+    // "<app-id>://..." (a link the OS opened us with: localify://invite?... from a server's invite page)
+    std::string link;
+    const std::string scheme = std::string(LUXDESKTOP_APP_ID) + "://";
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--minimized") start_minimized = true;
+        else if (a.rfind(scheme, 0) == 0 && a.size() < 2000) link = a;
+    }
+    register_url_scheme();
 
     // Resources are extracted to a PERSISTENT directory (XDG data home), not
     // a temp one: anything the app writes next to its own sources at runtime
@@ -256,7 +295,7 @@ int main(int argc, char** argv) {
 #endif
     fs::create_directories(work_dir);
     if (!acquire_single_instance_lock(work_dir)) {
-        if (ask_running_instance_to_show(work_dir)) {
+        if (ask_running_instance_to_show(work_dir, link)) {
             std::cerr << "luxdesktop: already running; asked it to show its window\n";
             return 1;
         }
@@ -350,6 +389,8 @@ int main(int argc, char** argv) {
     });
     if (!wait_for_server(port, std::chrono::milliseconds(20000)))
         lux::log().warn("server did not come up in time, opening the window anyway");
+    // opened through a link: the app picks it up when its page loads (deeplink_take)
+    if (!link.empty()) post_local(port, "/api/deeplink", link);
 
     // The port is random by design (find_free_port() above), but external
     // tools on the same machine (a login script, a "now playing" widget)

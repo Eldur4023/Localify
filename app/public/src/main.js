@@ -28,6 +28,7 @@ import { mountSearchView } from "./views/search.js";
 import { alCambiarIdioma, t } from "./i18n/index.js";
 import { instalarCapturaDeErrores, mostrarError } from "./ui/error-overlay.js";
 import { vigilarActualizaciones } from "./ui/actualizacion.js";
+import { vigilarEnlaces } from "./shell/enlaces.js";
 /**
 * Quita el menú contextual del navegador donde no hay uno propio.
 *
@@ -117,6 +118,7 @@ function main() {
 	// activa solo si /api/capabilities lo dice.
 	void arrancarAudioWeb();
 	vigilarActualizaciones();
+	vigilarEnlaces();
 	const router = crearRouter(vista, {
 		home: (c) => mountHomeView(c),
 		search: (c, r) => mountSearchView(c, r),

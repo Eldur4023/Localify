@@ -25,10 +25,15 @@ fn bool srv_sesion():
 fn bool srv_activo():
     return srv_sesion() and state.get("srv_caido", "") == ""
 
+# Cabeceras de toda petición al servidor: el token y la versión de esta app. El servidor solo
+# atiende a su misma versión (426 si no; ver srv).
+fn Dict<string, string> srv_cab():
+    return { "Authorization": "Bearer " + ajuste("server_token", ""), "X-Localify-Version": version_actual() }
+
 # Petición con el token. Devuelve { status, body } o null si no hay conexión.
 # Un 401 borra el token (caducado o usuario borrado): la UI vuelve a pedir login.
 fn Json? srv(string metodo, string ruta, Json cuerpo = null, int timeout_ms = 4000):
-    Dict<string, string> cab = { "Authorization": "Bearer " + ajuste("server_token", "") }
+    Dict<string, string> cab = srv_cab()
     Json r = null
     try:
         string url = srv_base() + ruta
@@ -46,6 +51,10 @@ fn Json? srv(string metodo, string ruta, Json cuerpo = null, int timeout_ms = 40
         return null
     if jint(r["status"], 0) == 401:
         ajuste_poner("server_token", "")
+    # otra versión que la del servidor: sin conexión hasta actualizar (la sesión se conserva).
+    # srv_caido frena las tareas de fondo; server_status lo vuelve a mirar al abrir Social.
+    if jint(r["status"], 0) == 426:
+        state.set("srv_caido", "1", 300000)
     return { "status": jint(r["status"], 0), "body": r["body"] }
 
 # Social en tiempo real (events.lux, cada 1 s, en su propio bloque): mientras la vista
@@ -137,7 +146,7 @@ fn string srv_portada_url(string tid):
             return url
         string propia = os.path_join(covers_dir(), "usercover-" + tid + ".jpg")
         if jint(r["status"], 0) == 404 and os.is_file(propia):
-            Dict<string, string> cab = { "Authorization": "Bearer " + ajuste("server_token", "") }
+            Dict<string, string> cab = srv_cab()
             Json u = await http.put(srv_base() + "/tracks/" + sid + "/cover", { "k": "1" }, cab, { "files": { "cover": propia }, "timeout_ms": 30000 })
             if jint(u["status"], 0) < 300:
                 return url
@@ -205,7 +214,7 @@ fn string srv_url_stream(string tid):
     string sid = srv_id_cache(tid)
     if sid == "":
         return ""
-    return srv_base() + "/tracks/" + sid + "/audio\nAuthorization: Bearer " + ajuste("server_token", "")
+    return srv_base() + "/tracks/" + sid + "/audio\nAuthorization: Bearer " + ajuste("server_token", "") + "\r\nX-Localify-Version: " + version_actual()
 
 # Descarga la pista del servidor al temporal del trabajo y lo deja en
 # 'finalizing'. false = el servidor no la tiene (o no hay servidor): seguir con
@@ -218,7 +227,7 @@ fn bool srv_obtener(string tid):
         return false
     garantizar_biblioteca()
     string destino = os.path_join(biblioteca_raiz(), ".tmp", tid + ".webm")
-    Dict<string, string> cab = { "Authorization": "Bearer " + ajuste("server_token", "") }
+    Dict<string, string> cab = srv_cab()
     try:
         Json r = await http.get(srv_base() + "/tracks/" + sid + "/audio", cab, { "save_to": destino, "timeout_ms": 120000 })
         if jint(r["status"], 0) != 200 or os.file_size(destino) < 16384:
@@ -233,7 +242,7 @@ fn bool srv_obtener(string tid):
 
 # Sube un fichero de audio al servidor. true si lo guardó (o ya lo tenía).
 fn bool srv_poner(string tid, string ruta, string ext, string titulo, string artista, string album, int duracion_ms):
-    Dict<string, string> cab = { "Authorization": "Bearer " + ajuste("server_token", "") }
+    Dict<string, string> cab = srv_cab()
     try:
         Json r = await http.put(srv_base() + "/tracks/" + tid, {
             "title": titulo, "artist": artista, "album": album, "ext": ext,

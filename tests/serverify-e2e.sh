@@ -6,6 +6,8 @@
 REPO=$(cd "$(dirname "$0")/.." && pwd); LUX=$(realpath "${1:-$REPO/build/vendor/lux/lux}")
 W=$(mktemp -d); trap 'kill $P1 $P2 $P3 2>/dev/null; rm -rf "$W"' EXIT
 mkdir -p $W/srv $W/home; cp $REPO/server/server.lux $W/srv/
+# el servidor solo atiende a su versión (la de app/version.txt): los curl de aquí la mandan via .curlrc
+printf 'header = "X-Localify-Version: %s"\n' "$(tr -d '[:space:]' < $REPO/app/version.txt)" > $W/.curlrc; export CURL_HOME=$W
 (cd $W/srv && JWT_SECRET=e2e-secret-0123456789 exec $LUX server.lux --port 8794 >$W/srv.log 2>&1) & P1=$!
 cp -r $REPO/app $W/app; rm -rf $W/app/data
 (cd $W/app && HOME=$W/home exec $LUX . --port 8795 --no-watch >$W/cl.log 2>&1) & P2=$!
@@ -173,5 +175,14 @@ poll 8796
 ok "bob añade una canción y ana la ve en el servidor" "$(curl -s -H "Authorization: Bearer $TA" $B/playlists/$CSID)" '"title":"De Bob"'
 inv2 playlist_rename "{\"playlistId\":\"$BP\",\"name\":\"Renombrada por bob\"}" >/dev/null; poll 8796
 ok "bob no puede renombrarla en el servidor" "$(curl -s -H "Authorization: Bearer $TA" $B/playlists/$CSID)" '"name":"Conjunta"'
+# invitación por enlace: el código viene con su página en el servidor, y un localify:// llega a la página
+ok "invitar: código y enlace" "$(inv server_invite_create)" '"link":"http://127.0.0.1:8794/invite/'
+curl -s -X POST -H 'Content-Type: text/plain' -d 'localify://invite?server=127.0.0.1:8794&code=abc123' localhost:8795/api/deeplink
+ok "enlace: lo recoge la interfaz" "$(inv social_deeplink_take)" 'code=abc123'
+ok "enlace: una sola vez" "$(inv social_deeplink_take)" '"url":""'
+ok "enlace: solo localify://" "$(curl -s -o /dev/null -w %{http_code} -X POST -d 'https://x' localhost:8795/api/deeplink)" 400
+ok "borrar cuenta: contraseña mala" "$(inv server_delete_account '{"password":"nope"}')" error.bad_password
+ok "borrar cuenta" "$(inv server_delete_account '{"password":"secreto123"}' | grep -c code)" 0
+ok "borrada: sin sesión" "$(inv server_status)" '"loggedIn":false'
 ok "servidor caído no rompe la búsqueda" "$(kill $P1; sleep 0.5; inv search_query '{"q":"yellow"}')" '"queryId"'
 ((fail)) && { tail -15 $W/cl.log | grep -v warning; echo "--- equipo 2:"; grep -v warning $W/cl2.log | tail -8; exit 1; }; echo "todo ok"
