@@ -6,6 +6,7 @@
 * funciona exactamente igual: aquí solo se pide conectar.
 */
 import { player, social } from "../ipc/client.js";
+import { alRecibirTipo } from "../ipc/events.js";
 import { alCambiarIdioma, t } from "../i18n/index.js";
 import { textoDeError } from "../ui/publicar-playlist.js";
 import { mostrarError } from "../ui/error-overlay.js";
@@ -429,9 +430,21 @@ export function mountSocialView(contenedor, ruta) {
 	}
 	void cargar();
 	const dejarIdioma = alCambiarIdioma(() => void pintar());
+	// En vivo: el backend espera cambios del servidor mientras la vista está abierta y avisa con
+	// `socialChanged` (alguien empieza a escuchar algo, una playlist nueva...). Se repinta con
+	// datos frescos, sin la pasada de caché; no mientras se escribe en un campo, para no borrarlo.
+	void social.watch(true).catch(() => {});
+	const dejarActividad = alRecibirTipo("socialChanged", () => {
+		const foco = document.activeElement;
+		if (!estado?.loggedIn || el.contains(foco) && foco.matches("input, textarea, select")) return;
+		const vivo = () => pintarUna(pasada += 1);
+		cola = cola.then(vivo, vivo);
+	});
 	return { destroy() {
 		destruida = true;
 		dejarIdioma();
+		dejarActividad();
+		void social.watch(false).catch(() => {});
 		el.remove();
 	} };
 }

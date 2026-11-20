@@ -80,6 +80,7 @@ function diferir(antes, ahora) {
 	if (ahora.playlistStamp !== antes.playlistStamp) emitir("playlistChanged", { kind: ahora.playlistChangeKind ?? "" });
 	if (ahora.settingsStamp !== antes.settingsStamp) emitir("settingsChanged", {});
 	if (ahora.statsStamp !== antes.statsStamp) emitir("statsChanged", {});
+	if (ahora.socialStamp !== antes.socialStamp) emitir("socialChanged", {});
 	// salto pedido por otro equipo (reproducción sincronizada): el `<audio>` del móvil no tiene motor
 	if (ahora.syncSeek && ahora.syncSeek !== antes.syncSeek) {
 		emitir("remoteSeek", { positionMs: Number(ahora.syncSeek.split(":")[1]) || 0 });

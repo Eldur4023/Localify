@@ -74,6 +74,10 @@ every "500ms":
 every "1s":
     sync_escuchar_tick()
 
+# Actividad de los demás en Social, en vivo (petición larga; serverify.lux)
+every "1s":
+    social_tick()
+
 # Importaciones de discografía que se pidieron al abrir una ficha en el móvil:
 # una por tick, en su propio bloque para que una importación lenta no retrase
 # la sincronización ni el resto de tareas.
@@ -125,6 +129,7 @@ fn Json construir_snapshot_de(EstadoCola e):
         "playlistChangeKind": s_pl_kind,
         "settingsStamp": s_aj,
         "statsStamp": state.get("stamp_stats", ""),
+        "socialStamp": state.get("stamp_social", ""),
         "syncSeek": state.get("sync_seek", ""),
         "downloads": descargas_activas(),
         "remoteReady": ready,

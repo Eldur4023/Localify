@@ -246,6 +246,17 @@ fn string id_de_referencia(string id, string titulo_norm, string artista_norm, i
         return id
     return id_por_identidad(titulo_norm, artista_norm, duracion_ms)
 
+# Huella de lo que se ve en Social; cambia cuando alguien empieza o deja de escuchar algo,
+# entra una persona, se crea/toca/borra una playlist o se registra una escucha.
+fn string huella_social():
+    List<Json> r = await sqlite.query("""select
+        coalesce((select group_concat(user_id || ':' || title || ':' || artist, '|') from
+            (select user_id, title, artist from presence where title != '' and updated_at > unixepoch() - 150 order by user_id)), '')
+        || '#' || (select count(*) from users)
+        || '#' || (select count(*) || '.' || coalesce(max(updated_at), 0) from playlists)
+        || '#' || (select coalesce(max(rowid), 0) from plays) as h""")
+    return hash.sha256(str(r[0]["h"])).slice(0, 16)
+
 # nivel de acceso a una playlist: "owner" | "member" | "reader" | "" (ninguno)
 fn string acceso(int pid, int uid):
     List<Json> p = await sqlite.query("select owner_id, visibility from playlists where id = ?", pid)
@@ -461,6 +472,20 @@ group("/api"):
             on conflict(user_id) do update set title = excluded.title, artist = excluded.artist, updated_at = unixepoch()""",
             yo(), s_of(b, "title", "").slice(0, 200), s_of(b, "artist", "").slice(0, 200))
         return status(204)
+
+    # Social en tiempo real: huella de lo que se ve en Social (quién escucha qué, personas,
+    # playlists, escuchas). Misma espera larga que /playback: responde en cuanto cambia la
+    # huella respecto a `since` (o 204 pasados `wait` s, máx. 25). El aviso de cada minuto
+    # mientras suena no la cambia; dejar de sonar 150 s sí.
+    get endpoint("/activity", string since = "", int wait = 0):
+        int hasta = int(time.now()) + (wait > 25 ? 25 : (wait < 0 ? 0 : wait)) * 1000
+        string rev = huella_social()
+        while rev == since and int(time.now()) < hasta:
+            await sleep(400)
+            rev = huella_social()
+        if rev == since:
+            return status(204)
+        return { "rev": rev }
 
     # ── reproducción sincronizada ──
     # PUT: un equipo publica lo que suena (pista + ventana de cola + posición + play/pausa).

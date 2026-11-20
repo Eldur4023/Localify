@@ -82,6 +82,11 @@ fn Json cmd_social(string cmd, Json args):
         if jget(args, "enabled") != true and srv_sesion():
             srv("PUT", "/presence", { "title": "", "artist": "" })
         return null
+    # Social abierta: mientras lo esté, social_tick espera cambios del servidor (actividad en vivo)
+    if cmd == "social_watch":
+        state.set("social_abierta", jget(args, "enabled") == true ? "1" : "")
+        state.set("social_rev", "")
+        return null
     # "Escuchando ahora": en silencio si no hay sesión o el usuario lo apagó
     if cmd == "social_presence":
         if not srv_sesion() or ajuste("server_presence", "1") != "1":

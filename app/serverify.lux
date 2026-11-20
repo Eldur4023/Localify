@@ -48,6 +48,24 @@ fn Json? srv(string metodo, string ruta, Json cuerpo = null, int timeout_ms = 40
         ajuste_poner("server_token", "")
     return { "status": jint(r["status"], 0), "body": r["body"] }
 
+# Social en tiempo real (events.lux, cada 1 s, en su propio bloque): mientras la vista
+# Social está abierta, espera larga a GET /activity; cuando cambia la huella, stamp_social
+# viaja en la foto de eventos y la vista se repinta. La primera respuesta solo da la huella.
+# Un servidor antiguo (sin /activity) responde al momento: entonces se espacia a 5 s.
+fn void social_tick():
+    if state.get("social_abierta", "") == "" or not srv_activo() or state.get("social_descanso", "") != "":
+        return
+    string previa = state.get("social_rev", "")
+    int t0 = time.now()
+    Json? r = srv("GET", "/activity?since=" + http.url_encode(previa) + "&wait=25", null, 30000)
+    if r != null and r["status"] == 200:
+        string rev = jstr(r["body"]["rev"], "")
+        if previa != "" and rev != previa:
+            state.set("stamp_social", rev)
+        state.set("social_rev", rev)
+    if time.now() - t0 < 2000 and (r == null or r["status"] != 200 or previa != ""):
+        state.set("social_descanso", "1", 5000)
+
 # ─── Atajos de descarga y búsqueda ───────────────────────────────────────────
 
 fn PistaCatalogo srv_pista(Json it):

@@ -75,6 +75,14 @@ ok "presencia" "$(j PUT '{"title":"Yellow","artist":"Coldplay"}' $B/presence)" 2
 ok "escuchando en usuarios" "$(curl -s -H "Authorization: Bearer $T" $B/users)" '"nowPlaying":{"title":"Yellow"'
 j PUT '{"title":"","artist":""}' $B/presence >/dev/null
 ok "parado no sale" "$(curl -s -H "Authorization: Bearer $T" $B/users | grep -c nowPlaying)" 0
+# actividad en tiempo real: la espera larga responde en cuanto otra persona empieza a escuchar
+AV=$(curl -s -H "Authorization: Bearer $T" "$B/activity" | sed 's/.*"rev":"\([^"]*\)".*/\1/')
+ok "actividad sin cambios: 204" "$(curl -s -o /dev/null -w %{http_code} -H "Authorization: Bearer $T" "$B/activity?since=$AV&wait=1")" 204
+(sleep 1; curl -s -X PUT -H 'Content-Type: application/json' -H "Authorization: Bearer $TB" -d '{"title":"Fix You","artist":"Coldplay"}' $B/presence >/dev/null) &
+t0=$(date +%s); AR=$(curl -s -H "Authorization: Bearer $T" "$B/activity?since=$AV&wait=10"); t1=$(date +%s)
+ok "actividad: cambia al escuchar otro" "$AR" '"rev":"'
+ok "actividad: responde sin agotar la espera" "$((t1 - t0 < 5))" 1
+curl -s -X PUT -H 'Content-Type: application/json' -H "Authorization: Bearer $TB" -d '{"title":"","artist":""}' $B/presence >/dev/null
 T=$TB; ok "pública legible" "$(curl -s -H "Authorization: Bearer $T" $B/playlists/1)" '"access":"reader"'
 ok "lector no edita" "$(j POST '{"tracks":[{"id":"x","title":"t"}]}' $B/playlists/1/tracks)" 403
 T=$TA; ok "añadir miembro" "$(j POST '{"username":"bob"}' $B/playlists/1/members)" 204

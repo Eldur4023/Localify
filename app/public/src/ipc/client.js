@@ -352,6 +352,8 @@ export const social = {
 	removeDevice: (deviceId) => invoke("social_device_remove", { deviceId }),
 	/** Avisa de lo que suena (título vacío = nada); el servidor lo muestra en Social. */
 	presence: (title, artist) => invoke("social_presence", { title, artist }),
+	/** Social abierta (true) o cerrada: mientras lo esté, el backend avisa de la actividad con `socialChanged`. */
+	watch: (enabled) => invoke("social_watch", { enabled }),
 	/** Sube un lote de la biblioteca descargada; repetir con `next` hasta `done`. */
 	/** Descarga de la nube: trae biblioteca, favoritos y playlists que no tengo; nunca baja lo que ya tengo. */
 	pull: () => invoke("server_pull"),
