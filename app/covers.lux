@@ -204,6 +204,7 @@ post endpoint("/api/cover/playlist/:id", string id, File imagen):
     string destino = os.path_join(d, "playlist-" + id + ".jpg")
     await os.move(os.path_join(d, nombre), destino)
     await sqlite.exec("update playlists set cover_path = ?, updated_at = unixepoch() where id = ?", "covers/playlist-" + id + ".jpg", id)
+    tocar_playlists()
     return { "ok": true }
 
 fn Json? portada_playlist_respuesta(string id):

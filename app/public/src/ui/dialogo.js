@@ -77,14 +77,11 @@ export function pedirTextoConImagen(opciones) {
 			boton.className = "boton boton--sutil";
 			boton.textContent = rotulo;
 			boton.addEventListener("click", () => {
-				void elegir().then((ruta) => {
-					if (!ruta) return;
-					imagenElegida = ruta;
-					// Solo el nombre del fichero: la ruta completa no cabe y no dice
-					// nada que el usuario no sepa ya. No se previsualiza la imagen
-					// porque el WebView no puede leer ficheros sueltos del disco, y
-					// abrirle esa puerta por una miniatura no compensa.
-					muestra.textContent = ruta.split(/[\\/]/).pop() ?? "";
+				void elegir().then((imagen) => {
+					if (!imagen) return;
+					imagenElegida = imagen;
+					// Solo el nombre del fichero: basta para confirmar cuál se eligió.
+					muestra.textContent = imagen.name;
 				});
 			});
 			fila.append(boton, muestra);

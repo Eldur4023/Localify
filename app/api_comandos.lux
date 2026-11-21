@@ -367,6 +367,9 @@ fn Json cmd_importar_ficheros(Json args):
             List<Json> streams = jlist(jget(info, "streams"))
             if len(streams) > 0:
                 codec = jstr(streams[0]["codec_name"], "")
+        # Sin ffprobe (Android) vale la duración que midió el navegador al subirlo.
+        if dur <= 0.0:
+            dur = jdbl(jget(args, "durMs"), 0.0) / 1000.0
         if dur <= 0.0:
             ilegibles = ilegibles + 1
             continue
@@ -375,6 +378,9 @@ fn Json cmd_importar_ficheros(Json args):
         string titulo = jstr(tags["title"], "")
         if titulo == "":
             titulo = os.path_basename(ruta)
+            int pt = ultimo_punto(titulo)
+            if pt > 0:
+                titulo = titulo.slice(0, pt)
         string artista = jstr(tags["artist"], "")
         string album = jstr(tags["album"], "")
         string fecha = jstr(tags["date"], "")
@@ -423,7 +429,7 @@ fn Json cmd_importar_ficheros(Json args):
             os.file_size(destino), int(dur * 1000.0))
         # portada incrustada en el fichero (si la hay) como portada de la pista
         string propia = os.path_join(covers_dir(), "usercover-" + tid + ".jpg")
-        if not os.is_file(propia):
+        if not os.is_file(propia) and hay_binario("ffmpeg"):
             await os.run("ffmpeg", ["-v", "error", "-y", "-i", destino, "-an", "-map", "0:v:0", "-frames:v", "1", propia])
         importadas = importadas + 1
         ids_nuevos.add(tid)
@@ -432,14 +438,14 @@ fn Json cmd_importar_ficheros(Json args):
 
 # Subida desde el navegador (selector múltiple / arrastrar y soltar): el fichero va a
 # .tmp, se importa como cualquier otro y el temporal se borra (import copia el audio).
-post endpoint("/api/import/upload", File audio):
+post endpoint("/api/import/upload", File audio, int durMs = 0):
     garantizar_biblioteca()
     string d = os.path_join(biblioteca_raiz(), ".tmp")
     string nombre = audio.save(d)
     if nombre == "":
         return status(500)
     string tmp = os.path_join(d, nombre)
-    Json r = await cmd_importar_ficheros({ "paths": [tmp] })
+    Json r = await cmd_importar_ficheros({ "paths": [tmp], "durMs": durMs })
     os.remove_file(tmp)
     return r
 

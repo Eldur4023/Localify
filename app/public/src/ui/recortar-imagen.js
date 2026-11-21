@@ -28,6 +28,24 @@ export function recortarImagen(archivo, salida = 512, aspecto = 1) {
 		img.src = url;
 	});
 }
+/**
+* Abre el selector de ficheros del navegador (vale en Android y en la web, donde no hay
+* diálogo GTK) y recorta la imagen elegida. Resuelve al JPEG (`File`) o `null` si se cancela.
+*/
+export function elegirImagen(salida = 600) {
+	return new Promise((resolver) => {
+		const selector = document.createElement("input");
+		selector.type = "file";
+		selector.accept = "image/*";
+		selector.addEventListener("cancel", () => resolver(null));
+		selector.addEventListener("change", () => {
+			const archivo = selector.files?.[0];
+			if (!archivo) return resolver(null);
+			void recortarImagen(archivo, salida).then((blob) => resolver(blob ? new File([blob], archivo.name, { type: "image/jpeg" }) : null));
+		});
+		selector.click();
+	});
+}
 function abrir(img, url, salida, aspecto, resolver) {
 	const dlg = nodo("dialog", `dialogo recorte${aspecto === 1 ? "" : " recorte--ancho"}`);
 	const form = nodo("form");

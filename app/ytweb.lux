@@ -138,6 +138,22 @@ fn double yt_web_puntuar(string consulta_norm, Json cand):
 fn List<Json> yt_web_puntuados(string consulta, int limite):
     if consulta.trim() == "":
         return []
+    # URL de YouTube: se busca por su id y vale solo ese vídeo, sin puntuar (el
+    # texto de la URL no se parece al título y el umbral lo tiraría).
+    string vid_url = video_id_de_url(consulta.trim())
+    if vid_url != "":
+        List<Json> por_id = yt_web_candidatos(vid_url, 5)
+        for int i in range(0, len(por_id)):
+            Json c = por_id[i]
+            if jstr(c["video_id"], "") == vid_url:
+                return [{
+                    "id": vid_url,
+                    "title": jstr(c["title"], ""),
+                    "artistDisplay": jstr(c["channel"], ""),
+                    "durationMs": jint(c["duration_ms"], 0),
+                    "viewCount": jint(c["view_count"], 0)
+                }]
+        return []
     string consulta_norm = normalizar(consulta)
     List<Json> candidatos = yt_web_candidatos(consulta, limite * 3)
     List<Json> puntuados = []

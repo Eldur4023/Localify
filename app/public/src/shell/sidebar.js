@@ -17,6 +17,7 @@ import { abrirMenu } from "../ui/menu.js";
 import { opcionesDePlaylist } from "../ui/opciones-playlist.js";
 import { arrastrable, reordenable, zonaDeReordenacion, zonaDeSoltado, TIPO_PISTAS, TIPO_PLAYLIST } from "../ui/dnd.js";
 import { nodo } from "../ui/dom.js";
+import { elegirImagen } from "../ui/recortar-imagen.js";
 export function mountSidebar(contenedor, router) {
 	contenedor.replaceChildren();
 	// ── Navegación principal ────────────────────────────────────────────────
@@ -137,7 +138,7 @@ export function mountSidebar(contenedor, router) {
 			maxLength: 100,
 			imagen: {
 				etiqueta: t("playlist.cover_choose"),
-				elegir: () => api.pickImage()
+				elegir: () => elegirImagen()
 			}
 		});
 		if (!respuesta) return;
@@ -149,7 +150,7 @@ export function mountSidebar(contenedor, router) {
 			// castigar el intento de decorarla.
 			if (respuesta.imagen) {
 				try {
-					await api.setCover(creada.id, respuesta.imagen);
+					await api.uploadCover(creada.id, respuesta.imagen);
 				} catch {}
 			}
 			refrescar();

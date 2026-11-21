@@ -15,6 +15,7 @@ import { playlists } from "../ipc/client.js";
 import { t } from "../i18n/index.js";
 import { confirmar, pedirTexto } from "./dialogo.js";
 import { mostrarError } from "./error-overlay.js";
+import { elegirImagen } from "./recortar-imagen.js";
 /** Pide el nombre nuevo y lo aplica. */
 export async function renombrar(p, reacciones) {
 	const nuevo = await pedirTexto({
@@ -59,17 +60,14 @@ async function describir(p, reacciones) {
 	reacciones.alCambiar?.();
 }
 /**
-* Abre el selector del sistema y aplica la imagen elegida.
-*
-* El backend la **copia** a la biblioteca: guardar la ruta original dejaría la
-* foto rota en cuanto el usuario vaciara Descargas o desconectara el disco de
-* donde salió.
+* Abre el selector, recorta la imagen elegida y la sube: el backend guarda su
+* propia copia en la biblioteca, así no depende de dónde estaba el original.
 */
 export async function cambiarFoto(p, reacciones) {
-	const ruta = await playlists.pickImage();
-	if (!ruta) return;
+	const imagen = await elegirImagen();
+	if (!imagen) return;
 	try {
-		await playlists.setCover(p.id, ruta);
+		await playlists.uploadCover(p.id, imagen);
 		reacciones.alCambiar?.();
 	} catch (e) {
 		mostrarError(t("playlist.cover_failed"), String(e));

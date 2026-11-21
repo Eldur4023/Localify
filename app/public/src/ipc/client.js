@@ -134,7 +134,17 @@ export const library = {
 	uploadImport: async (archivo) => {
 		const f = new FormData();
 		f.append("audio", archivo, archivo.name);
-		const r = await fetch("/api/import/upload", {
+		// Sin ffprobe (Android) el servidor no sabe la duración: la mide el navegador.
+		const durMs = await new Promise((ok) => {
+			const a = new Audio();
+			const url = URL.createObjectURL(archivo);
+			const fin = (v) => { URL.revokeObjectURL(url); ok(Number.isFinite(v) ? Math.round(v * 1000) : 0); };
+			a.onloadedmetadata = () => fin(a.duration);
+			a.onerror = () => fin(0);
+			a.preload = "metadata";
+			a.src = url;
+		});
+		const r = await fetch(`/api/import/upload?durMs=${durMs}`, {
 			method: "POST",
 			body: f
 		});
@@ -249,12 +259,16 @@ export const playlists = {
 	import: (urlOrId) => invoke("playlist_import", { urlOrId }),
 	/** Encola la descarga de todas las pistas que falten. */
 	download: (playlistId) => invoke("playlist_download", { playlistId }),
-	/** Abre el selector del sistema. `null` si se cancela. */
-	pickImage: () => invoke("playlist_pick_image"),
-	setCover: (playlistId, imagePath) => invoke("playlist_set_cover", {
-		playlistId,
-		imagePath
-	}),
+	/** Sube la foto propia de la playlist (JPEG ya recortado). */
+	uploadCover: async (playlistId, blob) => {
+		const f = new FormData();
+		f.append("imagen", blob, "cover.jpg");
+		const r = await fetch(`/api/cover/playlist/${encodeURIComponent(playlistId)}`, {
+			method: "POST",
+			body: f
+		});
+		if (!r.ok) throw new Error(`HTTP ${r.status}`);
+	},
 	clearCover: (playlistId) => invoke("playlist_clear_cover", { playlistId })
 };
 export const home = { sections: () => invoke("home_sections") };
